@@ -1,0 +1,3010 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IONOS OpenShift Scaling Tool</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      padding: 2rem 1rem;
+    }
+
+    .container { max-width: 1100px; margin: 0 auto; }
+
+    header {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 2rem;
+      padding: 0.5rem 0;
+    }
+    header .header-title { text-align: center; flex: 1; }
+    header h1 { font-size: 1.75rem; font-weight: 700; color: #38bdf8; letter-spacing: 0.03em; margin: 0; }
+    header p  { color: #94a3b8; margin-top: 0.4rem; font-size: 0.95rem; margin-bottom: 0; }
+    header .header-logo { flex: 0 0 auto; }
+    header .header-logo img { display: block; }
+
+    .card {
+      background: #1e2130;
+      border: 1px solid #2d3348;
+      border-radius: 12px;
+      padding: 1.75rem;
+      margin-bottom: 1.5rem;
+    }
+    /* Wizard + CSR card appear together — join them as one visual unit */
+    #add-node-card.join-next {
+      margin-bottom: 1px;
+      border-bottom-left-radius: 0;
+      border-bottom-right-radius: 0;
+    }
+    #csrs-card.join-prev {
+      border-top-left-radius: 0;
+      border-top-right-radius: 0;
+    }
+
+    .card h2 {
+      font-size: 1rem;
+      font-weight: 600;
+      color: #7dd3fc;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 1.25rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .card-section-title {
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      margin: 1.25rem 0 0.75rem;
+      padding-top: 1.25rem;
+      border-top: 1px solid #2d3348;
+    }
+
+    .hidden { display: none !important; }
+
+    /* Form */
+    .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    .form-group { display: flex; flex-direction: column; gap: 0.4rem; }
+    .form-group.full-width { grid-column: 1 / -1; }
+    label { font-size: 0.85rem; color: #94a3b8; font-weight: 500; }
+    .field-note { font-size: 0.75rem; color: #4b5563; margin-top: 0.15rem; }
+
+    input[type="text"], input[type="password"], input[type="number"], select {
+      background: #0f1117;
+      border: 1px solid #374151;
+      border-radius: 8px;
+      padding: 0.65rem 0.9rem;
+      color: #e2e8f0;
+      font-size: 0.95rem;
+      transition: border-color 0.2s;
+      outline: none;
+      width: 100%;
+    }
+    input:focus, select:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,0.12); }
+    input::placeholder { color: #4b5563; }
+    input[type="number"] { width: 100px; }
+
+    select {
+      appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2394a3b8' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 0.9rem center;
+      padding-right: 2.5rem;
+      cursor: pointer;
+    }
+    select option { background: #1e2130; }
+
+    /* Buttons */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.45rem;
+      border: none;
+      border-radius: 8px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s, transform 0.1s;
+    }
+    .btn:active { transform: scale(0.97); }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    .btn-primary  { background: #0369a1; color: #fff; padding: 0.7rem 1.5rem; }
+    .btn-primary:hover:not(:disabled)  { background: #0284c7; }
+
+    .btn-sm { background: #0369a1; color: #fff; padding: 0.28rem 0.75rem; font-size: 0.8rem; border-radius: 6px; }
+    .btn-sm:hover:not(:disabled) { background: #0284c7; }
+
+    .btn-approve { background: #065f46; color: #6ee7b7; padding: 0.6rem 1.2rem; }
+    .btn-approve:hover:not(:disabled) { background: #047857; }
+
+    .btn-create  { background: #4c1d95; color: #c4b5fd; padding: 0.7rem 1.5rem; }
+    .btn-create:hover:not(:disabled)  { background: #5b21b6; }
+
+    .btn-full { width: 100%; margin-top: 1.25rem; }
+
+    .btn-link {
+      background: none;
+      border: none;
+      color: #38bdf8;
+      font-size: 0.82rem;
+      cursor: pointer;
+      padding: 0;
+      text-decoration: underline;
+    }
+
+    .spinner {
+      width: 16px; height: 16px;
+      border: 2.5px solid rgba(255,255,255,0.25);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Error / info boxes */
+    .error-box {
+      display: none;
+      background: #450a0a;
+      border: 1px solid #991b1b;
+      border-radius: 8px;
+      padding: 0.85rem 1rem;
+      color: #fca5a5;
+      font-size: 0.88rem;
+      margin-top: 1rem;
+    }
+    .info-box {
+      background: #0c1a2e;
+      border: 1px solid #1e3a5f;
+      border-radius: 8px;
+      padding: 0.85rem 1rem;
+      color: #7dd3fc;
+      font-size: 0.85rem;
+      margin-top: 1rem;
+      line-height: 1.6;
+    }
+    .info-box strong { color: #e2e8f0; }
+    .success-box {
+      background: #052e16;
+      border: 1px solid #166534;
+      border-radius: 8px;
+      padding: 0.85rem 1rem;
+      color: #6ee7b7;
+      font-size: 0.88rem;
+      margin-top: 1rem;
+    }
+
+    /* Connected strip */
+    #connected-strip {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      background: #0f1117;
+      border: 1px solid #2d3348;
+      border-radius: 8px;
+      padding: 0.75rem 1rem;
+      font-size: 0.88rem;
+    }
+    #connected-strip .url { color: #38bdf8; font-family: 'Courier New', monospace; word-break: break-all; }
+    #disconnect-btn { color: #f87171; background: none; border: none; cursor: pointer; font-size: 0.82rem; font-weight: 600; white-space: nowrap; }
+    #disconnect-btn:hover { text-decoration: underline; }
+
+    /* Stat row */
+    .stat-row { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem; }
+    .stat-mini {
+      background: #0f1117;
+      border: 1px solid #2d3348;
+      border-radius: 10px;
+      padding: 0.85rem 1.25rem;
+      min-width: 110px;
+      text-align: center;
+      flex: 1;
+    }
+    .stat-mini .sm-label { font-size: 0.72rem; color: #64748b; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.3rem; }
+    .stat-mini .sm-value { font-size: 1.5rem; font-weight: 700; }
+    .sm-masters  { color: #38bdf8; }
+    .sm-workers  { color: #34d399; }
+    .sm-notready { color: #f87171; }
+    .sm-neutral  { color: #e2e8f0; }
+
+    .version-pill {
+      display: inline-block;
+      background: #1e3a5f;
+      color: #7dd3fc;
+      border-radius: 999px;
+      padding: 0.25rem 0.85rem;
+      font-size: 0.85rem;
+      font-weight: 600;
+      margin-bottom: 1rem;
+    }
+    .refresh-ts { font-size: 0.75rem; color: #4b5563; margin-top: 0.5rem; }
+
+    /* Tables */
+    .table-wrapper { overflow-x: auto; margin-top: 0.5rem; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+    thead th {
+      text-align: left;
+      padding: 0.6rem 1rem;
+      background: #0f1117;
+      color: #64748b;
+      font-weight: 600;
+      font-size: 0.76rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      border-bottom: 1px solid #2d3348;
+    }
+    tbody tr { border-bottom: 1px solid #1e2130; transition: background 0.15s; }
+    tbody tr:hover { background: #1a1f2e; }
+    tbody td { padding: 0.6rem 1rem; color: #cbd5e1; vertical-align: middle; }
+    .no-data { color: #4b5563; font-style: italic; }
+    .mono { font-family: 'Courier New', monospace; font-size: 0.83rem; color: #94a3b8; }
+
+    /* Badges */
+    .badge {
+      display: inline-block;
+      padding: 0.18rem 0.55rem;
+      border-radius: 999px;
+      font-size: 0.73rem;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .badge-master  { background: #1e3a5f; color: #7dd3fc; }
+    .badge-worker  { background: #14532d; color: #6ee7b7; }
+    .badge-unknown { background: #2d2d3a; color: #94a3b8; }
+
+    .status-ready    { color: #34d399; font-weight: 600; }
+    .status-notready { color: #f87171; font-weight: 600; }
+
+    /* Scale input */
+    .scale-cell { display: flex; align-items: center; gap: 0.5rem; }
+
+    /* Poll bar */
+    #poll-bar {
+      display: none;
+      margin-top: 1rem;
+      background: #0f1117;
+      border: 1px solid #2d3348;
+      border-radius: 8px;
+      padding: 0.75rem 1rem;
+      font-size: 0.83rem;
+      color: #94a3b8;
+      align-items: center;
+      gap: 0.75rem;
+    }
+    #poll-bar.active { display: flex; }
+    .poll-spin { width: 13px; height: 13px; border: 2px solid #2d3348; border-top-color: #38bdf8; border-radius: 50%; animation: spin 1s linear infinite; flex-shrink: 0; }
+    .poll-track { flex: 1; height: 4px; background: #2d3348; border-radius: 2px; overflow: hidden; }
+    .poll-fill  { height: 100%; background: #38bdf8; border-radius: 2px; transition: width 0.5s; }
+
+    /* CSR */
+    textarea {
+      background: #0f1117;
+      border: 1px solid #374151;
+      border-radius: 8px;
+      padding: 0.65rem 0.9rem;
+      color: #e2e8f0;
+      font-size: 0.82rem;
+      font-family: 'Courier New', monospace;
+      transition: border-color 0.2s;
+      outline: none;
+      width: 100%;
+      resize: vertical;
+    }
+    textarea:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,0.12); }
+    textarea::placeholder { color: #4b5563; }
+
+    /* ISO automation step list */
+    .iso-step {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.6rem;
+      padding: 0.35rem 0;
+      font-size: 0.87rem;
+      color: #94a3b8;
+    }
+    .iso-step-icon { flex-shrink: 0; width: 1.1rem; text-align: center; font-size: 0.85rem; }
+    .iso-step[data-status="ok"]      { color: #6ee7b7; }
+    .iso-step[data-status="working"] { color: #7dd3fc; }
+    .iso-step[data-status="error"]   { color: #fca5a5; }
+    .iso-step[data-status="pending"] { color: #4b5563; }
+
+    .iso-log {
+      background: #0a0d14;
+      border: 1px solid #2d3348;
+      border-radius: 8px;
+      padding: 0.75rem 1rem;
+      margin-top: 0.75rem;
+      max-height: 220px;
+      overflow-y: auto;
+      font-family: 'Courier New', monospace;
+      font-size: 0.76rem;
+      color: #94a3b8;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    input[type="checkbox"] { width: 15px; height: 15px; cursor: pointer; accent-color: #38bdf8; }
+    .approve-result { margin-top: 0.75rem; font-size: 0.85rem; padding: 0.6rem 0.9rem; border-radius: 6px; }
+    .approve-ok  { background: #052e16; color: #6ee7b7; }
+    .approve-err { background: #450a0a; color: #fca5a5; }
+
+    /* Step indicator for add-node wizard */
+    .steps {
+      display: flex;
+      gap: 0;
+      margin-bottom: 1.5rem;
+      border-radius: 8px;
+      overflow: hidden;
+      border: 1px solid #2d3348;
+    }
+    .step {
+      flex: 1;
+      padding: 0.6rem 0.5rem;
+      text-align: center;
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: #4b5563;
+      background: #0f1117;
+      border-right: 1px solid #2d3348;
+    }
+    .step:last-child { border-right: none; }
+    .step.active  { background: #1e3a5f; color: #7dd3fc; }
+    .step.done    { background: #052e16; color: #6ee7b7; }
+
+    @media (max-width: 680px) {
+      .form-grid { grid-template-columns: 1fr; }
+      .form-group.full-width { grid-column: auto; }
+      .stat-row { flex-direction: column; }
+      .steps { flex-direction: column; }
+      .step { border-right: none; border-bottom: 1px solid #2d3348; }
+    }
+  </style>
+</head>
+<body>
+<div class="container">
+
+  <header>
+    <!-- IONOS logo — top left -->
+    <div class="header-logo">
+      <img src="ionos-logo.svg" height="52" alt="IONOS Cloud" />
+    </div>
+
+    <!-- Title — centre -->
+    <div class="header-title">
+      <h1>IONOS OpenShift Scaling Tool</h1>
+      <p>Connect to your OpenShift cluster and IONOS Cloud account to manage worker nodes</p>
+    </div>
+
+    <!-- Red Hat OpenShift logo — top right -->
+    <div class="header-logo">
+      <img src="openshift-logo.png" height="52" alt="Red Hat OpenShift" />
+    </div>
+  </header>
+
+  <!-- ── Card 1: Connection ─────────────────────────────────────────────── -->
+  <div class="card" id="connect-card">
+    <h2>&#128279; Connection</h2>
+
+    <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.6rem;flex-wrap:wrap">
+      <label for="env-file-upload"
+        style="display:inline-flex;align-items:center;gap:0.4rem;background:#1e293b;border:1px solid #334155;
+               color:#94a3b8;border-radius:6px;padding:0.4rem 0.9rem;font-size:0.82rem;cursor:pointer;
+               white-space:nowrap;user-select:none">
+        &#128194; Load .env file
+      </label>
+      <input type="file" id="env-file-upload" accept=".env,text/plain" style="display:none" />
+      <button id="download-env-example"
+        style="display:inline-flex;align-items:center;gap:0.4rem;background:none;border:1px solid #334155;
+               color:#94a3b8;border-radius:6px;padding:0.4rem 0.9rem;font-size:0.82rem;cursor:pointer;
+               white-space:nowrap;user-select:none">
+        &#11015; Download .env.example
+      </button>
+      <span id="env-file-banner" style="display:none;font-size:0.78rem;color:#6ee7b7">
+        &#10003; Credentials loaded from .env file
+      </span>
+    </div>
+    <div style="font-size:0.75rem;color:#4b5563;margin-bottom:1.25rem">
+      New here? Download the template, fill in your credentials, rename the file from <strong style="color:#64748b">env.example.txt</strong> to <strong style="color:#64748b">.env</strong>, then load it with the button above.
+    </div>
+
+    <div id="connect-form">
+      <div class="card-section-title" style="margin-top:0;border-top:none;padding-top:0">OpenShift Cluster</div>
+      <div class="form-grid">
+        <div class="form-group full-width">
+          <label for="api-url">Cluster API URL</label>
+          <input type="text" id="api-url" placeholder="https://api.your-cluster.example.com:6443" />
+          <div class="field-note">The OpenShift API server endpoint — port 6443 by default</div>
+        </div>
+        <div class="form-group full-width">
+          <label for="ocp-token">OpenShift Bearer Token</label>
+          <input type="password" id="ocp-token" placeholder="Paste token from: oc whoami -t" autocomplete="off" />
+          <div class="field-note">Obtain with <code style="color:#38bdf8">oc login</code> then <code style="color:#38bdf8">oc whoami -t</code></div>
+        </div>
+      </div>
+
+      <div class="card-section-title">OpenShift Management Host <span style="color:#4b5563;font-weight:400;font-size:0.78rem;text-transform:none;letter-spacing:0">(optional — enables automated ISO generation in step 2)</span></div>
+      <p style="font-size:0.8rem;color:#4b5563;margin-bottom:0.75rem">The bastion / management server where <code style="color:#38bdf8">oc</code> is installed and your cluster kubeconfig is present. SSH credentials are used only to run <code style="color:#38bdf8">oc adm node-image create</code> remotely — they are never sent anywhere other than your own server.</p>
+      <div class="form-grid">
+        <div class="form-group">
+          <label for="mgmt-host">Management Host Hostname / IP</label>
+          <input type="text" id="mgmt-host" placeholder="e.g. 87.106.115.43 or bastion.example.com" style="width:100%" />
+          <div class="field-note">Public IP or hostname of your OpenShift management / bastion host</div>
+        </div>
+        <div class="form-group">
+          <label for="ssh-user">SSH Username on Management Host</label>
+          <input type="text" id="ssh-user" value="root" style="width:100%" />
+          <div class="field-note">Typically <code style="color:#38bdf8">root</code> or the admin user on the management host</div>
+        </div>
+        <div class="form-group full-width">
+          <label for="ssh-key">SSH Private Key for Management Host (PEM)</label>
+          <textarea id="ssh-key" rows="5" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----"></textarea>
+          <div class="field-note">The private key used to authenticate to the management host above — not the OpenShift node key</div>
+        </div>
+        <div class="form-group">
+          <label for="ssh-passphrase">Key Passphrase <span style="color:#4b5563;font-weight:400">(if any)</span></label>
+          <input type="password" id="ssh-passphrase" placeholder="Leave blank if key is not password-protected" autocomplete="off" style="width:100%" />
+        </div>
+        <div class="form-group">
+          <label for="kubeconfig-path">Kubeconfig Path on Management Host</label>
+          <input type="text" id="kubeconfig-path" value="/root/.kube/config" style="width:100%" />
+          <div class="field-note">Passed to <code style="color:#38bdf8">oc adm node-image create --kubeconfig</code></div>
+        </div>
+        <div class="form-group full-width">
+          <label for="mgmt-server-id">Management Host Server ID <span style="color:#4b5563;font-weight:400">(optional — auto-detected via IONOS metadata service)</span></label>
+          <input type="text" id="mgmt-server-id" placeholder="e.g. 3a7f1d2e-89bc-4c6a-b12d-f3a4e5678901" style="width:100%;font-family:'Courier New',monospace;font-size:0.82rem" />
+          <div class="field-note">IONOS Cloud server UUID of the management host — find it in DCD › Server properties. Required to attach the boot volume; auto-detected if the management host is an IONOS VM.</div>
+        </div>
+        <div class="form-group full-width">
+          <label for="worker-ssh-key">Worker Node SSH Private Key (PEM) <span style="color:#4b5563;font-weight:400">(optional — enables RHCOS install monitoring)</span></label>
+          <textarea id="worker-ssh-key" rows="5" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----"></textarea>
+          <div class="field-note">The private key for the <code style="color:#38bdf8">core</code> user on worker nodes — embedded in the worker MachineConfig. Used to monitor RHCOS installation progress and trigger the boot device switch. Check with: <code style="color:#38bdf8">oc get mc rendered-worker-... -o json | jq '.spec.config.passwd.users'</code></div>
+        </div>
+      </div>
+
+      <div class="card-section-title">IONOS Cloud</div>
+      <div class="form-grid">
+        <div class="form-group full-width">
+          <label for="ionos-token">IONOS Cloud API Token</label>
+          <input type="password" id="ionos-token" placeholder="Paste your IONOS Cloud Bearer Token" autocomplete="off" />
+          <div class="field-note">Required for browsing VDCs, creating servers, and attaching boot ISOs</div>
+        </div>
+        <div class="form-group" style="align-self:flex-end">
+          <button type="button" class="btn btn-sm" id="browse-dc-btn" style="height:2.5rem">
+            <span id="browse-dc-label">Browse VDCs</span>
+            <span class="spinner hidden" id="browse-dc-spinner"></span>
+          </button>
+        </div>
+        <div class="form-group">
+          <label for="datacenter-select">VDC / Datacenter</label>
+          <select id="datacenter-select">
+            <option value="">— enter IONOS token then Browse —</option>
+          </select>
+        </div>
+      </div>
+
+      <button class="btn btn-primary btn-full" id="connect-btn">
+        <span id="connect-label">Connect to Cluster</span>
+        <span class="spinner hidden" id="connect-spinner"></span>
+      </button>
+      <div class="error-box" id="connect-error"></div>
+    </div>
+
+    <!-- Shown after successful connection -->
+    <div id="connected-strip" class="hidden">
+      <div>
+        <span style="color:#64748b;font-size:0.75rem;text-transform:uppercase;letter-spacing:0.06em">Connected&nbsp;&nbsp;</span>
+        <span class="url" id="connected-url"></span>
+      </div>
+      <div style="display:flex;gap:0.5rem;align-items:center">
+        <span style="color:#64748b;font-size:0.78rem" id="connected-vdc"></span>
+        <button id="disconnect-btn">&#10005; Disconnect</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Card 2: Cluster Overview ──────────────────────────────────────── -->
+  <div class="card hidden" id="overview-card">
+    <h2>&#128202; Cluster Overview</h2>
+    <div class="version-pill" id="version-pill"></div>
+    <div class="stat-row" id="stat-row"></div>
+    <div class="refresh-ts" id="refresh-ts"></div>
+  </div>
+
+  <!-- ── Card 3: MachineSets ────────────────────────────────────────────── -->
+  <div class="card hidden" id="machinesets-card">
+    <h2>&#9881;&#65039; MachineSets</h2>
+    <div class="table-wrapper">
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Desired</th>
+            <th>Ready</th>
+            <th>Available</th>
+            <th>Region</th>
+            <th>AZ</th>
+            <th>Scale To</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="machinesets-tbody"></tbody>
+      </table>
+    </div>
+    <div id="poll-bar">
+      <span class="poll-spin"></span>
+      <span id="poll-label">Watching for new nodes…</span>
+      <div class="poll-track"><div class="poll-fill" id="poll-fill"></div></div>
+    </div>
+    <div class="error-box" id="scale-error"></div>
+  </div>
+
+  <!-- ── Card 4: Nodes ─────────────────────────────────────────────────── -->
+  <div class="card hidden" id="nodes-card">
+    <h2>&#128421;&#65039; Nodes</h2>
+    <div class="table-wrapper">
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Role</th>
+            <th>Status</th>
+            <th>Version</th>
+            <th>Age</th>
+          </tr>
+        </thead>
+        <tbody id="nodes-tbody"></tbody>
+      </table>
+    </div>
+    <div style="margin-top:0.85rem">
+      <button class="btn" id="refresh-nodes-btn" style="font-size:0.82rem">
+        <span id="refresh-nodes-label">&#8635; Refresh Nodes</span>
+        <span class="spinner hidden" id="refresh-nodes-spinner"></span>
+      </button>
+    </div>
+  </div>
+
+  <!-- ── Card 5a: Scaling action selector ─────────────────────────────── -->
+  <div class="card hidden" id="scaling-action-card">
+    <h2>&#9881;&#65039; Scaling Action</h2>
+    <p style="font-size:0.85rem;color:#94a3b8;margin-bottom:1.25rem">
+      Choose whether to add a new worker node (Scale Out), remove one (Scale In), or configure the OpenShift Cluster Autoscaler to manage workers automatically.
+    </p>
+    <div style="display:flex;gap:1.5rem;flex-wrap:wrap">
+      <label style="display:flex;align-items:center;gap:0.6rem;cursor:pointer;font-size:0.92rem;color:#e2e8f0;padding:0.75rem 1.25rem;border-radius:8px;border:2px solid #2d3348;background:#151825;transition:border-color 0.15s" id="scale-out-label">
+        <input type="radio" name="scaling-action" value="out" id="scaling-radio-out" style="accent-color:#38bdf8;width:16px;height:16px" checked />
+        <span>&#8599; <strong>Scale Out</strong> — add a new worker node</span>
+      </label>
+      <label style="display:flex;align-items:center;gap:0.6rem;cursor:pointer;font-size:0.92rem;color:#e2e8f0;padding:0.75rem 1.25rem;border-radius:8px;border:2px solid #2d3348;background:#151825;transition:border-color 0.15s" id="scale-in-label">
+        <input type="radio" name="scaling-action" value="in" id="scaling-radio-in" style="accent-color:#f87171;width:16px;height:16px" />
+        <span>&#8601; <strong>Scale In</strong> — remove an existing worker node</span>
+      </label>
+      <label style="display:flex;align-items:center;gap:0.6rem;cursor:pointer;font-size:0.92rem;color:#e2e8f0;padding:0.75rem 1.25rem;border-radius:8px;border:2px solid #2d3348;background:#151825;transition:border-color 0.15s" id="scale-auto-label">
+        <input type="radio" name="scaling-action" value="auto" id="scaling-radio-auto" style="accent-color:#a78bfa;width:16px;height:16px" />
+        <span>&#9889; <strong>Auto-Scaling</strong> — configure Cluster Autoscaler</span>
+      </label>
+    </div>
+  </div>
+
+  <!-- ── Card 5b: Scale In wizard ──────────────────────────────────────── -->
+  <div class="card hidden" id="scale-in-card">
+    <h2>&#8601; Remove Worker Node</h2>
+    <p style="font-size:0.85rem;color:#94a3b8;margin-bottom:1rem">
+      Safely removes a worker node via cordon → drain → delete. Workloads are gracefully evicted to remaining nodes before the node object is removed.
+    </p>
+
+    <!-- Node selector -->
+    <div style="display:flex;gap:1rem;align-items:flex-end;flex-wrap:wrap;margin-bottom:1rem">
+      <div style="flex:1;min-width:220px">
+        <label style="display:block;font-size:0.8rem;color:#94a3b8;margin-bottom:0.35rem">Worker Node to Remove</label>
+        <select id="scale-in-node-select" style="width:100%;background:#0f1117;border:1px solid #2d3348;border-radius:6px;padding:0.5rem 0.75rem;color:#e2e8f0;font-size:0.88rem">
+          <option value="">— select a worker node —</option>
+        </select>
+      </div>
+      <button class="btn" id="scale-in-refresh-btn" style="font-size:0.82rem;white-space:nowrap">&#8635; Refresh</button>
+    </div>
+
+    <!-- Warning box -->
+    <div id="scale-in-warning" class="hidden" style="background:#1c0a00;border:1px solid #92400e;border-radius:8px;padding:0.85rem 1rem;font-size:0.83rem;color:#fcd34d;margin-bottom:1rem;line-height:1.6">
+      <strong style="color:#fbbf24">&#9888; Review before proceeding</strong><br>
+      Node <strong id="scale-in-node-name-warn"></strong> will be <strong>cordoned</strong> (no new pods), then all non-DaemonSet pods will be <strong>evicted</strong> to other nodes, then the node object will be <strong>permanently deleted</strong> from the cluster.<br>
+      If the node is managed by a MachineSet, scale the MachineSet down instead to prevent automatic replacement.
+    </div>
+
+    <!-- IONOS Cloud cleanup -->
+    <div id="scale-in-ionos-section" class="hidden" style="background:#0c1a2e;border:1px solid #1e3a5f;border-radius:8px;padding:0.85rem 1rem;margin-bottom:1rem">
+      <label style="display:flex;align-items:center;gap:0.6rem;cursor:pointer;font-size:0.88rem;color:#e2e8f0;font-weight:600;margin-bottom:0.75rem">
+        <input type="checkbox" id="scale-in-delete-ionos" style="width:15px;height:15px;accent-color:#f87171;cursor:pointer" checked />
+        Also delete VM and storage in IONOS Cloud
+      </label>
+      <div id="scale-in-ionos-fields">
+        <div style="font-size:0.8rem;color:#64748b;margin-bottom:0.6rem">
+          The server and all attached volumes will be stopped and permanently deleted after the node is removed from the cluster.
+        </div>
+        <div style="display:flex;gap:0.75rem;align-items:flex-end;flex-wrap:wrap">
+          <div style="flex:1;min-width:200px">
+            <label style="display:block;font-size:0.78rem;color:#94a3b8;margin-bottom:0.3rem">IONOS Server ID</label>
+            <input type="text" id="scale-in-ionos-server-id"
+                   placeholder="Auto-detected or paste UUID"
+                   style="width:100%;background:#0f1117;border:1px solid #2d3348;border-radius:6px;padding:0.45rem 0.65rem;color:#e2e8f0;font-size:0.82rem;font-family:'Courier New',monospace" />
+          </div>
+          <button class="btn" id="scale-in-detect-btn" style="font-size:0.8rem;white-space:nowrap">
+            <span id="scale-in-detect-label">&#128269; Auto-detect</span>
+            <span class="spinner hidden" id="scale-in-detect-spinner"></span>
+          </button>
+        </div>
+        <div id="scale-in-ionos-info" class="hidden" style="margin-top:0.6rem;font-size:0.78rem;color:#38bdf8"></div>
+        <div class="error-box" id="scale-in-detect-error" style="margin-top:0.5rem"></div>
+      </div>
+    </div>
+
+    <!-- Step tracker -->
+    <div id="scale-in-steps" class="hidden" style="display:flex;flex-direction:column;gap:0.4rem;margin-bottom:0.85rem">
+      <div class="iso-step" id="si-s1" data-status="pending"><span class="iso-step-icon">○</span><span>Cordon node — disable scheduling</span></div>
+      <div class="iso-step" id="si-s2" data-status="pending"><span class="iso-step-icon">○</span><span>Drain — evict all pods</span></div>
+      <div class="iso-step" id="si-s3" data-status="pending"><span class="iso-step-icon">○</span><span>Verify cluster health</span></div>
+      <div class="iso-step" id="si-s4" data-status="pending"><span class="iso-step-icon">○</span><span>Delete node object</span></div>
+      <div class="iso-step hidden" id="si-s5" data-status="pending"><span class="iso-step-icon">○</span><span>Stop VM in IONOS Cloud</span></div>
+      <div class="iso-step hidden" id="si-s6" data-status="pending"><span class="iso-step-icon">○</span><span>Delete VM and storage</span></div>
+    </div>
+
+    <!-- Live log -->
+    <pre id="scale-in-log" class="hidden" style="max-height:260px;overflow-y:auto;background:#0a0d14;padding:0.6rem 0.8rem;border-radius:6px;font-size:0.75rem;color:#94a3b8;white-space:pre-wrap;margin-bottom:0.85rem"></pre>
+
+    <!-- Done box -->
+    <div id="scale-in-done" class="hidden" style="background:#052e16;border:1px solid #166534;border-radius:8px;padding:0.85rem 1rem;font-size:0.85rem;color:#6ee7b7;margin-bottom:0.85rem"></div>
+
+    <div class="error-box" id="scale-in-error"></div>
+
+    <div style="margin-top:1rem;display:flex;gap:0.75rem;align-items:center">
+      <button class="btn" id="scale-in-btn" disabled
+              style="background:#7f1d1d;border-color:#991b1b;color:#fca5a5;font-weight:600">
+        <span id="scale-in-label-btn">&#8601; Cordon, Drain &amp; Delete Node</span>
+        <span class="spinner hidden" id="scale-in-spinner" style="border-top-color:#fca5a5"></span>
+      </button>
+    </div>
+  </div>
+
+  <!-- ── Card 5c: Auto-Scaling wizard ─────────────────────────────────── -->
+  <div class="card hidden" id="autoscale-card">
+    <h2>&#9889; Configure Cluster Autoscaler</h2>
+    <p style="font-size:0.85rem;color:#94a3b8;margin-bottom:1rem">
+      Enables the OpenShift Cluster Autoscaler to automatically add and remove worker nodes based on pending workloads.
+      Applies a <strong>ClusterAutoscaler</strong> (global policy) and a <strong>MachineAutoscaler</strong> (per-MachineSet bounds).
+      Optionally clones an existing MachineSet under a new name first.
+    </p>
+
+    <!-- Section 1: MachineSet -->
+    <div class="card-section-title" style="margin-top:0;border-top:none;padding-top:0">MachineSet</div>
+    <div style="display:flex;gap:1.5rem;flex-wrap:wrap;margin-bottom:1rem">
+      <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;font-size:0.88rem;color:#e2e8f0" id="as-mode-existing-lbl">
+        <input type="radio" name="as-ms-mode" value="existing" id="as-mode-existing" style="accent-color:#a78bfa;width:14px;height:14px" checked />
+        Attach autoscaler to existing MachineSet
+      </label>
+      <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;font-size:0.88rem;color:#e2e8f0" id="as-mode-clone-lbl">
+        <input type="radio" name="as-ms-mode" value="clone" id="as-mode-clone" style="accent-color:#a78bfa;width:14px;height:14px" />
+        Clone existing MachineSet with new name
+      </label>
+      <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;font-size:0.88rem;color:#e2e8f0" id="as-mode-ionos-lbl">
+        <input type="radio" name="as-ms-mode" value="ionos" id="as-mode-ionos" style="accent-color:#a78bfa;width:14px;height:14px" />
+        Create new IONOS MachineSet
+      </label>
+    </div>
+
+    <!-- Source MachineSet row (existing + clone modes) -->
+    <div class="form-grid" id="as-source-group">
+      <div class="form-group">
+        <label for="as-ms-source">Source MachineSet</label>
+        <select id="as-ms-source">
+          <option value="">— connect to cluster first —</option>
+        </select>
+        <div class="field-note">The MachineSet to attach the autoscaler to (or use as clone template)</div>
+      </div>
+      <div class="form-group" id="as-clone-name-group" style="display:none">
+        <label for="as-ms-new-name">New MachineSet Name</label>
+        <input type="text" id="as-ms-new-name" placeholder="e.g. worker-autoscale" style="width:100%" />
+        <div class="field-note">Name for the cloned MachineSet (must be unique in openshift-machine-api)</div>
+      </div>
+      <div class="form-group" id="as-clone-replicas-group" style="display:none">
+        <label for="as-ms-init-replicas">Initial Replicas</label>
+        <input type="number" id="as-ms-init-replicas" value="1" min="0" style="width:100px" />
+        <div class="field-note">Starting replica count for the cloned MachineSet</div>
+      </div>
+    </div>
+
+    <!-- IONOS MachineSet configuration (ionos mode only) -->
+    <div id="as-ionos-group" style="display:none">
+      <div class="form-grid">
+        <div class="form-group">
+          <label for="as-ionos-ms-name">MachineSet Name</label>
+          <input type="text" id="as-ionos-ms-name" placeholder="e.g. worker-ionos" style="width:100%" />
+          <div class="field-note">Name for the new MachineSet (must be unique in openshift-machine-api)</div>
+        </div>
+        <div class="form-group">
+          <label for="as-ionos-init-replicas">Initial Replicas</label>
+          <input type="number" id="as-ionos-init-replicas" value="1" min="0" style="width:100px" />
+          <div class="field-note">Starting replica count</div>
+        </div>
+      </div>
+
+      <div class="card-section-title" style="margin-top:0.5rem">IONOS Cloud — Machine Configuration</div>
+      <div class="form-grid">
+        <div class="form-group" style="grid-column:1/-1">
+          <label for="as-ionos-image-id">RHCOS Image UUID</label>
+          <div style="display:flex;gap:0.5rem">
+            <input type="text" id="as-ionos-image-id" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" style="flex:1;font-family:monospace;font-size:0.8rem" />
+            <button class="btn btn-sm" id="as-ionos-browse-btn" style="white-space:nowrap">Browse Images</button>
+          </div>
+          <div class="field-note">UUID of the RHCOS public image — click Browse to search. Filter: name contains <code style="color:#38bdf8">rhcos</code></div>
+        </div>
+
+        <div class="form-group">
+          <label for="as-ionos-server-type">Instance Type</label>
+          <select id="as-ionos-server-type">
+            <option value="ENTERPRISE" selected>Dedicated Core</option>
+            <option value="VCPU">vCPU</option>
+          </select>
+          <div class="field-note">Dedicated Core = physical CPU cores; vCPU = shared virtual cores (no CPU family selection)</div>
+        </div>
+        <div class="form-group" id="as-ionos-cpu-family-group">
+          <label for="as-ionos-cpu-family">CPU Family</label>
+          <select id="as-ionos-cpu-family">
+            <option value="INTEL_ICELAKE" selected>Intel Icelake</option>
+          </select>
+          <div class="field-note">Available CPU architectures for this datacenter location</div>
+        </div>
+        <div class="form-group">
+          <label for="as-ionos-az">VM Availability Zone</label>
+          <select id="as-ionos-az">
+            <option value="AUTO" selected>AUTO</option>
+            <option value="ZONE_1">Zone 1</option>
+            <option value="ZONE_2">Zone 2</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="as-ionos-disk-az">Storage Availability Zone</label>
+          <select id="as-ionos-disk-az">
+            <option value="AUTO" selected>AUTO</option>
+            <option value="ZONE_1">Zone 1</option>
+            <option value="ZONE_2">Zone 2</option>
+            <option value="ZONE_3">Zone 3</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label for="as-ionos-cores">vCPU Cores</label>
+          <input type="number" id="as-ionos-cores" value="4" min="1" style="width:100px" />
+        </div>
+        <div class="form-group">
+          <label for="as-ionos-ram">RAM (GiB)</label>
+          <input type="number" id="as-ionos-ram" value="8" min="1" style="width:100px" />
+        </div>
+        <div class="form-group">
+          <label for="as-ionos-disk">Boot Disk (GB)</label>
+          <input type="number" id="as-ionos-disk" value="120" min="10" style="width:100px" />
+        </div>
+        <div class="form-group">
+          <label for="as-ionos-disk-type">Disk Type</label>
+          <select id="as-ionos-disk-type">
+            <option value="SSD Premium" selected>SSD Premium</option>
+            <option value="SSD Standard">SSD Standard</option>
+            <option value="HDD">HDD</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="as-ionos-lan">LAN ID</label>
+          <input type="number" id="as-ionos-lan" value="1" min="1" style="width:100px" />
+          <div class="field-note">Private LAN ID for the worker network (same as existing worker nodes)</div>
+        </div>
+      </div>
+
+      <!-- Image browser results -->
+      <div id="as-ionos-images-panel" style="display:none;margin-top:0.5rem">
+        <div style="font-size:0.8rem;color:#64748b;margin-bottom:0.4rem">Select an image to use its UUID:</div>
+        <div id="as-ionos-images-list" style="max-height:180px;overflow-y:auto;border:1px solid #2d3348;border-radius:6px;background:#0a0d14;font-size:0.78rem"></div>
+      </div>
+
+      <!-- Upload RHCOS image sub-panel -->
+      <div style="margin-top:1rem;border:1px solid #312e51;border-radius:8px;overflow:hidden">
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:0.65rem 0.9rem;background:#1a1730;cursor:pointer" id="rhcos-upload-toggle">
+          <span style="font-size:0.85rem;color:#a78bfa;font-weight:600">&#8593; Upload RHCOS Image to IONOS Cloud</span>
+          <span id="rhcos-upload-chevron" style="color:#64748b;font-size:0.75rem">&#9660; expand</span>
+        </div>
+        <div id="rhcos-upload-panel" style="display:none;padding:0.85rem 1rem">
+          <p style="font-size:0.78rem;color:#64748b;margin-bottom:0.85rem">
+            Downloads the RHCOS metal raw image from Red Hat's mirror to the management host, then uploads it to your IONOS account using <code style="color:#38bdf8">lftp</code> over FTPS.
+            The FTP server is automatically selected based on your datacenter location (e.g. <code style="color:#38bdf8">ftp-fra-2.ionos.com</code> for Frankfurt).
+            Images are placed in <code style="color:#38bdf8">hdd-images/</code> and become available as private images in your IONOS account.
+            Requires your IONOS <strong style="color:#94a3b8">account login and password</strong> (not the API token), and <code style="color:#38bdf8">lftp</code> installed on the management host.
+            On success, the image UUID is auto-filled in the field above.
+          </p>
+          <div class="form-grid">
+            <div class="form-group">
+              <label for="rhcos-ocp-version">OCP Version</label>
+              <input type="text" id="rhcos-ocp-version" value="4.17" placeholder="e.g. 4.17" style="width:120px" />
+              <div class="field-note">Major.minor — determines the RHCOS image from Red Hat's mirror</div>
+            </div>
+            <div class="form-group">
+              <label for="rhcos-image-name">Image Name in IONOS</label>
+              <input type="text" id="rhcos-image-name" placeholder="auto: rhcos-4.17" style="width:100%" />
+              <div class="field-note">Leave blank to use <code style="color:#38bdf8">rhcos-{version}</code></div>
+            </div>
+            <div class="form-group">
+              <label for="rhcos-ftp-user">IONOS Login</label>
+              <input type="text" id="rhcos-ftp-user" placeholder="username@cloud.ionos.com" autocomplete="username" style="width:100%" />
+              <div class="field-note">Format: <code style="color:#38bdf8">username@cloud.ionos.com</code> — same as DCD login, used for the IONOS FTPS image upload server</div>
+            </div>
+            <div class="form-group">
+              <label for="rhcos-ftp-pass">IONOS Password</label>
+              <input type="password" id="rhcos-ftp-pass" placeholder="account password" autocomplete="current-password" style="width:100%" />
+              <div class="field-note">Your IONOS account password — transmitted over SSH only, never stored</div>
+            </div>
+          </div>
+
+          <div id="rhcos-steps" class="hidden" style="display:flex;flex-direction:column;gap:0.35rem;margin-top:0.75rem;margin-bottom:0.6rem">
+            <div class="iso-step" id="rhcos-s1" data-status="pending"><span class="iso-step-icon">○</span><span>Determine datacenter region &amp; FTP server</span></div>
+            <div class="iso-step" id="rhcos-s2" data-status="pending"><span class="iso-step-icon">○</span><span>Connect to management host via SSH</span></div>
+            <div class="iso-step" id="rhcos-s3" data-status="pending"><span class="iso-step-icon">○</span><span>Download RHCOS image to management host</span></div>
+            <div class="iso-step" id="rhcos-s4" data-status="pending"><span class="iso-step-icon">○</span><span>Upload image to IONOS via FTP</span></div>
+            <div class="iso-step" id="rhcos-s5" data-status="pending"><span class="iso-step-icon">○</span><span>Wait for IONOS to process &amp; activate image</span></div>
+          </div>
+
+          <pre id="rhcos-log" class="hidden" style="max-height:200px;overflow-y:auto;background:#0a0d14;padding:0.6rem 0.8rem;border-radius:6px;font-size:0.75rem;color:#94a3b8;white-space:pre-wrap;margin-bottom:0.75rem"></pre>
+          <div id="rhcos-done" class="hidden" style="background:#2e1065;border:1px solid #7c3aed;border-radius:8px;padding:0.75rem 1rem;font-size:0.85rem;color:#c4b5fd;margin-bottom:0.75rem"></div>
+          <div class="error-box" id="rhcos-error"></div>
+
+          <button class="btn" id="rhcos-upload-btn" style="background:#312e51;color:#a78bfa;font-weight:600;padding:0.6rem 1.2rem;border:1px solid #4c1d95">
+            <span id="rhcos-upload-label">&#8593; Upload RHCOS Image</span>
+            <span class="spinner hidden" id="rhcos-upload-spinner" style="border-top-color:#a78bfa"></span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Provider deployment toggle (IONOS mode only) -->
+    <div id="as-provider-deploy-group" style="display:none;margin-top:1rem;border:1px solid #1e3a5f;border-radius:8px;overflow:hidden">
+      <div style="padding:0.7rem 0.9rem;background:#0f2035">
+        <label style="display:flex;align-items:center;gap:0.6rem;cursor:pointer;font-size:0.88rem;color:#93c5fd;font-weight:600">
+          <input type="checkbox" id="as-deploy-provider" style="accent-color:#3b82f6;width:15px;height:15px" />
+          Deploy IONOS Machine API provider to this cluster (first-time setup)
+        </label>
+        <p style="font-size:0.78rem;color:#4b7aab;margin:0.45rem 0 0 1.6rem">
+          Applies the ServiceAccount, ClusterRole, ClusterRoleBinding and Deployment into the
+          <code style="color:#60a5fa">openshift-machine-api</code> namespace. Skip this if the provider is already running.
+        </p>
+      </div>
+
+      <!-- Registry config — shown when deploy-provider is checked -->
+      <div id="as-registry-fields" style="display:none;padding:0.85rem 0.9rem;background:#0a1929;border-top:1px solid #1e3a5f">
+        <div style="font-size:0.82rem;color:#93c5fd;font-weight:600;margin-bottom:0.65rem">Container Registry</div>
+
+        <div class="form-grid" style="grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:0.7rem">
+          <div class="form-group">
+            <label for="as-registry-type">Registry</label>
+            <select id="as-registry-type" style="width:100%">
+              <option value="dockerhub">Docker Hub</option>
+              <option value="ghcr">GitHub Container Registry (ghcr.io)</option>
+              <option value="ionos">IONOS Container Registry</option>
+              <option value="custom">Custom / Other</option>
+            </select>
+          </div>
+          <div class="form-group" style="grid-column:span 2">
+            <label for="as-registry-image">Image</label>
+            <input type="text" id="as-registry-image" placeholder="e.g. paulmcc50/myrepo:ionos-machine-api-provider" style="width:100%" />
+            <div class="field-note" id="as-registry-image-hint">Docker Hub: <code>username/repo:tag</code></div>
+          </div>
+          <div class="form-group">
+            <label for="as-registry-username" id="as-registry-username-label">Username</label>
+            <input type="text" id="as-registry-username" autocomplete="off" style="width:100%" />
+          </div>
+          <div class="form-group">
+            <label for="as-registry-password" id="as-registry-password-label">Password / Token</label>
+            <input type="password" id="as-registry-password" autocomplete="new-password" style="width:100%" />
+            <div class="field-note" id="as-registry-password-hint">Leave blank if the image is public</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Section 2: MachineAutoscaler bounds -->
+    <div class="card-section-title">MachineAutoscaler Bounds</div>
+    <p style="font-size:0.8rem;color:#64748b;margin-bottom:0.75rem">The Cluster Autoscaler will scale this MachineSet between the min and max replica counts based on workload demand.</p>
+    <div class="form-grid">
+      <div class="form-group">
+        <label for="as-min-replicas">Min Replicas</label>
+        <input type="number" id="as-min-replicas" value="1" min="0" style="width:100px" />
+        <div class="field-note">Minimum nodes (autoscaler won't scale below this)</div>
+      </div>
+      <div class="form-group">
+        <label for="as-max-replicas">Max Replicas</label>
+        <input type="number" id="as-max-replicas" value="5" min="1" style="width:100px" />
+        <div class="field-note">Maximum nodes (autoscaler won't scale above this)</div>
+      </div>
+    </div>
+
+    <!-- Section 3: ClusterAutoscaler -->
+    <div class="card-section-title">Cluster Autoscaler Policy</div>
+    <p style="font-size:0.8rem;color:#64748b;margin-bottom:0.75rem">Global autoscaler settings applied cluster-wide. A single <code style="color:#38bdf8">default</code> ClusterAutoscaler resource is created or updated.</p>
+    <div class="form-grid">
+      <div class="form-group">
+        <label for="as-max-nodes">Max Nodes Total</label>
+        <input type="number" id="as-max-nodes" value="10" min="1" style="width:100px" />
+        <div class="field-note">Hard ceiling on total nodes the autoscaler can create</div>
+      </div>
+      <div class="form-group">
+        <label for="as-max-cores">Max Cores Total</label>
+        <input type="number" id="as-max-cores" value="64" min="1" style="width:100px" />
+        <div class="field-note">Total CPU core limit across all nodes</div>
+      </div>
+      <div class="form-group">
+        <label for="as-max-memory">Max Memory Total (GiB)</label>
+        <input type="number" id="as-max-memory" value="256" min="1" style="width:100px" />
+        <div class="field-note">Total memory limit in GiB across all nodes</div>
+      </div>
+      <div class="form-group" style="align-self:center;padding-top:1.2rem">
+        <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;font-size:0.88rem;color:#e2e8f0">
+          <input type="checkbox" id="as-scale-down" checked style="accent-color:#a78bfa" />
+          Enable scale-down (remove underutilised nodes)
+        </label>
+      </div>
+      <div class="form-group">
+        <label for="as-delay-after-add">Scale-Down Delay After Add</label>
+        <input type="text" id="as-delay-after-add" value="10m" style="width:100px" />
+        <div class="field-note">Cooldown before scale-down is considered after a node is added (e.g. <code style="color:#38bdf8">10m</code>)</div>
+      </div>
+      <div class="form-group">
+        <label for="as-unneeded-time">Scale-Down Unneeded Time</label>
+        <input type="text" id="as-unneeded-time" value="10m" style="width:100px" />
+        <div class="field-note">How long a node must be underutilised before removal (e.g. <code style="color:#38bdf8">10m</code>)</div>
+      </div>
+    </div>
+
+    <!-- Step tracker -->
+    <div id="as-steps" class="hidden" style="display:flex;flex-direction:column;gap:0.4rem;margin-top:1rem;margin-bottom:0.75rem">
+      <!-- clone / existing steps -->
+      <div class="iso-step" id="as-s1" data-status="pending"><span class="iso-step-icon">○</span><span>Fetch source MachineSet</span></div>
+      <div class="iso-step hidden" id="as-s2" data-status="pending"><span class="iso-step-icon">○</span><span>Create cloned MachineSet</span></div>
+      <!-- ionos steps -->
+      <div class="iso-step hidden" id="as-si0" data-status="pending"><span class="iso-step-icon">○</span><span>Deploy Machine API provider</span></div>
+      <div class="iso-step hidden" id="as-si1" data-status="pending"><span class="iso-step-icon">○</span><span>Create IONOS credentials Secret</span></div>
+      <div class="iso-step hidden" id="as-si2" data-status="pending"><span class="iso-step-icon">○</span><span>Verify worker-user-data Secret</span></div>
+      <div class="iso-step hidden" id="as-si3" data-status="pending"><span class="iso-step-icon">○</span><span>Create IONOS MachineSet</span></div>
+      <!-- shared steps -->
+      <div class="iso-step" id="as-s3" data-status="pending"><span class="iso-step-icon">○</span><span>Apply ClusterAutoscaler</span></div>
+      <div class="iso-step" id="as-s4" data-status="pending"><span class="iso-step-icon">○</span><span>Apply MachineAutoscaler</span></div>
+    </div>
+
+    <!-- Live log -->
+    <pre id="as-log" class="hidden" style="max-height:240px;overflow-y:auto;background:#0a0d14;padding:0.6rem 0.8rem;border-radius:6px;font-size:0.75rem;color:#94a3b8;white-space:pre-wrap;margin-bottom:0.85rem"></pre>
+
+    <!-- Done / error -->
+    <div id="as-done" class="hidden" style="background:#2e1065;border:1px solid #7c3aed;border-radius:8px;padding:0.85rem 1rem;font-size:0.85rem;color:#c4b5fd;margin-bottom:0.85rem"></div>
+    <div class="error-box" id="as-error"></div>
+
+    <div style="margin-top:1rem">
+      <button class="btn" id="as-apply-btn" style="background:#4c1d95;color:#c4b5fd;font-weight:600;padding:0.7rem 1.5rem">
+        <span id="as-apply-label">&#9889; Apply Autoscaling Configuration</span>
+        <span class="spinner hidden" id="as-apply-spinner" style="border-top-color:#c4b5fd"></span>
+      </button>
+    </div>
+  </div>
+
+  <!-- ── Card 5d: Add Worker Node wizard ───────────────────────────────── -->
+  <!-- ── Card 5: Add Worker Node wizard ────────────────────────────────── -->
+  <div class="card hidden" id="add-node-card">
+    <h2>&#43; Add Worker Node</h2>
+    <p style="font-size:0.85rem;color:#94a3b8;margin-bottom:1.25rem">
+      Creates a new IONOS Cloud server for an OpenShift worker node, then guides you through
+      generating the boot ISO and approving the node's CSRs. Based on IONOS OpenShift Deployment
+      Guide section 7.5.1 — <em>oc adm node-image</em> workflow (OCP 4.17+).
+    </p>
+
+    <!-- Step indicators -->
+    <div class="steps">
+      <div class="step active" id="step-ind-1">1 · Configure VM</div>
+      <div class="step"        id="step-ind-2">2 · Create Server</div>
+      <div class="step"        id="step-ind-3">3 · Generate ISO</div>
+      <div class="step"        id="step-ind-4">4 · Approve CSRs</div>
+    </div>
+
+    <!-- Step 1: VM configuration -->
+    <div id="step-1">
+      <div class="form-grid">
+        <div class="form-group full-width">
+          <label for="worker-name">Server Name</label>
+          <input type="text" id="worker-name" placeholder="e.g. worker-2" />
+        </div>
+        <div class="form-group">
+          <label for="worker-cores">CPU Cores</label>
+          <input type="number" id="worker-cores" value="4" min="4" />
+          <div class="field-note">Min. 4 cores recommended</div>
+        </div>
+        <div class="form-group">
+          <label for="worker-ram">RAM (GiB)</label>
+          <input type="number" id="worker-ram" value="8" min="8" step="1" />
+          <div class="field-note">Min. 8 GiB</div>
+        </div>
+        <div class="form-group">
+          <label for="worker-disk">System SSD Size (GB)</label>
+          <input type="number" id="worker-disk" value="120" min="120" />
+          <div class="field-note">Min. 120 GB</div>
+        </div>
+        <div class="form-group">
+          <label for="worker-ssd-type">SSD Type</label>
+          <select id="worker-ssd-type">
+            <option value="SSD Standard">Standard</option>
+            <option value="SSD Premium" selected>Premium</option>
+          </select>
+          <div class="field-note">Standard: cost-effective; Premium: lower latency, higher IOPS</div>
+        </div>
+        <div class="form-group">
+          <label for="worker-lan">LAN</label>
+          <select id="worker-lan">
+            <option value="">— select datacenter first —</option>
+          </select>
+          <div class="field-note">Internal private LAN for the OpenShift cluster</div>
+        </div>
+        <div class="form-group">
+          <label for="worker-server-az">VM Availability Zone</label>
+          <select id="worker-server-az">
+            <option value="AUTO" selected>AUTO</option>
+            <option value="ZONE_1">Zone 1</option>
+            <option value="ZONE_2">Zone 2</option>
+          </select>
+          <div class="field-note">IONOS availability zone for the server</div>
+        </div>
+        <div class="form-group">
+          <label for="worker-storage-az">Storage Availability Zone</label>
+          <select id="worker-storage-az">
+            <option value="AUTO" selected>AUTO</option>
+            <option value="ZONE_1">Zone 1</option>
+            <option value="ZONE_2">Zone 2</option>
+            <option value="ZONE_3">Zone 3</option>
+          </select>
+          <div class="field-note">IONOS availability zone for the boot volume</div>
+        </div>
+      </div>
+      <button class="btn btn-create btn-full" id="create-server-btn">
+        <span id="create-server-label">&#128640; Create Server on IONOS Cloud</span>
+        <span class="spinner hidden" id="create-server-spinner"></span>
+      </button>
+      <div class="error-box" id="create-error"></div>
+
+      <!-- Live API log (shown while server is being provisioned) -->
+      <pre id="create-server-log" class="hidden"
+           style="margin-top:0.85rem;max-height:220px;overflow-y:auto;background:#0a0d14;padding:0.6rem 0.8rem;border-radius:6px;font-size:0.74rem;color:#94a3b8;white-space:pre-wrap;border:1px solid #1e293b"></pre>
+    </div>
+
+    <!-- Step 2: Server created + ISO generation (auto or manual) -->
+    <div id="step-2" class="hidden">
+      <div class="success-box" id="server-created-box"></div>
+
+      <!-- ── Automated ISO panel (shown when SSH credentials were provided) ── -->
+      <div id="auto-iso-panel" class="hidden">
+        <div class="card-section-title" style="margin-top:1.25rem">Automated ISO Generation</div>
+        <p style="font-size:0.82rem;color:#64748b;margin-bottom:0.75rem">
+          Generates the agent installer ISO on your management host via SSH, writes it to a new small
+          (4 GB) ISO volume using <code style="color:#38bdf8">dd</code>, then boots the worker from that ISO volume.
+          The agent installer writes RHCOS to the worker's main SSD. After install the app automatically
+          switches the boot device to the main SSD. Requires <code style="color:#38bdf8">oc</code> and kubeconfig on the management host.
+          Management host and worker node must be in the same IONOS VDC.
+        </p>
+
+        <!-- Progress steps -->
+        <div id="iso-steps-list">
+          <div class="iso-step" id="iso-s1" data-status="pending"><span class="iso-step-icon">○</span><span>Connect to management host via SSH</span></div>
+          <div class="iso-step" id="iso-s2" data-status="pending"><span class="iso-step-icon">○</span><span id="iso-s2-label">Run oc adm node-image create</span></div>
+          <div class="iso-step" id="iso-s3" data-status="pending"><span class="iso-step-icon">○</span><span>Create ISO volume &amp; write ISO (via management host)</span></div>
+          <div class="iso-step" id="iso-s4" data-status="pending"><span class="iso-step-icon">○</span><span>Detach ISO volume from management host</span></div>
+          <div class="iso-step" id="iso-s5" data-status="pending"><span class="iso-step-icon">○</span><span>Boot worker from ISO volume</span></div>
+          <div class="iso-step" id="iso-s6" data-status="pending"><span class="iso-step-icon">○</span><span>Install RHCOS &amp; switch boot device</span></div>
+        </div>
+        <!-- ISO write (dd) progress bar -->
+        <div id="dd-progress-wrap" class="hidden" style="margin-top:0.85rem">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:0.3rem">
+            <span style="font-size:0.8rem;color:#94a3b8">Writing ISO to volume</span>
+            <span style="display:flex;gap:1rem;align-items:baseline">
+              <span id="dd-progress-speed" style="font-size:0.75rem;color:#64748b"></span>
+              <span id="dd-progress-eta"   style="font-size:0.75rem;color:#64748b"></span>
+              <span id="dd-progress-pct"   style="font-size:0.8rem;color:#38bdf8;font-weight:600">0%</span>
+            </span>
+          </div>
+          <div style="background:#1e293b;border-radius:6px;height:18px;overflow:hidden;position:relative">
+            <div id="dd-progress-bar" style="height:100%;background:linear-gradient(90deg,#f59e0b,#ef4444);width:0%;transition:width 0.4s ease"></div>
+            <span id="dd-progress-detail" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:0.72rem;color:#e2e8f0;white-space:nowrap"></span>
+          </div>
+        </div><!-- /dd-progress-wrap -->
+
+        <!-- RHCOS installation progress bar (shown when worker SSH key is available) -->
+        <div id="install-progress-wrap" class="hidden" style="margin-top:0.85rem">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:0.3rem">
+            <span style="font-size:0.8rem;color:#94a3b8">Installing RHCOS to main SSD</span>
+            <span id="install-progress-pct" style="font-size:0.8rem;color:#38bdf8;font-weight:600">0%</span>
+          </div>
+          <div style="background:#1e293b;border-radius:6px;height:18px;overflow:hidden;position:relative">
+            <div id="install-progress-bar" style="height:100%;background:linear-gradient(90deg,#0ea5e9,#6366f1);width:0%;transition:width 0.6s ease"></div>
+            <span id="install-progress-detail" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:0.72rem;color:#e2e8f0;white-space:nowrap"></span>
+          </div>
+        </div><!-- /install-progress-wrap -->
+        </div><!-- /iso-steps-list -->
+
+        <!-- Live console output (hidden until automation starts) -->
+        <div class="iso-log hidden" id="iso-log"></div>
+
+        <!-- Completion message -->
+        <div id="iso-url-box" class="hidden" style="background:#052e16;border:1px solid #166534;border-radius:8px;padding:0.85rem 1rem;color:#6ee7b7;font-size:0.85rem;margin-top:0.75rem">
+          <strong>&#10003; Worker node powered on.</strong> The ISO has been written to a dedicated SSD volume
+          and the worker server has been started. Click <em>Proceed to CSR Approval</em> to approve its
+          certificate signing requests and bring it into the cluster.
+        </div>
+
+        <!-- Manual IP / MAC override (shown when not returned by the API automatically) -->
+        <div id="manual-ip-row" class="hidden" style="margin-top:0.75rem;display:flex;align-items:flex-start;gap:1rem;flex-wrap:wrap">
+          <div>
+            <label style="font-size:0.8rem;color:#94a3b8;display:block;margin-bottom:0.3rem">Worker node IP</label>
+            <input type="text" id="manual-worker-ip" placeholder="e.g. 10.7.224.18"
+                   style="width:160px;font-family:'Courier New',monospace" />
+          </div>
+          <div>
+            <label style="font-size:0.8rem;color:#94a3b8;display:block;margin-bottom:0.3rem">Worker NIC MAC address</label>
+            <input type="text" id="manual-worker-mac" placeholder="e.g. 00:d8:e7:c7:4b:bb"
+                   style="width:185px;font-family:'Courier New',monospace" />
+          </div>
+          <div style="font-size:0.75rem;color:#64748b;align-self:flex-end;padding-bottom:0.4rem">
+            Not returned by the API — copy from the IONOS DCD (Server → NIC properties)
+          </div>
+        </div>
+
+        <div class="error-box" id="auto-iso-error"></div>
+
+        <label style="display:inline-flex;align-items:center;gap:0.5rem;margin-top:0.85rem;font-size:0.83rem;color:#94a3b8;cursor:pointer;user-select:none"
+               title="Each node needs its own ISO (the network config is MAC-specific). A cached ISO is reused automatically when retrying the same node. Check this to force a rebuild.">
+          <input type="checkbox" id="force-new-iso" style="width:15px;height:15px;accent-color:#38bdf8;cursor:pointer" />
+          Force ISO rebuild (each node needs its own ISO — cached automatically per node)
+        </label>
+
+        <button class="btn btn-create btn-full" id="auto-iso-btn" style="margin-top:0.6rem">
+          <span id="auto-iso-label">&#9889; Generate &amp; Deploy ISO Automatically</span>
+          <span class="spinner hidden" id="auto-iso-spinner"></span>
+        </button>
+
+      </div>
+
+      <!-- ── Manual fallback (always shown; toggle label changes when auto available) ── -->
+      <details id="manual-iso-details" style="margin-top:1rem">
+        <summary style="cursor:pointer;font-size:0.83rem;color:#64748b;user-select:none" id="manual-iso-summary">
+          &#9654; Show manual command
+        </summary>
+        <div class="info-box" style="margin-top:0.75rem">
+          <strong>Manual: Generate the node boot ISO</strong><br><br>
+          Run the following command on your OpenShift management server:<br><br>
+          <code id="iso-cmd" style="display:block;background:#0a0d14;padding:0.75rem 1rem;border-radius:6px;color:#a5f3fc;font-family:'Courier New',monospace;font-size:0.85rem;word-break:break-all;margin-top:0.5rem"></code><br>
+          This produces <code style="color:#38bdf8">node.x86_64.iso</code>. Upload it to IONOS Object Storage
+          or host it from your management server, then attach it as a CD-ROM to server
+          <strong id="server-name-ref"></strong> in the DCD and set boot order to CD-ROM first.
+        </div>
+      </details>
+
+      <div style="margin-top:1.25rem">
+        <button class="btn btn-primary" id="goto-step3-btn" disabled>Approve CSRs &#8594;</button>
+        <span style="font-size:0.78rem;color:#4b5563;margin-left:0.75rem" id="step3-hint">Complete ISO generation above, or attach the ISO manually, to enable this button.</span>
+      </div>
+
+    <!-- Step 3: Boot instructions -->
+    <div id="step-3" class="hidden">
+      <div class="info-box">
+        <strong>Boot the server and watch for CSRs</strong><br><br>
+        1. The worker node <strong id="server-name-ref-3"></strong> has been powered on automatically and is booting from the ISO<br>
+        2. The node will pull its ignition config from the cluster and begin bootstrapping (typically 3–8 minutes)<br>
+        3. The node will submit <strong>two CSRs</strong> — first a client CSR, then a serving CSR
+           — both must be approved for the node to become Ready<br>
+        4. Click the button below to check for pending CSRs — click again if none are found yet
+      </div>
+      <button class="btn btn-primary" id="goto-step4-btn" style="margin-top:1rem">
+        <span id="goto-step4-label">&#8635; Check for Pending CSRs</span>
+        <span class="spinner hidden" id="goto-step4-spinner"></span>
+      </button>
+    </div>
+
+    <!-- Step 4: CSR approval from within wizard -->
+    <div id="step-4" class="hidden">
+      <div class="info-box" id="step4-status-box">Checking for pending CSRs…</div>
+      <div style="margin-top:1rem">
+        <button class="btn btn-primary" id="recheck-csrs-btn">
+          <span id="recheck-csrs-label">&#8635; Refresh CSRs</span>
+          <span class="spinner hidden" id="recheck-csrs-spinner"></span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Card 6: CSRs ──────────────────────────────────────────────────── -->
+  <div class="card hidden" id="csrs-card">
+    <h2>&#128220; Certificate Signing Requests</h2>
+    <p style="font-size:0.85rem;color:#94a3b8;margin-bottom:1rem">
+      New nodes submit two CSRs during bootstrapping — a <em>kubelet client</em> CSR first, then a
+      <em>kubelet serving</em> CSR. Both must be approved for the node to become Ready.<br>
+      CSRs matching the new worker node name are highlighted.
+    </p>
+    <!-- Filter bar -->
+    <div style="display:flex;gap:0.5rem;align-items:center;margin-bottom:0.75rem;flex-wrap:wrap">
+      <label style="font-size:0.8rem;color:#94a3b8">Filter:</label>
+      <button class="btn" id="csr-filter-pending" style="padding:0.25rem 0.75rem;font-size:0.78rem;background:#1e3a5f;color:#93c5fd">Pending only</button>
+      <button class="btn" id="csr-filter-all"     style="padding:0.25rem 0.75rem;font-size:0.78rem">All CSRs</button>
+      <button class="btn" id="csr-filter-worker"  style="padding:0.25rem 0.75rem;font-size:0.78rem">New worker only</button>
+      <span id="csr-worker-hint" style="font-size:0.78rem;color:#64748b;margin-left:0.25rem"></span>
+    </div>
+    <div class="table-wrapper">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:38px"><input type="checkbox" id="csr-select-all" title="Select all pending" /></th>
+            <th>CSR Name</th>
+            <th>Node</th>
+            <th>Signer</th>
+            <th>Requestor</th>
+            <th>Age</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="csrs-tbody"></tbody>
+      </table>
+    </div>
+    <div style="margin-top:1rem;display:flex;align-items:center;gap:0.75rem">
+      <button class="btn btn-approve" id="approve-btn" disabled>&#10003; Approve Selected</button>
+      <span class="spinner hidden" id="approve-spinner" style="border-top-color:#6ee7b7"></span>
+    </div>
+    <div id="approve-result" class="hidden"></div>
+    <div class="error-box" id="csrs-error"></div>
+  </div>
+
+</div><!-- /container -->
+
+<div id="env-auth-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);
+     z-index:1000;align-items:center;justify-content:center">
+  <div style="background:#1e293b;border:1px solid #334155;border-radius:12px;
+              padding:2rem;width:100%;max-width:360px;box-shadow:0 8px 32px rgba(0,0,0,0.5)">
+    <div style="font-size:1rem;font-weight:700;color:#e2e8f0;margin-bottom:0.25rem">
+      &#128274; Saved Credentials
+    </div>
+    <div id="env-auth-username" style="font-size:0.8rem;color:#64748b;margin-bottom:1.25rem"></div>
+    <label style="font-size:0.8rem;color:#94a3b8;display:block;margin-bottom:0.35rem">Password</label>
+    <input id="env-auth-password" type="password" autocomplete="current-password"
+      placeholder="Enter password"
+      style="width:100%;box-sizing:border-box;background:#0f172a;border:1px solid #334155;
+             color:#e2e8f0;padding:0.5rem 0.75rem;border-radius:6px;font-size:0.9rem;
+             outline:none;margin-bottom:0.5rem">
+    <div id="env-auth-error" style="display:none;font-size:0.78rem;color:#f87171;margin-bottom:0.5rem">
+      Incorrect password &#8212; credentials not loaded.
+    </div>
+    <div style="display:flex;gap:0.75rem;margin-top:0.75rem">
+      <button id="env-auth-submit"
+        style="flex:1;background:#0ea5e9;color:#fff;border:none;border-radius:6px;
+               padding:0.5rem;font-size:0.9rem;font-weight:600;cursor:pointer">
+        Load Credentials
+      </button>
+      <button id="env-auth-skip"
+        style="background:none;border:1px solid #475569;color:#cbd5e1;border-radius:6px;
+               padding:0.5rem 0.9rem;font-size:0.85rem;cursor:pointer">
+        Skip
+      </button>
+    </div>
+  </div>
+</div>
+
+<script>
+  // ── Pre-fill form from environment variables (via server) ─────────────────
+  async function fetchEnvPrefill(password) {
+    const headers = password
+      ? { 'Authorization': 'Basic ' + btoa((window._envContractId || '') + ':' + password) }
+      : {};
+    const r = await fetch('/api/env-prefill', { headers });
+    if (r.status === 401) {
+      const d = await r.json().catch(() => ({}));
+      return { status: 401, contractId: d.contractId || '' };
+    }
+    if (!r.ok) return { status: r.status };
+    return { status: 200, env: await r.json() };
+  }
+
+  function applyEnvPrefill(env) {
+    if (env.clusterApiUrl)    document.getElementById('api-url').value          = env.clusterApiUrl;
+    if (env.ocpToken)         document.getElementById('ocp-token').value         = env.ocpToken;
+    if (env.ionosToken)       document.getElementById('ionos-token').value        = env.ionosToken;
+    if (env.mgmtHost)         document.getElementById('mgmt-host').value          = env.mgmtHost;
+    if (env.sshKey)           document.getElementById('ssh-key').value            = env.sshKey;
+    if (env.workerSshKey)     document.getElementById('worker-ssh-key').value     = env.workerSshKey;
+    if (env.workerNamePrefix) document.getElementById('worker-name').value        = env.workerNamePrefix;
+    window._workerNamePrefix = env.workerNamePrefix || '';
+    if (env.ionosFtpUser)     document.getElementById('rhcos-ftp-user').value     = env.ionosFtpUser;
+    if (env.ionosFtpPass)     document.getElementById('rhcos-ftp-pass').value     = env.ionosFtpPass;
+    if (env.registryType)     { const el = document.getElementById('as-registry-type');     if (el) { el.value = env.registryType;     el.dispatchEvent(new Event('change')); } }
+    if (env.registryImage)    { const el = document.getElementById('as-registry-image');    if (el) el.value = env.registryImage; }
+    if (env.registryUsername) { const el = document.getElementById('as-registry-username'); if (el) el.value = env.registryUsername; }
+    if (env.registryPassword) { const el = document.getElementById('as-registry-password'); if (el) el.value = env.registryPassword; }
+  }
+
+  (async () => {
+    try {
+      const result = await fetchEnvPrefill(null);
+      if (result.status === 200) {
+        applyEnvPrefill(result.env);
+      } else if (result.status === 401) {
+        window._envContractId = result.contractId;
+        document.getElementById('env-auth-username').textContent =
+          result.contractId ? `Contract ID: ${result.contractId}` : 'Enter password';
+        document.getElementById('env-auth-modal').style.display = 'flex';
+      }
+    } catch (_) {}
+  })();
+
+  document.getElementById('env-auth-submit').addEventListener('click', async () => {
+    const pw     = document.getElementById('env-auth-password').value;
+    const err    = document.getElementById('env-auth-error');
+    const submit = document.getElementById('env-auth-submit');
+    err.style.display = 'none';
+    submit.disabled = true;
+    try {
+      const result = await fetchEnvPrefill(pw).catch(() => ({ status: 0 }));
+      if (result.status === 200) {
+        document.getElementById('env-auth-modal').style.display = 'none';
+        applyEnvPrefill(result.env);
+      } else {
+        err.style.display = '';
+        document.getElementById('env-auth-password').select();
+      }
+    } finally {
+      submit.disabled = false;
+    }
+  });
+
+  document.getElementById('env-auth-password').addEventListener('keydown', e => {
+    if (e.key === 'Enter') document.getElementById('env-auth-submit').click();
+  });
+
+  document.getElementById('env-auth-skip').addEventListener('click', () => {
+    document.getElementById('env-auth-modal').style.display = 'none';
+  });
+
+  document.getElementById('download-env-example').addEventListener('click', async () => {
+    const text = await fetch('/download/env-example').then(r => r.text());
+    const url  = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+    const a    = document.createElement('a');
+    a.href = url; a.download = 'env.example.txt'; a.click();
+    URL.revokeObjectURL(url);
+  });
+
+  // ── Client-side .env file upload — parsed entirely in browser, never sent to server ──
+  document.getElementById('env-file-upload').addEventListener('change', function () {
+    const file = this.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = e => {
+      const decodeKey = v => v.replace(/\\n/g, '\n').replace(/^["']|["']$/g, '');
+      for (const line of e.target.result.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        const eq = trimmed.indexOf('=');
+        if (eq < 1) continue;
+        const key = trimmed.slice(0, eq).trim();
+        const val = trimmed.slice(eq + 1).trim().replace(/^["']|["']$/g, '');
+        if (!val) continue;
+        switch (key) {
+          case 'OCP_CLUSTER_API_URL':      document.getElementById('api-url').value          = val; break;
+          case 'OCP_BEARER_TOKEN':         document.getElementById('ocp-token').value         = val; break;
+          case 'OCP_MGMT_HOST':            document.getElementById('mgmt-host').value         = val; break;
+          case 'OCP_MGMT_HOST_SSH_KEY':    document.getElementById('ssh-key').value           = decodeKey(val); break;
+          case 'OCP_WORKER_SSH_KEY':       document.getElementById('worker-ssh-key').value    = decodeKey(val); break;
+          case 'OCP_WORKER_NAME_PREFIX':   document.getElementById('worker-name').value       = val; break;
+          case 'IONOS_API_TOKEN':          document.getElementById('ionos-token').value       = val; break;
+          case 'IONOS_FTP_USER':           document.getElementById('rhcos-ftp-user').value    = val; break;
+          case 'IONOS_FTP_PASS':           document.getElementById('rhcos-ftp-pass').value    = val; break;
+          case 'REGISTRY_TYPE': {
+            const el = document.getElementById('as-registry-type');
+            if (el) { el.value = val; el.dispatchEvent(new Event('change')); } break;
+          }
+          case 'REGISTRY_IMAGE':    { const el = document.getElementById('as-registry-image');    if (el) el.value = val; break; }
+          case 'REGISTRY_USERNAME': { const el = document.getElementById('as-registry-username'); if (el) el.value = val; break; }
+          case 'REGISTRY_PASSWORD': { const el = document.getElementById('as-registry-password'); if (el) el.value = val; break; }
+        }
+      }
+      document.getElementById('env-file-banner').style.display = '';
+      this.value = '';
+    };
+    reader.readAsText(file);
+  });
+
+  // ── In-memory state ────────────────────────────────────────────────────────
+  let clusterApiUrl      = '';
+  let ocpToken           = '';
+  let ionosToken         = '';
+  let datacenterId       = '';
+  let datacenterName     = '';
+  let datacenterLocation = '';
+  // SSH / management host (optional — enables automated ISO generation)
+  let mgmtHost       = '';
+  let sshUser        = 'root';
+  let sshKey         = '';
+  let sshPassphrase  = '';
+  let kubeconfigPath = '/root/.kube/config';
+  let mgmtServerId   = '';
+  let workerSshKey   = '';      // SSH private key for worker nodes (core user)
+  // Set after worker server is created (Step 1 → Step 2 context)
+  let workerIp         = null;
+  let workerMac        = null;
+  let workerServerId   = null;
+  let workerServerName = null;
+  let workerMainVolId  = null;  // the permanent 120 GB boot SSD (not the ISO volume)
+
+  let pollInterval   = null;
+  let pollCount      = 0;
+  const POLL_MAX     = 12;
+
+  // ── Utilities ──────────────────────────────────────────────────────────────
+  function escHtml(str) {
+    return String(str)
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function formatAge(iso) {
+    if (!iso) return '—';
+    const s = Math.floor((Date.now() - new Date(iso)) / 1000);
+    if (s < 60)  return `${s}s`;
+    const m = Math.floor(s / 60);
+    if (m < 60)  return `${m}m`;
+    const h = Math.floor(m / 60);
+    if (h < 48)  return `${h}h ${m % 60}m`;
+    return `${Math.floor(h / 24)}d ${h % 24}h`;
+  }
+
+  function setLoading(labelId, spinnerId, btnId, loading, labelText) {
+    document.getElementById(labelId).innerHTML = loading ? (labelText || 'Working…') : labelText;
+    document.getElementById(spinnerId).classList.toggle('hidden', !loading);
+    if (btnId) document.getElementById(btnId).disabled = loading;
+  }
+
+  function showError(boxId, msg) {
+    const el = document.getElementById(boxId);
+    el.textContent = msg;
+    el.style.display = 'block';
+  }
+  function hideError(boxId) { document.getElementById(boxId).style.display = 'none'; }
+
+  async function apiPost(path, body) {
+    const res  = await fetch(path, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(body)
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      let msg = data.error || `Error ${res.status}`;
+      if (res.status === 401 || (msg && msg.includes('Unauthorized'))) {
+        msg += '\n\nIf you have a fresh token, check that it was copied without trailing whitespace and that the Cluster API URL is correct. If the token is genuinely expired, run: oc whoami -t';
+      }
+      throw Object.assign(new Error(msg), { status: res.status });
+    }
+    return data;
+  }
+
+  // ── Browse / select datacenter ─────────────────────────────────────────────
+  document.getElementById('browse-dc-btn').addEventListener('click', async () => {
+    const tok = document.getElementById('ionos-token').value.trim();
+    if (!tok) { alert('Please enter your IONOS Cloud API Token first.'); return; }
+
+    setLoading('browse-dc-label', 'browse-dc-spinner', 'browse-dc-btn', true, 'Loading…');
+    try {
+      const data = await apiPost('/api/ionos/datacenters', { ionosToken: tok });
+      const sel  = document.getElementById('datacenter-select');
+      sel.innerHTML = '<option value="">— select a VDC —</option>' +
+        data.datacenters.map(dc =>
+          `<option value="${escHtml(dc.id)}" data-location="${escHtml(dc.location)}">${escHtml(dc.name)} (${escHtml(dc.location)})</option>`
+        ).join('');
+
+      // Auto-populate LANs and CPU families when DC is chosen; capture location
+      sel.onchange = () => {
+        const opt = sel.options[sel.selectedIndex];
+        datacenterLocation = opt?.dataset?.location || '';
+        loadLans(tok, sel.value, opt?.text || '');
+        loadIonosCpuFamilies();
+      };
+    } catch (err) {
+      alert('Failed to load VDCs: ' + err.message);
+    } finally {
+      setLoading('browse-dc-label', 'browse-dc-spinner', 'browse-dc-btn', false, 'Browse VDCs');
+    }
+  });
+
+  async function loadLans(tok, dcId, dcName) {
+    if (!dcId) return;
+    datacenterId   = dcId;
+    datacenterName = dcName;
+    const lanSel = document.getElementById('worker-lan');
+    lanSel.innerHTML = '<option value="">Loading…</option>';
+    try {
+      const data = await apiPost('/api/ionos/lans', { ionosToken: tok, datacenterId: dcId });
+      lanSel.innerHTML = data.lans.map(l =>
+        `<option value="${escHtml(l.id)}">${escHtml(l.name)}${l.public ? ' (public)' : ' (private)'}</option>`
+      ).join('');
+      // Auto-select the first private LAN named "Internal" if present
+      const internalLan = data.lans.find(l =>
+        !l.public && l.name.toLowerCase().includes('internal')
+      );
+      if (internalLan) lanSel.value = internalLan.id;
+    } catch (_) {
+      lanSel.innerHTML = '<option value="">Failed to load LANs</option>';
+    }
+  }
+
+  // ── Dynamic CPU family loader ──────────────────────────────────────────────
+  // Map IONOS API cpuFamily strings to human-readable labels
+  const CPU_FAMILY_LABELS = {
+    INTEL_ICELAKE:       'Intel Icelake',
+    INTEL_SKYLAKE:       'Intel Skylake',
+    INTEL_XEON:          'Intel Xeon',
+    INTEL_SIERRAFOREST:  'Intel Sierra Forest',
+    AMD_OPTERON:         'AMD Opteron',
+    AMD_EPYC:            'AMD EPYC',
+  };
+
+  async function loadIonosCpuFamilies() {
+    if (!ionosToken || !datacenterLocation) return;
+    const sel = document.getElementById('as-ionos-cpu-family');
+    if (!sel) return;
+    sel.innerHTML = '<option value="">Loading…</option>';
+    try {
+      const data = await apiPost('/api/ionos/location-cpu-families',
+        { ionosToken, location: datacenterLocation });
+      const families = data.cpuFamilies || [];
+      if (families.length === 0) {
+        sel.innerHTML = '<option value="">No CPU families found</option>';
+        return;
+      }
+      const prev = sel.value;
+      sel.innerHTML = families.map(f => {
+        const label = CPU_FAMILY_LABELS[f] || f;
+        return `<option value="${escHtml(f)}"${f === prev ? ' selected' : ''}>${escHtml(label)}</option>`;
+      }).join('');
+      // Default to Icelake if available and nothing was pre-selected
+      if (!sel.value && families.includes('INTEL_ICELAKE')) sel.value = 'INTEL_ICELAKE';
+    } catch (_) {
+      sel.innerHTML = '<option value="INTEL_ICELAKE">Intel Icelake (default)</option>';
+    }
+  }
+
+  // ── Connect ────────────────────────────────────────────────────────────────
+  document.getElementById('connect-btn').addEventListener('click', async () => {
+    hideError('connect-error');
+    const apiUrl   = document.getElementById('api-url').value.trim();
+    const ocpTok   = document.getElementById('ocp-token').value.trim();
+    const ionosTok = document.getElementById('ionos-token').value.trim();
+    const dcId     = document.getElementById('datacenter-select').value;
+
+    if (!apiUrl || !ocpTok) {
+      showError('connect-error', 'Cluster API URL and OpenShift Bearer Token are required.');
+      return;
+    }
+    if (!apiUrl.startsWith('https://')) {
+      showError('connect-error', 'Cluster API URL must start with https://');
+      return;
+    }
+
+    setLoading('connect-label', 'connect-spinner', 'connect-btn', true, 'Connecting…');
+    try {
+      const state = await apiPost('/api/connect', { apiUrl, ocpToken: ocpTok });
+
+      clusterApiUrl  = apiUrl;
+      ocpToken       = ocpTok;
+      ionosToken     = ionosTok;
+      datacenterId   = dcId || datacenterId;
+      mgmtHost       = document.getElementById('mgmt-host').value.trim();
+      sshUser        = document.getElementById('ssh-user').value.trim() || 'root';
+      sshKey         = document.getElementById('ssh-key').value.trim();
+      sshPassphrase  = document.getElementById('ssh-passphrase').value;
+      kubeconfigPath = document.getElementById('kubeconfig-path').value.trim() || '/root/.kube/config';
+      mgmtServerId   = document.getElementById('mgmt-server-id').value.trim();
+      workerSshKey   = document.getElementById('worker-ssh-key').value.trim();
+      // Capture location from selected DC option
+      const dcOptEl = document.getElementById('datacenter-select');
+      datacenterLocation = dcOptEl.options[dcOptEl.selectedIndex]?.dataset?.location || '';
+
+      // Show connected strip
+      document.getElementById('connect-form').classList.add('hidden');
+      document.getElementById('connected-url').textContent = apiUrl;
+      const dcSel = document.getElementById('datacenter-select');
+      document.getElementById('connected-vdc').textContent =
+        dcSel.options[dcSel.selectedIndex]?.text || '';
+      document.getElementById('connected-strip').classList.remove('hidden');
+
+      renderAll(state);
+      document.getElementById('scaling-action-card').classList.remove('hidden');
+      // Show the correct action card based on current radio selection
+      applyScalingActionChoice();
+      document.getElementById('add-node-card').classList.remove('hidden');
+    } catch (err) {
+      showError('connect-error', err.message);
+    } finally {
+      setLoading('connect-label', 'connect-spinner', 'connect-btn', false, 'Connect to Cluster');
+    }
+  });
+
+  // ── Disconnect ─────────────────────────────────────────────────────────────
+  document.getElementById('disconnect-btn').addEventListener('click', () => {
+    stopPolling();
+    clusterApiUrl = ''; ocpToken = ''; ionosToken = ''; datacenterId = '';
+    mgmtHost = ''; sshUser = 'root'; sshKey = ''; sshPassphrase = '';
+    mgmtServerId = ''; workerServerId = null;
+    workerIp = null; workerMac = null; workerServerName = null; workerMainVolId = null;
+
+    document.getElementById('api-url').value   = '';
+    document.getElementById('ocp-token').value  = '';
+    document.getElementById('connect-form').classList.remove('hidden');
+    document.getElementById('connected-strip').classList.add('hidden');
+    hideError('connect-error');
+
+    ['overview-card','machinesets-card','nodes-card','csrs-card',
+     'scaling-action-card','scale-in-card','autoscale-card','add-node-card'].forEach(id =>
+      document.getElementById(id).classList.add('hidden')
+    );
+    document.getElementById('add-node-card').classList.remove('join-next');
+    document.getElementById('csrs-card').classList.remove('join-prev');
+    resetAddNodeWizard();
+  });
+
+  // ── Smart worker name suggestion ───────────────────────────────────────────
+  // Looks at existing worker names, finds the highest trailing number, returns
+  // prefix + (n+1).  Falls back to the env-supplied prefix if no pattern found.
+  function suggestNextWorkerName(nodes) {
+    const workers = nodes.filter(n => n.role === 'worker').map(n => n.name);
+    if (!workers.length) return window._workerNamePrefix || '';
+
+    // Extract (prefix, trailing number) pairs
+    const numbered = workers
+      .map(name => { const m = name.match(/^(.*?)(\d+)$/); return m ? { prefix: m[1], num: parseInt(m[2], 10) } : null; })
+      .filter(Boolean);
+
+    if (!numbered.length) {
+      // No trailing digits — append "-2" to the last worker name
+      const last = workers[workers.length - 1];
+      return last.endsWith('-') ? last + '2' : last + '-2';
+    }
+
+    // For each prefix, track the highest number seen
+    const byPrefix = {};
+    for (const { prefix, num } of numbered) {
+      if (byPrefix[prefix] === undefined || num > byPrefix[prefix]) byPrefix[prefix] = num;
+    }
+    // Pick the prefix whose max number is largest (i.e. the most recently added pattern)
+    let bestPrefix = '', bestNum = -1;
+    for (const [p, n] of Object.entries(byPrefix)) {
+      if (n > bestNum) { bestNum = n; bestPrefix = p; }
+    }
+    return `${bestPrefix}${bestNum + 1}`;
+  }
+
+  // ── Render ─────────────────────────────────────────────────────────────────
+  function renderOverview(state) {
+    document.getElementById('version-pill').textContent = state.version;
+    const masters  = state.nodes.filter(n => n.role === 'master').length;
+    const workers  = state.nodes.filter(n => n.role === 'worker').length;
+    const notReady = state.nodes.filter(n => !n.ready).length;
+    document.getElementById('stat-row').innerHTML = `
+      <div class="stat-mini"><div class="sm-label">Control Plane</div><div class="sm-value sm-masters">${masters}</div></div>
+      <div class="stat-mini"><div class="sm-label">Workers</div><div class="sm-value sm-workers">${workers}</div></div>
+      <div class="stat-mini"><div class="sm-label">Not Ready</div><div class="sm-value ${notReady > 0 ? 'sm-notready' : 'sm-neutral'}">${notReady}</div></div>
+      <div class="stat-mini"><div class="sm-label">Total Nodes</div><div class="sm-value sm-neutral">${state.nodes.length}</div></div>
+    `;
+    document.getElementById('refresh-ts').textContent = 'Last refreshed: ' + new Date().toLocaleTimeString();
+  }
+
+  function renderMachineSets(state) {
+    const tbody = document.getElementById('machinesets-tbody');
+    if (!state.machineSets.length) {
+      tbody.innerHTML = '<tr><td colspan="8" class="no-data">No MachineSets found.</td></tr>';
+    } else {
+      tbody.innerHTML = state.machineSets.map(ms => `
+        <tr>
+          <td class="mono">${escHtml(ms.name)}</td>
+          <td>${ms.desired}</td>
+          <td style="color:${ms.ready === ms.desired ? '#34d399' : '#f87171'}">${ms.ready}</td>
+          <td>${ms.available}</td>
+          <td style="color:#64748b;font-size:0.83rem;font-family:monospace">${escHtml(ms.region || '—')}</td>
+          <td style="color:#64748b;font-size:0.83rem">${escHtml(ms.az || '—')}</td>
+          <td>
+            <div class="scale-cell">
+              <input type="number" class="replicas-input" min="${ms.desired + 1}"
+                value="${ms.desired + 1}" data-current="${ms.desired}" style="width:80px" />
+            </div>
+          </td>
+          <td><button class="btn btn-sm scale-btn" data-name="${escHtml(ms.name)}">Scale &#8593;</button></td>
+        </tr>`).join('');
+      attachScaleHandlers();
+    }
+
+    // Populate autoscaler MachineSet source dropdown
+    const asSel = document.getElementById('as-ms-source');
+    const prev  = asSel.value;
+    asSel.innerHTML = state.machineSets.length
+      ? state.machineSets.map(ms =>
+          `<option value="${escHtml(ms.name)}"${ms.name === prev ? ' selected' : ''}>${escHtml(ms.name)} (${ms.desired} replicas)</option>`
+        ).join('')
+      : '<option value="">— no MachineSets found —</option>';
+  }
+
+  function renderNodes(state) {
+    const tbody = document.getElementById('nodes-tbody');
+    if (!state.nodes.length) {
+      tbody.innerHTML = '<tr><td colspan="5" class="no-data">No nodes found.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = state.nodes.map(n => {
+      const bc = n.role === 'master' ? 'badge-master' : n.role === 'worker' ? 'badge-worker' : 'badge-unknown';
+      const rl = n.role === 'master' ? 'Control Plane' : n.role;
+      return `<tr>
+        <td class="mono">${escHtml(n.name)}</td>
+        <td><span class="badge ${bc}">${escHtml(rl)}</span></td>
+        <td class="${n.ready ? 'status-ready' : 'status-notready'}">${n.ready ? '&#10003; Ready' : '&#10005; Not Ready'}</td>
+        <td style="color:#64748b;font-size:0.83rem">${escHtml(n.version)}</td>
+        <td style="color:#64748b;font-size:0.83rem">${escHtml(formatAge(n.created))}</td>
+      </tr>`;
+    }).join('');
+
+    // Populate scale-in node dropdown with worker nodes
+    const sel = document.getElementById('scale-in-node-select');
+    const prevVal = sel.value;
+    sel.innerHTML = '<option value="">— select a worker node —</option>' +
+      state.nodes
+        .filter(n => n.role === 'worker')
+        .map(n => `<option value="${escHtml(n.name)}"${n.name === prevVal ? ' selected' : ''}>${escHtml(n.name)}${n.ready ? '' : ' (Not Ready)'}</option>`)
+        .join('');
+    // Re-trigger warning display if a node was already selected
+    if (sel.value) sel.dispatchEvent(new Event('change'));
+
+    // Auto-suggest next worker name — only overwrite if the user hasn't typed anything
+    const nameInput = document.getElementById('worker-name');
+    if (!nameInput.dataset.userEdited) {
+      const suggested = suggestNextWorkerName(state.nodes);
+      if (suggested) {
+        nameInput.value = suggested;
+        window._lastWorkerNameSuggestion = suggested;
+      }
+    }
+  }
+
+  // Active CSR filter: 'pending' | 'all' | 'worker'
+  let csrFilter = 'pending';
+
+  function renderCsrs(state) {
+    const card  = document.getElementById('csrs-card');
+    const tbody = document.getElementById('csrs-tbody');
+    const allCsrs = state.allCsrs || state.pendingCsrs || [];
+
+    // CSR card belongs on the Boot & Approve step (step 3+) — hide it during
+    // wizard steps 1 and 2, and on initial load before the wizard is started.
+    const wizardCard = document.getElementById('add-node-card');
+    const joinCards = () => {
+      wizardCard.classList.add('join-next');
+      card.classList.add('join-prev');
+    };
+    const unjoinCards = () => {
+      wizardCard.classList.remove('join-next');
+      card.classList.remove('join-prev');
+    };
+
+    if (currentWizardStep < 3) { card.classList.add('hidden'); unjoinCards(); return; }
+
+    if (!allCsrs.length && !(state.pendingCsrs || []).length) { card.classList.add('hidden'); unjoinCards(); return; }
+    card.classList.remove('hidden');
+    if (!wizardCard.classList.contains('hidden')) joinCards(); else unjoinCards();
+
+    // Update worker hint label
+    const hintEl = document.getElementById('csr-worker-hint');
+    if (hintEl) hintEl.textContent = workerServerName ? `(worker: ${workerServerName})` : '';
+
+    // Determine which CSRs to show based on active filter
+    let toShow = allCsrs;
+    if (csrFilter === 'pending') {
+      toShow = allCsrs.filter(c => c.condition === 'Pending');
+    } else if (csrFilter === 'worker' && workerServerName) {
+      toShow = allCsrs.filter(c =>
+        c.nodeHint && (c.nodeHint === workerServerName ||
+          c.requestor.includes(workerServerName)));
+    }
+
+    // Update filter button styles
+    ['pending','all','worker'].forEach(f => {
+      const btn = document.getElementById(`csr-filter-${f}`);
+      if (btn) btn.style.background = csrFilter === f ? '#1e3a5f' : '';
+    });
+
+    if (!toShow.length) {
+      tbody.innerHTML = `<tr><td colspan="7" style="color:#64748b;text-align:center;padding:1rem">
+        No CSRs match this filter.</td></tr>`;
+      attachCsrHandlers();
+      return;
+    }
+
+    tbody.innerHTML = toShow.map(csr => {
+      const isPending = csr.condition === 'Pending';
+      const isWorkerNode = workerServerName && csr.nodeHint &&
+        (csr.nodeHint === workerServerName || csr.requestor.includes(workerServerName));
+      const rowStyle = isWorkerNode ? 'background:rgba(56,189,248,0.06);' : '';
+      const workerTag = isWorkerNode
+        ? `<span style="font-size:0.7rem;background:#0c4a6e;color:#38bdf8;border-radius:3px;padding:0 4px;margin-left:4px">new</span>`
+        : '';
+      const condBadge = csr.condition === 'Approved'
+        ? `<span style="color:#6ee7b7;font-size:0.78rem">&#10003; Approved</span>`
+        : csr.condition === 'Denied'
+        ? `<span style="color:#fca5a5;font-size:0.78rem">&#10005; Denied</span>`
+        : `<span style="color:#fbbf24;font-size:0.78rem">&#9679; Pending</span>`;
+      const checkbox = isPending
+        ? `<input type="checkbox" class="csr-check" value="${escHtml(csr.name)}" />`
+        : `<span style="display:inline-block;width:16px"></span>`;
+      return `<tr style="${rowStyle}">
+        <td>${checkbox}</td>
+        <td class="mono" style="font-size:0.82rem">${escHtml(csr.name)}</td>
+        <td style="font-size:0.82rem">${escHtml(csr.nodeHint || '—')}${workerTag}</td>
+        <td style="font-size:0.78rem;color:#94a3b8">${escHtml(csr.signerShort || '—')}</td>
+        <td style="font-size:0.78rem;color:#64748b;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+            title="${escHtml(csr.requestor)}">${escHtml(csr.requestor)}</td>
+        <td style="color:#64748b;font-size:0.82rem;white-space:nowrap">${escHtml(formatAge(csr.created))}</td>
+        <td>${condBadge}</td>
+      </tr>`;
+    }).join('');
+    attachCsrHandlers();
+  }
+
+  // Wire up filter buttons — done once after DOM ready
+  ['pending','all','worker'].forEach(f => {
+    const btn = document.getElementById(`csr-filter-${f}`);
+    if (btn) btn.addEventListener('click', () => { csrFilter = f; if (window._lastState) renderCsrs(window._lastState); });
+  });
+
+  function renderAll(state) {
+    window._lastState = state;
+    renderOverview(state);
+    renderMachineSets(state);
+    renderNodes(state);
+    renderCsrs(state);
+    ['overview-card','machinesets-card','nodes-card'].forEach(id =>
+      document.getElementById(id).classList.remove('hidden')
+    );
+  }
+
+  // ── Scale ──────────────────────────────────────────────────────────────────
+  function attachScaleHandlers() {
+    document.querySelectorAll('.scale-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        hideError('scale-error');
+        const row     = btn.closest('tr');
+        const input   = row.querySelector('.replicas-input');
+        const desired = parseInt(input.value, 10);
+        const current = parseInt(input.dataset.current, 10);
+        const name    = btn.dataset.name;
+
+        if (isNaN(desired) || desired <= current) {
+          showError('scale-error', `New replica count must be greater than current (${current}).`);
+          return;
+        }
+        btn.disabled = true; btn.textContent = '…';
+        try {
+          await apiPost('/api/scale', { apiUrl: clusterApiUrl, ocpToken, machineSetName: name, desiredReplicas: desired });
+          startPolling();
+        } catch (err) {
+          showError('scale-error', err.message);
+          btn.disabled = false; btn.innerHTML = 'Scale &#8593;';
+        }
+      });
+    });
+  }
+
+  // ── Polling ────────────────────────────────────────────────────────────────
+  function startPolling() {
+    stopPolling();
+    pollCount = 0;
+    updatePollBar();
+    document.getElementById('poll-bar').classList.add('active');
+    pollInterval = setInterval(pollOnce, 10000);
+  }
+  function stopPolling() {
+    if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+    document.getElementById('poll-bar').classList.remove('active');
+  }
+  function updatePollBar() {
+    document.getElementById('poll-fill').style.width = Math.min((pollCount / POLL_MAX) * 100, 100) + '%';
+    document.getElementById('poll-label').textContent =
+      `Watching for new nodes — check ${pollCount + 1} of ${POLL_MAX} (every 10s)`;
+  }
+  async function pollOnce() {
+    pollCount++;
+    updatePollBar();
+    if (pollCount >= POLL_MAX) stopPolling();
+    try {
+      const state = await apiPost('/api/refresh', { apiUrl: clusterApiUrl, ocpToken });
+      renderAll(state);
+    } catch (_) {}
+  }
+
+  // ── CSR approval ───────────────────────────────────────────────────────────
+  function attachCsrHandlers() {
+    const selectAll  = document.getElementById('csr-select-all');
+    const approveBtn = document.getElementById('approve-btn');
+    const checks     = () => [...document.querySelectorAll('.csr-check')];
+
+    selectAll.checked = false;
+    approveBtn.disabled = true;
+
+    selectAll.onchange = () => {
+      checks().forEach(c => c.checked = selectAll.checked);
+      approveBtn.disabled = !checks().some(c => c.checked);
+    };
+    checks().forEach(c => c.addEventListener('change', () => {
+      approveBtn.disabled = !checks().some(c => c.checked);
+      selectAll.checked   = checks().every(c => c.checked);
+    }));
+
+    approveBtn.onclick = async () => {
+      const csrNames = checks().filter(c => c.checked).map(c => c.value);
+      if (!csrNames.length) return;
+      hideError('csrs-error');
+      const resultEl = document.getElementById('approve-result');
+      resultEl.classList.add('hidden');
+      approveBtn.disabled = true;
+      document.getElementById('approve-spinner').classList.remove('hidden');
+      try {
+        const data = await apiPost('/api/approve-csrs', { apiUrl: clusterApiUrl, ocpToken, csrNames });
+        let msg = '';
+        if (data.approved.length) msg += `&#10003; Approved: ${data.approved.join(', ')}. `;
+        if (data.failed.length)   msg += `&#10005; Failed: ${data.failed.map(f => f.name).join(', ')}.`;
+        resultEl.className = 'approve-result ' + (data.failed.length ? 'approve-err' : 'approve-ok');
+        resultEl.innerHTML = msg;
+        resultEl.classList.remove('hidden');
+        const state = await apiPost('/api/refresh', { apiUrl: clusterApiUrl, ocpToken });
+        renderAll(state);
+      } catch (err) {
+        showError('csrs-error', err.message);
+      } finally {
+        approveBtn.disabled = false;
+        document.getElementById('approve-spinner').classList.add('hidden');
+      }
+    };
+  }
+
+  // ── Add Worker Node wizard ─────────────────────────────────────────────────
+  let currentWizardStep = 1;
+
+  function setStep(n) {
+    currentWizardStep = n;
+    [1,2,3,4].forEach(i => {
+      document.getElementById(`step-${i}`).classList.toggle('hidden', i !== n);
+      const ind = document.getElementById(`step-ind-${i}`);
+      ind.className = 'step' + (i < n ? ' done' : i === n ? ' active' : '');
+    });
+    // CSR card belongs on the Boot & Approve step — hide it while the wizard is
+    // on step 1 or 2, show it from step 3 onwards (or if wizard is not active).
+    const csrsCard = document.getElementById('csrs-card');
+    if (n >= 3) {
+      // Re-render so it reflects the latest state when we arrive on step 3
+      if (window._lastState) renderCsrs(window._lastState);
+    } else {
+      csrsCard.classList.add('hidden');
+    }
+  }
+
+  function resetAddNodeWizard() {
+    setStep(1);
+    const nameInput = document.getElementById('worker-name');
+    nameInput.value = window._lastWorkerNameSuggestion || window._workerNamePrefix || '';
+    delete nameInput.dataset.userEdited;
+    document.getElementById('worker-cores').value    = '4';
+    document.getElementById('worker-ram').value      = '8';
+    document.getElementById('worker-disk').value     = '120';
+    document.getElementById('worker-ssd-type').value = 'SSD Premium';
+    workerIp = null; workerMac = null; workerServerId = null; workerServerName = null; workerMainVolId = null;
+    hideError('create-error');
+    const csl = document.getElementById('create-server-log');
+    csl.textContent = ''; csl.classList.add('hidden');
+    // Reset step 2 state
+    document.getElementById('force-new-iso').checked = false;
+    resetIsoSteps();
+    document.getElementById('goto-step3-btn').disabled = true;
+    document.getElementById('step3-hint').textContent = 'Complete ISO generation or attach it manually to enable this button.';
+    document.getElementById('manual-iso-details').removeAttribute('open');
+    document.getElementById('auto-iso-panel').classList.add('hidden');
+    document.getElementById('manual-ip-row').classList.add('hidden');
+    document.getElementById('manual-worker-ip').value  = '';
+    document.getElementById('manual-worker-mac').value = '';
+  }
+
+  // Mark the name field as user-edited so auto-suggestion doesn't overwrite it
+  document.getElementById('worker-name').addEventListener('input', function() {
+    this.dataset.userEdited = '1';
+  });
+
+  document.getElementById('create-server-btn').addEventListener('click', async () => {
+    hideError('create-error');
+    const name    = document.getElementById('worker-name').value.trim();
+    const cores   = document.getElementById('worker-cores').value;
+    const ramMB   = String(parseInt(document.getElementById('worker-ram').value, 10) * 1024);
+    const diskGB  = document.getElementById('worker-disk').value;
+    const ssdType = document.getElementById('worker-ssd-type').value;
+    const lanId   = document.getElementById('worker-lan').value;
+
+    if (!name)         return showError('create-error', 'Server name is required.');
+    if (!ionosToken)   return showError('create-error', 'IONOS Cloud token is required — reconnect and provide it.');
+    if (!datacenterId) return showError('create-error', 'No datacenter selected — reconnect and select a VDC.');
+    if (!lanId)        return showError('create-error', 'Please select a LAN.');
+
+    const logEl = document.getElementById('create-server-log');
+    logEl.textContent = '';
+    logEl.classList.remove('hidden');
+
+    setLoading('create-server-label', 'create-server-spinner', 'create-server-btn', true, 'Creating server…');
+    try {
+      const response = await fetch('/api/ionos/create-worker', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+          ionosToken, datacenterId, serverName: name, cores, ramMB, diskGB, ssdType, lanId,
+          serverAz:  document.getElementById('worker-server-az').value,
+          storageAz: document.getElementById('worker-storage-az').value
+        })
+      });
+      if (!response.ok) {
+        const d = await response.json().catch(() => ({}));
+        throw new Error(d.error || `Server returned ${response.status}`);
+      }
+
+      const reader  = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let result = null;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop();
+        for (const part of parts) {
+          const dataLine = part.split('\n').find(l => l.startsWith('data:'));
+          if (!dataLine) continue;
+          let ev;
+          try { ev = JSON.parse(dataLine.slice(5)); } catch { continue; }
+
+          if (ev.type === 'log') {
+            logEl.textContent += ev.text;
+            logEl.scrollTop = logEl.scrollHeight;
+          } else if (ev.type === 'done') {
+            result = ev;
+          } else if (ev.type === 'error') {
+            throw new Error(ev.message);
+          }
+        }
+      }
+
+      if (!result) throw new Error('No result received from server.');
+
+      // Store for use in automation step
+      workerIp         = result.primaryIp  || null;
+      workerMac        = result.macAddress || null;
+      workerServerId   = result.serverId   || null;
+      workerServerName = result.serverName;
+      workerMainVolId  = result.volumeId   || null;
+
+      // Show manual override row if IP or MAC wasn't returned
+      if (!workerIp || !workerMac) {
+        document.getElementById('manual-ip-row').classList.remove('hidden');
+        if (!workerIp)  document.getElementById('manual-worker-ip').value  = '';
+        if (!workerMac) document.getElementById('manual-worker-mac').value = '';
+      } else {
+        document.getElementById('manual-ip-row').classList.add('hidden');
+      }
+
+      document.getElementById('server-created-box').innerHTML =
+        `&#10003; Server <strong>${escHtml(result.serverName)}</strong> created (ID: <code>${escHtml(result.serverId)}</code>).<br>` +
+        `Assigned IP on LAN: <strong style="color:#34d399">${escHtml(result.primaryIp || '—')}</strong>` +
+        (result.macAddress ? `&nbsp;&nbsp;·&nbsp;&nbsp;MAC: <code>${escHtml(result.macAddress)}</code>` : '');
+
+      document.getElementById('iso-cmd').textContent =
+        `oc adm node-image create --ip=${result.primaryIp || '<IP>'} --kubeconfig=${kubeconfigPath}`;
+
+      document.getElementById('server-name-ref').textContent   = result.serverName;
+      document.getElementById('server-name-ref-3').textContent = result.serverName;
+
+      const autoPanel = document.getElementById('auto-iso-panel');
+      if (mgmtHost && sshKey) {
+        autoPanel.classList.remove('hidden');
+        document.getElementById('manual-iso-summary').textContent = '\u25BA Show manual command (fallback)';
+        document.getElementById('step3-hint').textContent =
+          'Run the automated ISO generation above, or attach the ISO manually, to enable this button.';
+        document.getElementById('iso-s2-label').textContent =
+          `Run oc adm node-image create --mac-address=${result.macAddress || '<MAC>'}`;
+      } else {
+        autoPanel.classList.add('hidden');
+        document.getElementById('goto-step3-btn').disabled = false;
+        document.getElementById('step3-hint').textContent = '';
+        document.getElementById('manual-iso-details').setAttribute('open', '');
+        document.getElementById('manual-iso-summary').textContent = '\u25BC Manual command';
+      }
+      resetIsoSteps();
+      setStep(2);
+    } catch (err) {
+      showError('create-error', err.message);
+    } finally {
+      setLoading('create-server-label', 'create-server-spinner', 'create-server-btn', false, '&#128640; Create Server on IONOS Cloud');
+      document.getElementById('create-server-btn').disabled = false;
+    }
+  });
+
+  document.getElementById('goto-step3-btn').addEventListener('click', () => {
+    setStep(3);
+    document.getElementById('server-name-ref-3').textContent = workerServerName || '';
+  });
+
+  // ── ISO automation ─────────────────────────────────────────────────────────
+
+  // Icon per status
+  const ISO_STEP_ICON = { pending: '○', working: '…', ok: '✓', error: '✗' };
+
+  function resetIsoSteps() {
+    ['iso-s1','iso-s2','iso-s3','iso-s4','iso-s5','iso-s6'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) { el.dataset.status = 'pending'; el.querySelector('.iso-step-icon').textContent = '○'; }
+    });
+    document.getElementById('iso-log').classList.add('hidden');
+    document.getElementById('iso-log').textContent = '';
+    document.getElementById('iso-url-box').classList.add('hidden');
+    document.getElementById('install-progress-wrap').classList.add('hidden');
+    document.getElementById('install-progress-bar').style.width = '0%';
+    document.getElementById('install-progress-pct').textContent = '0%';
+    document.getElementById('install-progress-detail').textContent = '';
+    document.getElementById('dd-progress-wrap').classList.add('hidden');
+    document.getElementById('dd-progress-bar').style.width = '0%';
+    document.getElementById('dd-progress-pct').textContent = '0%';
+    document.getElementById('dd-progress-detail').textContent = '';
+    document.getElementById('dd-progress-speed').textContent = '';
+    document.getElementById('dd-progress-eta').textContent = '';
+    const isoBtn = document.getElementById('auto-iso-btn');
+    isoBtn.disabled = false;
+    isoBtn.title = '';
+    hideError('auto-iso-error');
+  }
+
+  // Map SSE step labels to step-element IDs (by order of arrival)
+  const ISO_STEP_IDS = ['iso-s1', 'iso-s2', 'iso-s3', 'iso-s4', 'iso-s5', 'iso-s6'];
+  let isoStepIdx = 0;
+
+  function applyIsoEvent(ev) {
+    if (ev.type === 'step') {
+      const id = ISO_STEP_IDS[isoStepIdx] || null;
+      if (id) {
+        const el = document.getElementById(id);
+        el.dataset.status = ev.status;
+        el.querySelector('.iso-step-icon').textContent = ISO_STEP_ICON[ev.status] || '○';
+        const labelEl = el.querySelector('span:last-child');
+        if (ev.status !== 'ok' && ev.status !== 'pending') labelEl.textContent = ev.label;
+        if (ev.status === 'ok' || ev.status === 'error') isoStepIdx++;
+      }
+    } else if (ev.type === 'dd-progress') {
+      const wrap = document.getElementById('dd-progress-wrap');
+      wrap.classList.remove('hidden');
+      document.getElementById('dd-progress-bar').style.width   = ev.percent + '%';
+      document.getElementById('dd-progress-pct').textContent   = ev.percent + '%';
+      document.getElementById('dd-progress-speed').textContent = ev.speed || '';
+      document.getElementById('dd-progress-eta').textContent   = ev.eta ? 'ETA ' + ev.eta : '';
+      document.getElementById('dd-progress-detail').textContent =
+        ev.written && ev.total ? `${ev.written} / ${ev.total}` : '';
+      if (ev.percent >= 100) {
+        document.getElementById('dd-progress-speed').textContent = '';
+        document.getElementById('dd-progress-eta').textContent   = '';
+        document.getElementById('dd-progress-detail').textContent = ev.total ? `${ev.total} — complete` : 'complete';
+      }
+    } else if (ev.type === 'install-progress') {
+      const wrap = document.getElementById('install-progress-wrap');
+      wrap.classList.remove('hidden');
+      document.getElementById('install-progress-bar').style.width = ev.percent + '%';
+      document.getElementById('install-progress-pct').textContent = ev.percent + '%';
+      document.getElementById('install-progress-detail').textContent =
+        ev.written && ev.total ? `${ev.written} / ${ev.total}` : '';
+    } else if (ev.type === 'log') {
+      const box = document.getElementById('iso-log');
+      box.classList.remove('hidden');
+      box.textContent += ev.text;
+      box.scrollTop = box.scrollHeight;
+    } else if (ev.type === 'done') {
+      document.getElementById('iso-url-box').classList.remove('hidden');
+      document.getElementById('goto-step3-btn').disabled = false;
+      document.getElementById('step3-hint').textContent = 'Worker node is booting — proceed to approve its CSRs.';
+      const isoBtn = document.getElementById('auto-iso-btn');
+      isoBtn.disabled = true;
+      isoBtn.title = 'ISO deployment complete — click "Approve CSRs" to continue.';
+    } else if (ev.type === 'error') {
+      showError('auto-iso-error', ev.message);
+      // Re-enable button for retry
+      setLoading('auto-iso-label', 'auto-iso-spinner', 'auto-iso-btn', false, '&#9889; Retry ISO Deployment');
+      document.getElementById('auto-iso-btn').disabled = false;
+    }
+  }
+
+  document.getElementById('auto-iso-btn').addEventListener('click', async () => {
+    // Resolve IP and MAC — prefer stored values, fall back to manual override inputs
+    const effectiveIp  = workerIp  || document.getElementById('manual-worker-ip').value.trim();
+    const effectiveMac = workerMac || document.getElementById('manual-worker-mac').value.trim();
+    if (!effectiveIp) {
+      showError('auto-iso-error', 'No IP address available. Enter the worker node IP from the IONOS DCD in the field above.');
+      return;
+    }
+    if (!effectiveMac) {
+      showError('auto-iso-error', 'No MAC address available. Enter the worker NIC MAC address from the IONOS DCD in the field above.');
+      return;
+    }
+    hideError('auto-iso-error');
+    resetIsoSteps();
+    isoStepIdx = 0;
+    setLoading('auto-iso-label', 'auto-iso-spinner', 'auto-iso-btn', true, 'Running automation…');
+
+    try {
+      const response = await fetch('/api/execute-node-iso', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ionosToken,
+          mgmtHost,
+          sshUser,
+          sshKey,
+          sshPassphrase: sshPassphrase || undefined,
+          workerIp:       effectiveIp,
+          macAddress:     effectiveMac,
+          serverName:     workerServerName,
+          kubeconfigPath,
+          datacenterId,
+          workerServerId,
+          workerMainVolId,
+          workerSshKey:   workerSshKey   || undefined,
+          mgmtServerId:   mgmtServerId   || undefined,
+          forceNewIso:    document.getElementById('force-new-iso').checked || undefined
+        })
+      });
+
+      if (!response.ok) {
+        const d = await response.json().catch(() => ({}));
+        throw new Error(d.error || `Server returned ${response.status}`);
+      }
+
+      // Read SSE stream via fetch + ReadableStream
+      const reader  = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nlIdx;
+        while ((nlIdx = buffer.indexOf('\n\n')) !== -1) {
+          const chunk = buffer.slice(0, nlIdx);
+          buffer = buffer.slice(nlIdx + 2);
+          for (const line of chunk.split('\n')) {
+            if (line.startsWith('data: ')) {
+              try { applyIsoEvent(JSON.parse(line.slice(6))); } catch (_) {}
+            }
+          }
+        }
+      }
+    } catch (err) {
+      showError('auto-iso-error', err.message);
+    } finally {
+      setLoading('auto-iso-label', 'auto-iso-spinner', 'auto-iso-btn', false, '&#9889; Generate &amp; Deploy ISO Automatically');
+      document.getElementById('auto-iso-btn').disabled = false;
+    }
+  });
+
+
+  function renderEvents(events) {
+    if (!events || !events.length) return '';
+    const rows = events.map(e => {
+      const t = e.time ? new Date(e.time).toLocaleTimeString() : '';
+      return `<tr>
+        <td style="color:#64748b;white-space:nowrap">${escHtml(t)}</td>
+        <td style="color:#34d399;white-space:nowrap">${escHtml(e.reason)}</td>
+        <td style="color:#94a3b8;white-space:nowrap">${escHtml(e.object)}</td>
+        <td style="color:#e2e8f0">${escHtml(e.message)}</td>
+      </tr>`;
+    }).join('');
+    return `<div style="margin-top:1rem">
+      <div style="font-size:0.78rem;color:#64748b;margin-bottom:0.4rem">Recent cluster events</div>
+      <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:0.78rem">
+        <thead><tr>
+          <th style="text-align:left;color:#475569;padding:0 0.5rem 0.25rem 0">Time</th>
+          <th style="text-align:left;color:#475569;padding:0 0.5rem 0.25rem 0">Reason</th>
+          <th style="text-align:left;color:#475569;padding:0 0.5rem 0.25rem 0">Object</th>
+          <th style="text-align:left;color:#475569;padding:0 0 0.25rem 0">Message</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table></div></div>`;
+  }
+
+  async function checkForCsrs() {
+    const state = await apiPost('/api/refresh', { apiUrl: clusterApiUrl, ocpToken });
+    renderAll(state);
+    const box     = document.getElementById('step4-status-box');
+    const evHtml  = renderEvents(state.recentEvents);
+    const newNode = state.nodes && state.nodes.find(n => n.name === workerServerName);
+    const allCsrs = state.allCsrs || [];
+
+    // CSRs that belong to the new worker
+    const workerCsrs = workerServerName
+      ? allCsrs.filter(c => c.nodeHint === workerServerName || c.requestor.includes(workerServerName))
+      : [];
+    const workerPending  = workerCsrs.filter(c => c.condition === 'Pending');
+    const workerApproved = workerCsrs.filter(c => c.condition === 'Approved');
+
+    if (newNode && newNode.ready) {
+      box.innerHTML = `<strong style="color:#6ee7b7">&#10003; Node ${escHtml(workerServerName)} is Ready</strong> — successfully joined the cluster.${evHtml}`;
+    } else if (workerPending.length) {
+      box.innerHTML = `<strong style="color:#fbbf24">${workerPending.length} pending CSR(s) for ${escHtml(workerServerName)}.</strong><br>
+        Scroll down to the <em>Certificate Signing Requests</em> card — the new worker's CSRs are highlighted in blue.
+        Approve both the <em>kubelet client</em> and <em>kubelet serving</em> CSRs.${evHtml}`;
+    } else if (workerApproved.length) {
+      box.innerHTML = `<strong style="color:#6ee7b7">${workerApproved.length} CSR(s) approved for ${escHtml(workerServerName)}</strong> — waiting for node to become Ready.
+        A second CSR may follow shortly; keep refreshing.${evHtml}`;
+    } else if (state.pendingCsrs.length) {
+      box.innerHTML = `<strong>${state.pendingCsrs.length} pending CSR(s) found</strong> (none yet matched to ${escHtml(workerServerName || 'new worker')}).<br>
+        Check the <em>Certificate Signing Requests</em> card below for details.${evHtml}`;
+    } else {
+      box.innerHTML = `No pending CSRs yet — the node may still be bootstrapping.<br>
+        The agent typically submits its first CSR 2–5 minutes after boot.
+        Use <strong>Refresh CSRs</strong> to check again.${evHtml}`;
+    }
+  }
+
+  document.getElementById('goto-step4-btn').addEventListener('click', async () => {
+    setLoading('goto-step4-label', 'goto-step4-spinner', 'goto-step4-btn', true, 'Checking…');
+    try {
+      await checkForCsrs();
+      setStep(4);
+    } catch (err) {
+      document.getElementById('step4-status-box').innerHTML =
+        `<span style="color:#fca5a5">&#10005; ${escHtml(err.message)}</span>`;
+      setStep(4);
+    } finally {
+      setLoading('goto-step4-label', 'goto-step4-spinner', 'goto-step4-btn', false, '&#8635; Check for Pending CSRs');
+      document.getElementById('goto-step4-btn').disabled = false;
+    }
+  });
+
+  document.getElementById('refresh-nodes-btn').addEventListener('click', async () => {
+    setLoading('refresh-nodes-label', 'refresh-nodes-spinner', 'refresh-nodes-btn', true, 'Refreshing…');
+    try {
+      const state = await apiPost('/api/refresh', { apiUrl: clusterApiUrl, ocpToken });
+      renderAll(state);
+    } catch (err) {
+      console.error('Refresh nodes failed:', err.message);
+    } finally {
+      setLoading('refresh-nodes-label', 'refresh-nodes-spinner', 'refresh-nodes-btn', false, '&#8635; Refresh Nodes');
+      document.getElementById('refresh-nodes-btn').disabled = false;
+    }
+  });
+
+  document.getElementById('recheck-csrs-btn').addEventListener('click', async () => {
+    setLoading('recheck-csrs-label', 'recheck-csrs-spinner', 'recheck-csrs-btn', true, 'Refreshing…');
+    try {
+      await checkForCsrs();
+    } catch (err) {
+      document.getElementById('step4-status-box').innerHTML =
+        `<span style="color:#fca5a5">&#10005; ${escHtml(err.message)}</span>`;
+    } finally {
+      setLoading('recheck-csrs-label', 'recheck-csrs-spinner', 'recheck-csrs-btn', false, '&#8635; Refresh CSRs');
+      document.getElementById('recheck-csrs-btn').disabled = false;
+    }
+  });
+
+  // ── Scaling action selector ────────────────────────────────────────────────
+  function applyScalingActionChoice() {
+    const val = document.querySelector('input[name="scaling-action"]:checked')?.value || 'out';
+    document.getElementById('scale-in-card').classList.toggle('hidden',   val !== 'in');
+    document.getElementById('add-node-card').classList.toggle('hidden',   val !== 'out');
+    document.getElementById('autoscale-card').classList.toggle('hidden',  val !== 'auto');
+    document.getElementById('scale-out-label').style.borderColor  = val === 'out'  ? '#38bdf8' : '#2d3348';
+    document.getElementById('scale-in-label').style.borderColor   = val === 'in'   ? '#f87171' : '#2d3348';
+    document.getElementById('scale-auto-label').style.borderColor = val === 'auto' ? '#a78bfa' : '#2d3348';
+  }
+
+  document.querySelectorAll('input[name="scaling-action"]').forEach(r =>
+    r.addEventListener('change', applyScalingActionChoice)
+  );
+
+  // ── Auto-Scaling ───────────────────────────────────────────────────────────
+  const AS_ALL_STEP_IDS = ['as-s1','as-s2','as-si0','as-si1','as-si2','as-si3','as-s3','as-s4'];
+  let asStepIdx = 0;
+  let asActiveStepIds = [];
+
+  function resetAsSteps() {
+    asStepIdx = 0;
+    AS_ALL_STEP_IDS.forEach(id => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.dataset.status = 'pending';
+      el.querySelector('.iso-step-icon').textContent = '○';
+    });
+    document.getElementById('as-steps').classList.add('hidden');
+    document.getElementById('as-log').classList.add('hidden');
+    document.getElementById('as-log').textContent = '';
+    document.getElementById('as-done').classList.add('hidden');
+    hideError('as-error');
+  }
+
+  function applyAsModeVisibility() {
+    const isClone = document.getElementById('as-mode-clone').checked;
+    const isIonos = document.getElementById('as-mode-ionos').checked;
+    // Source group (existing + clone)
+    document.getElementById('as-source-group').style.display  = isIonos ? 'none' : '';
+    document.getElementById('as-clone-name-group').style.display    = isClone ? '' : 'none';
+    document.getElementById('as-clone-replicas-group').style.display = isClone ? '' : 'none';
+    // IONOS group
+    document.getElementById('as-ionos-group').style.display              = isIonos ? '' : 'none';
+    document.getElementById('as-provider-deploy-group').style.display    = isIonos ? '' : 'none';
+    // Step visibility
+    document.getElementById('as-s1').classList.toggle('hidden', !isClone);
+    document.getElementById('as-s2').classList.toggle('hidden', !isClone);
+    document.getElementById('as-si1').classList.toggle('hidden', !isIonos);
+    document.getElementById('as-si2').classList.toggle('hidden', !isIonos);
+    document.getElementById('as-si3').classList.toggle('hidden', !isIonos);
+  }
+
+  // Toggle mode-specific fields; load CPU families when IONOS mode is selected
+  document.querySelectorAll('input[name="as-ms-mode"]').forEach(r => r.addEventListener('change', () => {
+    applyAsModeVisibility();
+    if (r.value === 'ionos') loadIonosCpuFamilies();
+  }));
+
+  // Show/hide registry fields when deploy-provider checkbox changes
+  document.getElementById('as-deploy-provider').addEventListener('change', function () {
+    document.getElementById('as-registry-fields').style.display = this.checked ? '' : 'none';
+  });
+
+  // Update registry field labels/hints when registry type changes
+  const regTypeHints = {
+    dockerhub: {
+      imagePlaceholder: 'username/repo:tag',
+      imageHint:        'Docker Hub: <code>username/repo:tag</code>',
+      userLabel:        'Username',
+      passLabel:        'Password',
+      passHint:         'Leave blank if the image is public'
+    },
+    ghcr: {
+      imagePlaceholder: 'ghcr.io/username/repo:tag',
+      imageHint:        'GitHub: <code>ghcr.io/org/repo:tag</code>',
+      userLabel:        'GitHub Username',
+      passLabel:        'Personal Access Token (read:packages)',
+      passHint:         'PAT needs <code>read:packages</code> scope'
+    },
+    ionos: {
+      imagePlaceholder: 'registry.example.ionos.com/repo:tag',
+      imageHint:        'IONOS: full image URL including registry host',
+      userLabel:        'Registry Username',
+      passLabel:        'Registry Password',
+      passHint:         'Credentials from IONOS DCD → Container Registry'
+    },
+    custom: {
+      imagePlaceholder: 'registry.example.com/repo:tag',
+      imageHint:        'Full image URL including registry host',
+      userLabel:        'Username',
+      passLabel:        'Password / Token',
+      passHint:         'Leave blank if the image is public'
+    }
+  };
+  document.getElementById('as-registry-type').addEventListener('change', function () {
+    const h = regTypeHints[this.value] || regTypeHints.custom;
+    document.getElementById('as-registry-image').placeholder = h.imagePlaceholder;
+    document.getElementById('as-registry-image-hint').innerHTML = h.imageHint;
+    document.getElementById('as-registry-username-label').textContent = h.userLabel;
+    document.getElementById('as-registry-password-label').textContent = h.passLabel;
+    document.getElementById('as-registry-password-hint').innerHTML = h.passHint;
+  });
+
+  // Show/hide CPU family group based on instance type
+  document.getElementById('as-ionos-server-type').addEventListener('change', function () {
+    const isDedicatedCore = this.value === 'ENTERPRISE';
+    document.getElementById('as-ionos-cpu-family-group').style.display = isDedicatedCore ? '' : 'none';
+    if (isDedicatedCore && document.getElementById('as-ionos-cpu-family').options.length <= 1) {
+      loadIonosCpuFamilies();
+    }
+  });
+
+  // IONOS image browser
+  document.getElementById('as-ionos-browse-btn').addEventListener('click', async () => {
+    const panel = document.getElementById('as-ionos-images-panel');
+    const list  = document.getElementById('as-ionos-images-list');
+    panel.style.display = '';
+    list.textContent = 'Fetching images…';
+    try {
+      const res  = await fetch('/api/ionos/images', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ionosToken, filter: 'rhcos' })
+      });
+      const data = await res.json();
+      if (!res.ok) { list.textContent = data.error || 'Error fetching images'; return; }
+      if (!data.images || !data.images.length) { list.textContent = 'No RHCOS images found — use Upload RHCOS Image to add one.'; return; }
+      list.innerHTML = data.images.map(img => `
+        <div style="padding:0.45rem 0.7rem;border-bottom:1px solid #1e2333;cursor:pointer;display:flex;justify-content:space-between;align-items:center"
+             onclick="document.getElementById('as-ionos-image-id').value='${escHtml(img.id)}';
+                      document.getElementById('as-ionos-images-panel').style.display='none'">
+          <span style="color:#e2e8f0">${escHtml(img.name)}</span>
+          <span style="color:#64748b;font-family:monospace;font-size:0.72rem">${escHtml(img.id)}</span>
+        </div>`).join('');
+    } catch (e) {
+      list.textContent = 'Error: ' + e.message;
+    }
+  });
+
+  // ── RHCOS Upload panel ─────────────────────────────────────────────────────
+  document.getElementById('rhcos-upload-toggle').addEventListener('click', () => {
+    const panel   = document.getElementById('rhcos-upload-panel');
+    const chevron = document.getElementById('rhcos-upload-chevron');
+    const open    = panel.style.display === 'none';
+    panel.style.display   = open ? '' : 'none';
+    chevron.textContent   = open ? '▲ collapse' : '▼ expand';
+  });
+
+  const RHCOS_STEP_IDS = ['rhcos-s1','rhcos-s2','rhcos-s3','rhcos-s4','rhcos-s5'];
+  let rhcosStepIdx = 0;
+
+  function resetRhcosSteps() {
+    rhcosStepIdx = 0;
+    RHCOS_STEP_IDS.forEach(id => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.dataset.status = 'pending';
+      el.querySelector('.iso-step-icon').textContent = '○';
+    });
+    document.getElementById('rhcos-steps').classList.add('hidden');
+    document.getElementById('rhcos-log').classList.add('hidden');
+    document.getElementById('rhcos-log').textContent = '';
+    document.getElementById('rhcos-done').classList.add('hidden');
+    hideError('rhcos-error');
+  }
+
+  document.getElementById('rhcos-upload-btn').addEventListener('click', async () => {
+    const ocpVersion = document.getElementById('rhcos-ocp-version').value.trim();
+    const imageName  = document.getElementById('rhcos-image-name').value.trim();
+    const ftpUser    = document.getElementById('rhcos-ftp-user').value.trim();
+    const ftpPass    = document.getElementById('rhcos-ftp-pass').value;
+    // mgmt host creds come from the connection state
+    const sshKey     = document.getElementById('ssh-key').value.trim();
+    const sshUser    = document.getElementById('ssh-user').value.trim() || 'root';
+
+    if (!ocpVersion) { showError('rhcos-error', 'Enter the OCP version (e.g. 4.17).'); return; }
+    if (!ftpUser || !ftpPass) { showError('rhcos-error', 'Enter your IONOS FTP username and password.'); return; }
+    if (!mgmtHost) { showError('rhcos-error', 'Connect to the cluster first (management host is required).'); return; }
+    if (!sshKey) { showError('rhcos-error', 'Management host SSH key is required.'); return; }
+    if (!ionosToken) { showError('rhcos-error', 'IONOS API token is required (needed to confirm image availability).'); return; }
+    if (!datacenterId) { showError('rhcos-error', 'Connect to a VDC first (datacenter ID required to pick FTP region).'); return; }
+
+    resetRhcosSteps();
+    document.getElementById('rhcos-steps').classList.remove('hidden');
+    const logBox = document.getElementById('rhcos-log');
+    logBox.classList.remove('hidden');
+
+    function rhcosStep(label, status) {
+      const id = RHCOS_STEP_IDS[rhcosStepIdx] || null;
+      if (id) {
+        const el = document.getElementById(id);
+        if (el) {
+          el.dataset.status = status;
+          el.querySelector('.iso-step-icon').textContent =
+            status === 'ok' ? '✓' : status === 'error' ? '✗' : status === 'working' ? '…' : '○';
+          const lbl = el.querySelector('span:last-child');
+          if (status !== 'pending') lbl.textContent = label;
+          if (status === 'ok' || status === 'error') rhcosStepIdx++;
+        }
+      }
+    }
+
+    setLoading('rhcos-upload-label','rhcos-upload-spinner','rhcos-upload-btn', true, 'Uploading…');
+    hideError('rhcos-error');
+
+    try {
+      const response = await fetch('/api/upload-rhcos-image', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ionosToken, datacenterId,
+          ocpVersion, imageName,
+          ftpUser, ftpPass,
+          mgmtHost, mgmtSshKey: sshKey, mgmtSshUser: sshUser
+        })
+      });
+
+      const reader  = response.body.getReader();
+      const decoder = new TextDecoder();
+      let   buffer  = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nlIdx;
+        while ((nlIdx = buffer.indexOf('\n\n')) !== -1) {
+          const chunk = buffer.slice(0, nlIdx);
+          buffer = buffer.slice(nlIdx + 2);
+          for (const line of chunk.split('\n')) {
+            if (!line.startsWith('data: ')) continue;
+            let ev;
+            try { ev = JSON.parse(line.slice(6)); } catch (_) { continue; }
+            if (ev.type === 'step') {
+              rhcosStep(ev.label, ev.status);
+            } else if (ev.type === 'log') {
+              logBox.textContent += ev.text;
+              logBox.scrollTop = logBox.scrollHeight;
+            } else if (ev.type === 'done') {
+              let msg = ev.message || '';
+              let imageId = null;
+              try { const d = JSON.parse(msg); imageId = d.imageId; msg = `Image ready — UUID: ${d.imageId}`; } catch (_) {}
+              if (imageId) {
+                document.getElementById('as-ionos-image-id').value = imageId;
+                msg += '\nImage UUID auto-filled above.';
+              }
+              const d = document.getElementById('rhcos-done');
+              d.innerHTML = `<strong>&#10003; Done.</strong> ${escHtml(msg)}`;
+              d.classList.remove('hidden');
+            } else if (ev.type === 'error') {
+              showError('rhcos-error', ev.message);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      showError('rhcos-error', err.message);
+    } finally {
+      setLoading('rhcos-upload-label','rhcos-upload-spinner','rhcos-upload-btn', false, '&#8593; Upload RHCOS Image');
+    }
+  });
+
+  document.getElementById('as-apply-btn').addEventListener('click', async () => {
+    const msMode        = document.getElementById('as-mode-ionos').checked ? 'ionos'
+                        : document.getElementById('as-mode-clone').checked  ? 'clone' : 'existing';
+    const msSource      = document.getElementById('as-ms-source').value.trim();
+    const msNewName     = document.getElementById('as-ms-new-name').value.trim();
+    const msInitReplicas = parseInt(document.getElementById('as-ms-init-replicas').value, 10) || 1;
+    const minReplicas   = parseInt(document.getElementById('as-min-replicas').value, 10);
+    const maxReplicas   = parseInt(document.getElementById('as-max-replicas').value, 10);
+    const maxNodes      = parseInt(document.getElementById('as-max-nodes').value, 10);
+    const maxCores      = parseInt(document.getElementById('as-max-cores').value, 10);
+    const maxMemoryGiB  = parseInt(document.getElementById('as-max-memory').value, 10);
+    const scaleDown     = document.getElementById('as-scale-down').checked;
+    const delayAfterAdd = document.getElementById('as-delay-after-add').value.trim() || '10m';
+    const unneededTime  = document.getElementById('as-unneeded-time').value.trim() || '10m';
+
+    // IONOS-specific fields
+    const ionosMsName       = document.getElementById('as-ionos-ms-name').value.trim();
+    const ionosInitReplicas = parseInt(document.getElementById('as-ionos-init-replicas').value, 10) || 1;
+    const ionosImageId      = document.getElementById('as-ionos-image-id').value.trim();
+    const ionosServerType   = document.getElementById('as-ionos-server-type').value;
+    const ionosCpuFamily    = ionosServerType === 'VCPU' ? '' : document.getElementById('as-ionos-cpu-family').value;
+    const ionosAz           = document.getElementById('as-ionos-az').value;
+    const ionosDiskAz       = document.getElementById('as-ionos-disk-az').value;
+    const deployProvider    = document.getElementById('as-deploy-provider')?.checked || false;
+    const registryType     = document.getElementById('as-registry-type')?.value || 'dockerhub';
+    const registryImage    = document.getElementById('as-registry-image')?.value.trim() || '';
+    const registryUsername = document.getElementById('as-registry-username')?.value.trim() || '';
+    const registryPassword = document.getElementById('as-registry-password')?.value || '';
+    const ionosCores       = parseInt(document.getElementById('as-ionos-cores').value, 10) || 4;
+    const ionosRamGiB      = parseInt(document.getElementById('as-ionos-ram').value, 10) || 8;
+    const ionosDiskGB      = parseInt(document.getElementById('as-ionos-disk').value, 10) || 120;
+    const ionosDiskType    = document.getElementById('as-ionos-disk-type').value;
+    const ionosLanId       = parseInt(document.getElementById('as-ionos-lan').value, 10) || 1;
+
+    // Validation
+    if (msMode === 'existing' || msMode === 'clone') {
+      if (!msSource) { showError('as-error', 'Select a source MachineSet.'); return; }
+      if (msMode === 'clone' && !msNewName) { showError('as-error', 'Enter a name for the cloned MachineSet.'); return; }
+    }
+    if (msMode === 'ionos') {
+      if (!ionosMsName) { showError('as-error', 'Enter a MachineSet name for the IONOS MachineSet.'); return; }
+      if (!ionosImageId) { showError('as-error', 'Enter the RHCOS image UUID (use Browse Images to find it).'); return; }
+      if (!ionosToken) { showError('as-error', 'IONOS API token is required for IONOS MachineSet creation.'); return; }
+      if (!datacenterId) { showError('as-error', 'Connect to a VDC first (IONOS Datacenter ID is required).'); return; }
+    }
+    if (isNaN(minReplicas) || isNaN(maxReplicas) || minReplicas > maxReplicas) {
+      showError('as-error', 'Min replicas must be ≤ max replicas.'); return;
+    }
+
+    resetAsSteps();
+    applyAsModeVisibility();
+    document.getElementById('as-steps').classList.remove('hidden');
+
+    const isClone = msMode === 'clone';
+    const isIonos = msMode === 'ionos';
+    // Set step visibility for this run
+    document.getElementById('as-s1').classList.toggle('hidden', !isClone);
+    document.getElementById('as-s2').classList.toggle('hidden', !isClone);
+    if (deployProvider) document.getElementById('as-si0').classList.remove('hidden');
+    document.getElementById('as-si1').classList.toggle('hidden', !isIonos);
+    document.getElementById('as-si2').classList.toggle('hidden', !isIonos);
+    document.getElementById('as-si3').classList.toggle('hidden', !isIonos);
+
+    // Build ordered active step list for the server's sequential events
+    asActiveStepIds = isClone ? ['as-s1','as-s2','as-s3','as-s4']
+                   : isIonos ? (deployProvider ? ['as-si0','as-si1','as-si2','as-si3','as-s3','as-s4'] : ['as-si1','as-si2','as-si3','as-s3','as-s4'])
+                   :           ['as-s3','as-s4'];
+
+    const targetMsName = isClone ? msNewName : isIonos ? ionosMsName : msSource;
+
+    const logBox = document.getElementById('as-log');
+    logBox.classList.remove('hidden');
+
+    function asStep(label, status) {
+      const id = asActiveStepIds[asStepIdx] || null;
+      if (id) {
+        const el = document.getElementById(id);
+        if (el) {
+          el.dataset.status = status;
+          el.querySelector('.iso-step-icon').textContent =
+            status === 'ok' ? '✓' : status === 'error' ? '✗' : status === 'working' ? '…' : '○';
+          const lbl = el.querySelector('span:last-child');
+          if (status !== 'pending') lbl.textContent = label;
+          if (status === 'ok' || status === 'error') asStepIdx++;
+        }
+      }
+    }
+
+    setLoading('as-apply-label','as-apply-spinner','as-apply-btn', true, 'Applying…');
+    hideError('as-error');
+
+    try {
+      const response = await fetch('/api/setup-autoscaler', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          clusterApiUrl, ocpToken, ionosToken, datacenterId,
+          msMode, msSource, msNewName,
+          msInitReplicas: isIonos ? ionosInitReplicas : msInitReplicas,
+          targetMsName, minReplicas, maxReplicas,
+          maxNodes, maxCores, maxMemoryGiB,
+          scaleDown, delayAfterAdd, unneededTime,
+          // IONOS machine config (server field names)
+          ionosImageId,
+          serverType:           ionosServerType,
+          cpuFamily:            ionosCpuFamily,
+          region:               datacenterLocation,
+          availabilityZone:     ionosAz,
+          diskAvailabilityZone: ionosDiskAz,
+          deployProvider,
+          registryType, registryImage, registryUsername, registryPassword,
+          machCores:            ionosCores,
+          machRamGiB:       ionosRamGiB,
+          machDiskGB:       ionosDiskGB,
+          machDiskType:     ionosDiskType,
+          machLanId:        ionosLanId
+        })
+      });
+
+      const reader  = response.body.getReader();
+      const decoder = new TextDecoder();
+      let   buffer  = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nlIdx;
+        while ((nlIdx = buffer.indexOf('\n\n')) !== -1) {
+          const chunk = buffer.slice(0, nlIdx);
+          buffer = buffer.slice(nlIdx + 2);
+          for (const line of chunk.split('\n')) {
+            if (!line.startsWith('data: ')) continue;
+            let ev;
+            try { ev = JSON.parse(line.slice(6)); } catch (_) { continue; }
+            if (ev.type === 'step') {
+              asStep(ev.label, ev.status);
+            } else if (ev.type === 'log') {
+              logBox.textContent += ev.text;
+              logBox.scrollTop = logBox.scrollHeight;
+            } else if (ev.type === 'done') {
+              const d = document.getElementById('as-done');
+              d.innerHTML = `<strong>&#10003; Done.</strong> ${escHtml(ev.message || '')}`;
+              d.classList.remove('hidden');
+            } else if (ev.type === 'error') {
+              showError('as-error', ev.message);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      showError('as-error', err.message);
+    } finally {
+      setLoading('as-apply-label','as-apply-spinner','as-apply-btn', false, '&#9889; Apply Autoscaling Configuration');
+      document.getElementById('as-apply-btn').disabled = false;
+    }
+  });
+
+  // ── Scale In ───────────────────────────────────────────────────────────────
+  const SI_STEP_IDS  = ['si-s1','si-s2','si-s3','si-s4','si-s5','si-s6'];
+  const SI_STEP_ICON = { pending:'○', working:'…', ok:'✓', error:'✗' };
+  let siStepIdx = 0;
+
+  function resetScaleInSteps() {
+    siStepIdx = 0;
+    SI_STEP_IDS.forEach(id => {
+      const el = document.getElementById(id);
+      el.dataset.status = 'pending';
+      el.querySelector('.iso-step-icon').textContent = '○';
+    });
+    document.getElementById('scale-in-steps').classList.add('hidden');
+    document.getElementById('scale-in-log').classList.add('hidden');
+    document.getElementById('scale-in-log').textContent = '';
+    document.getElementById('scale-in-done').classList.add('hidden');
+    document.getElementById('scale-in-done').textContent = '';
+    hideError('scale-in-error');
+  }
+
+  function updateScaleInIonosSteps() {
+    const del = document.getElementById('scale-in-delete-ionos').checked;
+    document.getElementById('si-s5').classList.toggle('hidden', !del);
+    document.getElementById('si-s6').classList.toggle('hidden', !del);
+    document.getElementById('scale-in-ionos-fields').style.opacity = del ? '1' : '0.4';
+    document.getElementById('scale-in-ionos-fields').style.pointerEvents = del ? '' : 'none';
+  }
+
+  document.getElementById('scale-in-delete-ionos').addEventListener('change', updateScaleInIonosSteps);
+
+  // Show warning + IONOS section when a node is selected
+  document.getElementById('scale-in-node-select').addEventListener('change', () => {
+    const name = document.getElementById('scale-in-node-select').value;
+    document.getElementById('scale-in-warning').classList.toggle('hidden', !name);
+    document.getElementById('scale-in-ionos-section').classList.toggle('hidden', !name);
+    if (name) {
+      document.getElementById('scale-in-node-name-warn').textContent = name;
+      document.getElementById('scale-in-btn').disabled = false;
+      // Reset auto-detect when node changes
+      document.getElementById('scale-in-ionos-server-id').value = '';
+      document.getElementById('scale-in-ionos-info').classList.add('hidden');
+      hideError('scale-in-detect-error');
+      updateScaleInIonosSteps();
+    } else {
+      document.getElementById('scale-in-btn').disabled = true;
+    }
+    resetScaleInSteps();
+  });
+
+  document.getElementById('scale-in-refresh-btn').addEventListener('click', async () => {
+    setLoading('scale-in-refresh-btn', null, 'scale-in-refresh-btn', true, '…');
+    try {
+      const state = await apiPost('/api/refresh', { apiUrl: clusterApiUrl, ocpToken });
+      renderAll(state);
+    } catch (err) {
+      showError('scale-in-error', err.message);
+    } finally {
+      document.getElementById('scale-in-refresh-btn').disabled = false;
+      document.getElementById('scale-in-refresh-btn').textContent = '↺ Refresh';
+    }
+  });
+
+  document.getElementById('scale-in-detect-btn').addEventListener('click', async () => {
+    const nodeName = document.getElementById('scale-in-node-select').value;
+    if (!nodeName) return;
+    hideError('scale-in-detect-error');
+    document.getElementById('scale-in-ionos-info').classList.add('hidden');
+    setLoading('scale-in-detect-label', 'scale-in-detect-spinner', 'scale-in-detect-btn', true, 'Detecting…');
+    try {
+      const result = await apiPost('/api/ionos/find-server',
+        { ionosToken, datacenterId, serverName: nodeName });
+      document.getElementById('scale-in-ionos-server-id').value = result.serverId;
+      const volList = result.volumes.map(v =>
+        `${v.name} (${v.type}, ${v.size} GB)`).join(', ') || 'none';
+      const infoEl = document.getElementById('scale-in-ionos-info');
+      infoEl.textContent = `Matched server: ${result.serverName} (${result.serverId}) — volumes: ${volList}`;
+      infoEl.classList.remove('hidden');
+    } catch (err) {
+      showError('scale-in-detect-error', err.message);
+    } finally {
+      setLoading('scale-in-detect-label', 'scale-in-detect-spinner', 'scale-in-detect-btn', false, '🔍 Auto-detect');
+      document.getElementById('scale-in-detect-btn').disabled = false;
+    }
+  });
+
+  document.getElementById('scale-in-btn').addEventListener('click', async () => {
+    const nodeName = document.getElementById('scale-in-node-select').value;
+    if (!nodeName) return;
+
+    resetScaleInSteps();
+    document.getElementById('scale-in-steps').classList.remove('hidden');
+    document.getElementById('scale-in-log').classList.remove('hidden');
+    setLoading('scale-in-label-btn', 'scale-in-spinner', 'scale-in-btn', true, 'Running…');
+    hideError('scale-in-error');
+
+    try {
+      const deleteIonos   = document.getElementById('scale-in-delete-ionos').checked;
+      const ionosServerId = document.getElementById('scale-in-ionos-server-id').value.trim();
+      // Show IONOS steps now if we're going to run them
+      if (deleteIonos && ionosServerId) {
+        document.getElementById('si-s5').classList.remove('hidden');
+        document.getElementById('si-s6').classList.remove('hidden');
+      }
+      const response = await fetch('/api/scale-in', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+          apiUrl: clusterApiUrl, ocpToken, nodeName,
+          deleteIonos: deleteIonos && !!ionosServerId,
+          ionosToken:    ionosToken    || undefined,
+          datacenterId:  datacenterId  || undefined,
+          ionosServerId: ionosServerId || undefined
+        })
+      });
+      if (!response.ok) {
+        const d = await response.json().catch(() => ({}));
+        throw new Error(d.error || `Server returned ${response.status}`);
+      }
+
+      const reader  = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop();
+        for (const part of parts) {
+          const dataLine = part.split('\n').find(l => l.startsWith('data:'));
+          if (!dataLine) continue;
+          let ev;
+          try { ev = JSON.parse(dataLine.slice(5)); } catch { continue; }
+
+          if (ev.type === 'step') {
+            const id = SI_STEP_IDS[siStepIdx] || null;
+            if (id) {
+              const el = document.getElementById(id);
+              el.dataset.status = ev.status;
+              el.querySelector('.iso-step-icon').textContent = SI_STEP_ICON[ev.status] || '○';
+              if (ev.status !== 'pending') el.querySelector('span:last-child').textContent = ev.label;
+              if (ev.status === 'ok' || ev.status === 'error') siStepIdx++;
+            }
+          } else if (ev.type === 'log') {
+            const logEl = document.getElementById('scale-in-log');
+            logEl.textContent += ev.text;
+            logEl.scrollTop = logEl.scrollHeight;
+          } else if (ev.type === 'done') {
+            const doneEl = document.getElementById('scale-in-done');
+            doneEl.textContent = ev.message;
+            doneEl.classList.remove('hidden');
+            // Refresh node list to reflect removal
+            try {
+              const state = await apiPost('/api/refresh', { apiUrl: clusterApiUrl, ocpToken });
+              renderAll(state);
+            } catch (_) {}
+          } else if (ev.type === 'error') {
+            showError('scale-in-error', ev.message);
+          }
+        }
+      }
+    } catch (err) {
+      showError('scale-in-error', err.message);
+    } finally {
+      setLoading('scale-in-label-btn', 'scale-in-spinner', 'scale-in-btn', false, '↙ Cordon, Drain & Delete Node');
+      document.getElementById('scale-in-btn').disabled = false;
+    }
+  });
+
+</script>
+</body>
+</html>

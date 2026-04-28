@@ -1,0 +1,61 @@
+---
+# Autoscaler load test
+# Deploys 8 pods each requesting 1 CPU / 1 GiB RAM.
+# With 2 worker nodes (~3 allocatable CPU each) only ~6 pods can schedule;
+# the remaining 2 stay Pending and trigger the Cluster Autoscaler to add a node.
+#
+# Cleanup:  kubectl delete -f autoscaler-load-test.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: autoscaler-test
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: load-test
+  namespace: autoscaler-test
+  labels:
+    app: load-test
+spec:
+  replicas: 8
+  selector:
+    matchLabels:
+      app: load-test
+  template:
+    metadata:
+      labels:
+        app: load-test
+    spec:
+      # Spread pods across nodes so each node reaches capacity independently
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: load-test
+      containers:
+        - name: pause
+          # busybox: tiny image, no real work — resource *requests* are what
+          # the scheduler and autoscaler act on, not actual usage.
+          image: busybox:latest
+          command: ["sh", "-c", "while true; do sleep 3600; done"]
+          resources:
+            requests:
+              cpu: "1000m"
+              memory: "1Gi"
+            limits:
+              cpu: "1500m"
+              memory: "1500Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            # runAsUser is intentionally omitted — OpenShift's restricted-v2 SCC
+            # injects a UID from the namespace's allocated range automatically.

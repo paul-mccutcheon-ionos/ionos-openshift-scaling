@@ -1,0 +1,24 @@
+interfaces:
+- name: eth0
+  type: ethernet
+  state: up
+  mac-address: "02:01:6E:55:C1:E6"
+  ipv4:
+    enabled: true
+    dhcp: false
+    address:
+    - ip: 10.7.224.18
+      prefix-length: 24
+  ipv6:
+    enabled: false
+dns-resolver:
+  config:
+    server:
+    - 212.227.123.16
+    - 212.227.123.17
+routes:
+  config:
+  - destination: 0.0.0.0/0
+    next-hop-address: 10.7.224.1
+    next-hop-interface: eth0
+    table-id: 254
