@@ -748,21 +748,20 @@ app.post('/api/setup-autoscaler', async (req, res) => {
           };
           const destFtpHost = ftpHostFor(otherLocation);
 
-          // Before uploading, delete any stale same-named images in the secondary location.
-          // IONOS FTP returns 550 if you try to upload a file whose name matches an existing
-          // image — the only way to replace it is to delete the old one via the API first.
+          // Clean up any stale same-named images from the IONOS catalog.
+          // NOTE: IONOS FTP does NOT allow rm, and API deletion does NOT remove the FTP file.
+          // So even after deleting here, the FTP file may still exist and block a same-named
+          // upload. We handle that below by checking FTP ls and using an alternate filename.
           const staleSnap  = await ionosGet('/images?depth=1', ionosToken).catch(() => ({ items: [] }));
           const staleImgs  = (staleSnap.items || []).filter(img =>
             img.properties?.name === imgName && img.properties?.location === otherLocation
           );
           if (staleImgs.length > 0) {
-            step(`Removing ${staleImgs.length} stale image(s) from ${otherLocation}…`, 'working');
+            step(`Removing ${staleImgs.length} stale catalog image(s) from ${otherLocation}…`, 'working');
             for (const stale of staleImgs) {
-              log(`  Deleting stale image "${stale.properties.name}" (${stale.id}) from ${otherLocation}…\n`);
+              log(`  Deleting stale catalog entry "${stale.properties.name}" (${stale.id})…\n`);
               await ionosDetach(`/images/${stale.id}`, ionosToken);
             }
-            log(`  Waiting 15 s for IONOS to finalize deletion…\n`);
-            await new Promise(r => setTimeout(r, 15000));
           }
 
           step(`Connecting to management host…`, 'working');
@@ -883,33 +882,51 @@ echo "BLS_OK"
             log(`  Using IONOS-patched QEMU image "${imgName}" (${(sizeForLog / 1e9).toFixed(2)} GB) — ignition.platform.id=metal, IONOS KVM networking\n`);
 
             // Step B: upload to destination FTP.
-            // IONOS FTP returns 550 if a file with the same name already exists (no overwrite).
-            // Strategy: first try lftp `rm` to delete the FTP file directly (IONOS API delete
-            // may not propagate to FTP immediately), then upload with up to 2 retries.
-            step(`Uploading "${imgName}" to ${destFtpHost} (~16 GB, 20–40 min)…`, 'working');
-            log(`  Attempting FTP delete of existing "${imgName}" on ${destFtpHost} (if any)…\n`);
-            const rmScript = `/tmp/.lftp-rm-${Date.now()}`;
+            // IONOS FTP does NOT allow overwriting or deleting files — 550 on both rm and put
+            // when the filename already exists. API deletion also does NOT remove the FTP file.
+            // Strategy: check what files exist in hdd-images/ via lftp ls, then pick a name
+            // that isn't taken. Use lftp `put src -o destname` to rename on the fly if needed.
+            const lsScript = `/tmp/.lftp-ls-${Date.now()}`;
             await sshRunScript(ftpConn, `
-cat > ${rmScript} << 'LFTP_EOF'
+cat > ${lsScript} << 'LFTP_EOF'
 set ftp:ssl-allow true
 set ftp:ssl-allow/${destFtpHost} true
 open ${destFtpHost}
 user "${ftpUser}" "${ftpPass}"
-rm hdd-images/${imgName}
+cls -1 hdd-images/
 bye
 LFTP_EOF
-chmod 600 ${rmScript}`);
-            // Ignore rm errors — file might not exist or FTP may not allow rm
-            const rmResult = await sshRunScript(ftpConn, `lftp -f ${rmScript} 2>&1; rm -f ${rmScript}; echo "RM_DONE"`);
-            if (rmResult.stdout.includes('550') || rmResult.stdout.includes('failed')) {
-              log(`  FTP rm returned an error (may be expected): ${rmResult.stdout.trim()}\n  Waiting 60 s for IONOS to propagate API deletion…\n`);
-              await new Promise(r => setTimeout(r, 60000));
-            } else {
-              log(`  FTP rm succeeded. Waiting 10 s…\n`);
-              await new Promise(r => setTimeout(r, 10000));
+chmod 600 ${lsScript}`);
+            const lsResult = await sshRunScript(ftpConn, `lftp -f ${lsScript} 2>/dev/null; rm -f ${lsScript}`);
+            const existingFtpFiles = new Set(
+              lsResult.stdout.split('\n').map(l => l.trim()).filter(Boolean)
+            );
+            log(`  FTP hdd-images/ contains: ${[...existingFtpFiles].join(', ') || '(empty)'}\n`);
+
+            // Choose an upload name that doesn't conflict with an existing FTP file.
+            const locSuffix = otherLocation === 'de/fra' ? 'fra' : 'fra2';
+            let uploadName  = imgName;
+            if (existingFtpFiles.has(imgName)) {
+              const base = imgName.replace(/\.raw$/, '');
+              const candidates = [
+                `${base}-${locSuffix}.raw`,
+                ...Array.from({ length: 8 }, (_, i) => `${base}-${locSuffix}${i + 2}.raw`)
+              ];
+              const free = candidates.find(c => !existingFtpFiles.has(c));
+              if (!free) {
+                const err = new Error(
+                  `No free FTP slot for "${imgName}" in ${otherLocation} — all alternate names are taken. ` +
+                  `Delete old images from IONOS DCD → Images (${otherLocation}) to free up FTP quota.`
+                );
+                err.status = 409;
+                throw err;
+              }
+              uploadName = free;
+              log(`  "${imgName}" already in FTP — uploading as "${uploadName}"\n`);
             }
 
-            log(`  Uploading ${imgName} to ${destFtpHost}/hdd-images/…\n`);
+            step(`Uploading "${uploadName}" to ${destFtpHost} (~16 GB, 20–40 min)…`, 'working');
+            log(`  Uploading ${localFile} → ${destFtpHost}/hdd-images/${uploadName}\n`);
             await sshRunScript(ftpConn, `
 cat > ${destScript} << 'LFTP_EOF'
 set ftp:ssl-allow true
@@ -917,34 +934,17 @@ set ftp:ssl-allow/${destFtpHost} true
 open ${destFtpHost}
 user "${ftpUser}" "${ftpPass}"
 cd hdd-images
-put ${localFile}
+put ${localFile} -o ${uploadName}
 bye
 LFTP_EOF
 chmod 600 ${destScript}`);
-            let uploadOk = false;
-            for (let attempt = 1; attempt <= 3; attempt++) {
-              try {
-                await sshRunScriptStreaming(ftpConn, `set -e
+            await sshRunScriptStreaming(ftpConn, `set -e
 lftp -f ${destScript}
-echo "UPLOAD_OK"`, chunk => { log(chunk); });
-                uploadOk = true;
-                break;
-              } catch (ftpErr) {
-                if (attempt < 3 && ftpErr.message && ftpErr.message.includes('550')) {
-                  log(`  FTP 550 on attempt ${attempt} — waiting 90 s for IONOS to clear FTP slot…\n`);
-                  await new Promise(r => setTimeout(r, 90000));
-                } else {
-                  await sshRunScript(ftpConn, `rm -f ${destScript}`).catch(() => {});
-                  throw ftpErr;
-                }
-              }
-            }
-            await sshRunScript(ftpConn, `rm -f ${destScript}`).catch(() => {});
-            if (!uploadOk) {
-              throw new Error(`FTP upload of "${imgName}" to ${destFtpHost} failed after 3 attempts. Delete the existing image from IONOS DCD → Images and retry.`);
-            }
+echo "UPLOAD_OK"
+rm -f ${destScript}`, chunk => { log(chunk); });
 
-            step(`"${imgName}" uploaded to ${destFtpHost}`, 'ok');
+            step(`"${uploadName}" uploaded to ${destFtpHost}`, 'ok');
+            imgName = uploadName;
           } finally {
             ftpConn.end();
           }
