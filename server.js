@@ -740,36 +740,27 @@ app.post('/api/setup-autoscaler', async (req, res) => {
             step(`Connecting to management host to copy image between FTP servers…`, 'working');
             const ftpConn = await sshConnect(mgmtAddr, 'root', mgmtKey);
             try {
-              const localFile = `/tmp/rhcos-upload/${imgName}`;
-              const ts = Date.now();
-              const srcScript  = `/tmp/.lftp-src-${ts}`;
-              const destScript = `/tmp/.lftp-dest-${ts}`;
+              const localFile  = `/tmp/rhcos-upload/${imgName}`;
+              const destScript = `/tmp/.lftp-dest-${Date.now()}`;
 
-              // Step A: download from source FTP (skip if already cached locally)
+              // Step A: ensure the image file is present on the management host.
+              // IONOS FTP is upload-only — downloading via lftp get silently produces
+              // an empty file. So if the file isn't already cached we fail immediately
+              // with a clear message rather than uploading a zero-byte file.
               const checkRes = await sshRunScript(ftpConn,
                 `[ -f "${localFile}" ] && stat -c%s "${localFile}" || echo MISSING`);
-              if (checkRes.stdout.trim() === 'MISSING') {
-                log(`  Downloading ${imgName} from ${srcFtpHost}…\n`);
-                step(`Downloading image from ${srcFtpHost}…`, 'working');
-                await sshRunScript(ftpConn, `mkdir -p /tmp/rhcos-upload
-cat > ${srcScript} << 'LFTP_EOF'
-set ftp:ssl-allow true
-set ftp:ssl-allow/${srcFtpHost} true
-open ${srcFtpHost}
-user "${ftpUser}" "${ftpPass}"
-cd hdd-images
-get ${imgName} -o ${localFile}
-bye
-LFTP_EOF
-chmod 600 ${srcScript}`);
-                await sshRunScriptStreaming(ftpConn, `set -e
-lftp -f ${srcScript}
-echo "DOWNLOAD_OK"
-rm -f ${srcScript}`, chunk => { log(chunk); });
-                log(`  Download complete\n`);
-              } else {
-                log(`  ${imgName} already cached on management host — skipping download\n`);
+              const cachedBytes = checkRes.stdout.trim();
+              if (cachedBytes === 'MISSING' || parseInt(cachedBytes, 10) < 1000000000) {
+                const err = new Error(
+                  `Image file "${localFile}" is not cached on the management host (${mgmtAddr}). ` +
+                  `IONOS FTP does not support downloads — you must first upload the RHCOS image ` +
+                  `to a ${imgLocation} datacenter using the "Upload RHCOS Image" tool, which ` +
+                  `caches the .raw file at that path. Then re-run.`
+                );
+                err.status = 422;
+                throw err;
               }
+              log(`  Found ${imgName} on management host (${(parseInt(cachedBytes, 10) / 1e9).toFixed(2)} GB)\n`);
 
               // Step B: upload to destination FTP
               log(`  Uploading ${imgName} to ${destFtpHost}/hdd-images/…\n`);
