@@ -691,6 +691,7 @@ app.post('/api/setup-autoscaler', async (req, res) => {
       let effectiveDcId   = datacenterId;
       let effectiveLanId  = parseInt(machLanId, 10) || 1;
       let effectiveRegion = region;
+      let effectiveImageId = ionosImageId;
       let _fraDoPcc       = false;   // triggers Phase 2 after MachineSet
       let _fraPrimaryLan  = 0;
 
@@ -698,25 +699,117 @@ app.post('/api/setup-autoscaler', async (req, res) => {
         const otherLocation = region === 'de/fra' ? 'de/fra/2' : 'de/fra';
         effectiveRegion = otherLocation;
 
-        // Pre-flight: verify the selected image exists in the secondary location
-        step(`Checking image availability in ${otherLocation}…`, 'working');
+        // Pre-flight: ensure selected image is available in the secondary location.
+        // If it's only in the primary location, auto-copy via FTP from the management host.
+        step(`Checking image in ${otherLocation}…`, 'working');
         try {
           const imgData = await ionosGet(`/images/${encodeURIComponent(ionosImageId)}`, ionosToken);
           const imgLocation = imgData?.properties?.location;
+          const imgName     = imgData?.properties?.name || '';
+
           if (imgLocation && imgLocation !== otherLocation) {
-            const err = new Error(
-              `Image ${ionosImageId} is in location "${imgLocation}" but the secondary VDC will be at "${otherLocation}". ` +
-              `Upload or copy the RHCOS image to ${otherLocation} first, then re-run with its new image ID.`
-            );
-            err.status = 422;
-            throw err;
+            log(`Image "${imgName}" is at ${imgLocation} — copying to ${otherLocation} via FTP…\n`);
+
+            // Decode management host SSH key from env
+            const rawKey     = (process.env.OCP_MGMT_HOST_SSH_KEY || '').trim();
+            const mgmtKey    = rawKey.includes('\\n') ? rawKey.replace(/\\n/g, '\n') : rawKey;
+            const mgmtAddr   = process.env.OCP_MGMT_HOST   || '';
+            const ftpUser    = process.env.IONOS_FTP_USER  || '';
+            const ftpPass    = process.env.IONOS_FTP_PASS  || '';
+
+            if (!mgmtAddr || !mgmtKey || !ftpUser || !ftpPass) {
+              const err = new Error(
+                'Cannot auto-copy image: OCP_MGMT_HOST, OCP_MGMT_HOST_SSH_KEY, IONOS_FTP_USER ' +
+                'or IONOS_FTP_PASS not set in .env'
+              );
+              err.status = 422;
+              throw err;
+            }
+
+            // FTP server for the secondary location  (de/fra → ftp-fra.ionos.com, de/fra/2 → ftp-fra-2.ionos.com)
+            const locParts = otherLocation.split('/');
+            const city     = locParts[1] || locParts[0] || 'fra';
+            const zone     = locParts[2] || '';
+            const ftpHost  = `ftp-${zone ? `${city}-${zone}` : city}.ionos.com`;
+
+            step(`Connecting to management host for FTP copy…`, 'working');
+            const ftpConn = await sshConnect(mgmtAddr, 'root', mgmtKey);
+            try {
+              // The RHCOS upload flow saves images to /tmp/rhcos-upload/<imgName>
+              const localFile = `/tmp/rhcos-upload/${imgName}`;
+              const checkRes  = await sshRunScript(ftpConn,
+                `[ -f "${localFile}" ] && stat -c%s "${localFile}" || echo MISSING`
+              );
+              const checkOut = checkRes.stdout.trim();
+              if (checkOut === 'MISSING') {
+                const err = new Error(
+                  `Image file "${localFile}" not found on management host ${mgmtAddr}. ` +
+                  `Run the "Upload RHCOS Image" step for any ${imgLocation} datacenter first so the file is cached locally, then retry.`
+                );
+                err.status = 422;
+                throw err;
+              }
+              log(`  Found ${imgName} on management host (${(parseInt(checkOut, 10) / 1e9).toFixed(2)} GB)\n`);
+              log(`  Uploading to ${ftpHost}/hdd-images/ via lftp…\n`);
+              step(`Uploading image to ${ftpHost}…`, 'working');
+
+              const lftpScript = `/tmp/.fra-copy-lftp-${Date.now()}`;
+              await sshRunScript(ftpConn, `
+cat > ${lftpScript} << 'LFTP_EOF'
+set ftp:ssl-allow true
+set ftp:ssl-allow/${ftpHost} true
+open ${ftpHost}
+user "${ftpUser}" "${ftpPass}"
+cd hdd-images
+put ${localFile}
+bye
+LFTP_EOF
+chmod 600 ${lftpScript}`);
+
+              await sshRunScriptStreaming(ftpConn, `set -e
+lftp -f ${lftpScript}
+echo "FTP_UPLOAD_OK"
+rm -f ${lftpScript}`, chunk => { log(chunk); });
+
+              step(`Image uploaded to ${ftpHost}`, 'ok');
+            } finally {
+              ftpConn.end();
+            }
+
+            // Poll IONOS until the image appears as AVAILABLE in the secondary location
+            step(`Waiting for image to be processed in ${otherLocation}…`, 'working');
+            const deadline = Date.now() + 20 * 60 * 1000;
+            while (!effectiveImageId || effectiveImageId === ionosImageId) {
+              await new Promise(r => setTimeout(r, 20000));
+              const imgs = await ionosGet('/images?depth=1', ionosToken);
+              for (const img of (imgs?.items || [])) {
+                if (img.properties?.name === imgName &&
+                    img.properties?.location === otherLocation &&
+                    img.metadata?.state === 'AVAILABLE') {
+                  effectiveImageId = img.id;
+                  break;
+                }
+              }
+              if (effectiveImageId === ionosImageId) {
+                if (Date.now() > deadline) {
+                  const err = new Error(`Image did not become AVAILABLE in ${otherLocation} within 20 minutes`);
+                  err.status = 504;
+                  throw err;
+                }
+                log('  Still processing…\n');
+              }
+            }
+            log(`  Image ready in ${otherLocation}: ${effectiveImageId}\n`);
+            step(`Image "${imgName}" ready in ${otherLocation}`, 'ok');
+          } else {
+            step(`Image available in ${otherLocation}`, 'ok');
           }
         } catch (e) {
-          if (e.status === 422) throw e;
-          // If we can't fetch the image (e.g. it's a system image with no location), allow it through
+          if (e.status) throw e;
+          // System images have no location — allow through
           log(`  Image location check skipped: ${e.message}\n`);
+          step(`Image check skipped (system image)`, 'ok');
         }
-        step(`Image available in ${otherLocation}`, 'ok');
 
         if (frankfurtSubMode === 'create') {
           // fra1: Create secondary VDC
@@ -775,7 +868,7 @@ app.post('/api/setup-autoscaler', async (req, res) => {
         serverType:        srvType,
         ...(effectiveRegion ? { region: effectiveRegion } : {}),
         availabilityZone:  az,
-        image:             ionosImageId,
+        image:             effectiveImageId || ionosImageId,
         disk: {
           name:             `${targetMsName}-boot`,
           size:             diskGB,
@@ -819,7 +912,7 @@ app.post('/api/setup-autoscaler', async (req, res) => {
 
       await ocpApply(msApiBase, targetMsName, ionosMs);
       log(`MachineSet "${targetMsName}" created with IONOS providerSpec\n`);
-      log(`  Image: ${ionosImageId}\n`);
+      log(`  Image: ${effectiveImageId || ionosImageId}${effectiveImageId && effectiveImageId !== ionosImageId ? ` (copied to ${effectiveRegion})` : ''}\n`);
       log(`  ${cores} cores / ${machRamGiB} GiB RAM / ${diskGB} GB ${diskType} / LAN ${lanId}\n`);
       log(`  VDC: ${effectiveDcId}${effectiveRegion ? ` (${effectiveRegion})` : ''}\n`);
       log(`  Type: ${srvType}${isVcpu ? '' : ` / CPU: ${cpuFam}`} / AZ: ${az}\n`);
