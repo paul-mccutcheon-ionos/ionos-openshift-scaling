@@ -751,72 +751,133 @@ app.post('/api/setup-autoscaler', async (req, res) => {
                 `[ -f "${localFile}" ] && stat -c%s "${localFile}" || echo MISSING`);
               const cachedBytes = checkRes.stdout.trim();
               let sizeForLog = parseInt(cachedBytes, 10) || 0;
-              if (cachedBytes === 'MISSING' || sizeForLog < 1000000000) {
-                // Not cached — download fresh from Red Hat mirror (same flow as Upload RHCOS Image tool).
-                log(`  Image not cached on management host — downloading from Red Hat mirror…\n`);
-                step('Downloading RHCOS from Red Hat mirror…', 'working');
+              // Require > 5 GB to be considered a valid QEMU raw image.
+              // The metal .raw is only ~3.78 GB — if we find that size it means the wrong
+              // image type was previously downloaded and we must redo it with the QEMU pipeline.
+              if (cachedBytes === 'MISSING' || sizeForLog < 5000000000) {
+                // Not cached (or wrong image type) — run the full QEMU qcow2 + BLS patch pipeline.
+                // IMPORTANT: IONOS KVM requires the QEMU image variant (VirtIO drivers).
+                // The metal image will NOT boot. We also must patch the BLS boot entry with
+                // ignition.platform.id=metal and network kernel args before uploading.
+                if (sizeForLog > 0 && sizeForLog < 5000000000) {
+                  log(`  Found ${imgName} at ${(sizeForLog / 1e9).toFixed(2)} GB — this is the metal image (wrong type for IONOS KVM). Re-downloading as QEMU qcow2…\n`);
+                } else {
+                  log(`  Image not cached on management host — downloading RHCOS QEMU image from Red Hat mirror…\n`);
+                }
 
                 const verMatch = imgName.match(/rhcos-(\d+\.\d+)/i);
                 if (!verMatch) {
                   const err = new Error(
                     `Cannot determine RHCOS version from image name "${imgName}". ` +
-                    `Please use the "Upload RHCOS Image" tool to upload the image to ` +
-                    `the secondary datacenter first, then re-run.`
+                    `Please use the "Upload RHCOS Image" tool to create and upload the patched QEMU image first.`
                   );
                   err.status = 422;
                   throw err;
                 }
-                const rhcosVer = verMatch[1];
-                const tmpGz    = `/tmp/rhcos-upload/rhcos-dl-temp.raw.gz`;
-                const tmpRaw   = `/tmp/rhcos-upload/rhcos-dl-temp.raw`;
+                const rhcosVer   = verMatch[1];
+                const tmpQcow2Gz = `/tmp/rhcos-upload/rhcos-qemu-temp.qcow2.gz`;
+                const tmpQcow2   = `/tmp/rhcos-upload/rhcos-qemu-temp.qcow2`;
+
+                // Check qemu-img is available
+                const qemuChk = await sshRunScript(ftpConn, `command -v qemu-img 2>/dev/null || echo MISSING`);
+                if (qemuChk.stdout.trim() === 'MISSING') {
+                  throw new Error('qemu-img is not installed on the management host. Install with: dnf install qemu-img');
+                }
+
+                step(`Downloading RHCOS ${rhcosVer} QEMU image from Red Hat mirror…`, 'working');
 
                 const urlRes = await sshRunScript(ftpConn, `
 export PATH=$PATH:/usr/local/bin:/usr/bin
 MIRROR="https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/${rhcosVer}/latest/"
-FILENAME=$(curl -sL "$MIRROR" | grep -oE 'rhcos-[0-9.]+-x86_64-metal\\.x86_64\\.raw\\.gz' | head -1)
+FILENAME=$(curl -sL "$MIRROR" | grep -oE 'rhcos-[0-9.]+-x86_64-qemu\\.x86_64\\.qcow2\\.gz' | head -1)
 if [ -z "$FILENAME" ]; then echo "URL_FAIL"; else echo "URL_OK:$MIRROR$FILENAME"; fi
 `);
                 const urlLine = urlRes.stdout.trim();
                 if (!urlLine.startsWith('URL_OK:')) {
-                  const err = new Error(
-                    `Could not find RHCOS ${rhcosVer} metal image on mirror.openshift.com. ` +
-                    `Please use the "Upload RHCOS Image" tool to upload the image manually.`
-                  );
-                  err.status = 422;
-                  throw err;
+                  throw new Error(`Could not find RHCOS ${rhcosVer} QEMU qcow2 on mirror.openshift.com. Use the "Upload RHCOS Image" tool to upload manually.`);
                 }
                 const rhcosUrl = urlLine.slice(7);
-                log(`  Found: ${rhcosUrl}\n  Downloading (~1 GB compressed — this will take a few minutes)…\n`);
+                log(`  Found: ${rhcosUrl}\n  Downloading QEMU qcow2 (~1 GB compressed)…\n`);
 
                 await sshRunScriptStreaming(ftpConn, `
 set -e
-mkdir -p /tmp/rhcos-upload
-rm -f "${tmpGz}" "${tmpRaw}"
-curl -L --progress-bar -o "${tmpGz}" "${rhcosUrl}" 2>&1
+export PATH=$PATH:/usr/local/bin:/usr/bin
+rm -f "${tmpQcow2Gz}" "${tmpQcow2}"
+curl -L --progress-bar -o "${tmpQcow2Gz}" "${rhcosUrl}" 2>&1
 echo "DL_OK"
 `, chunk => { log(chunk); });
 
-                log(`  Decompressing…\n`);
+                log(`  Decompressing qcow2…\n`);
                 await sshRunScriptStreaming(ftpConn, `
 set -e
-gunzip -f "${tmpGz}"
-mv -f "${tmpRaw}" "${localFile}"
+gunzip -f "${tmpQcow2Gz}"
 echo "DECOMP_OK"
 `, chunk => { log(chunk); });
 
+                step(`Converting qcow2 → raw for IONOS KVM (~16 GB, 10–20 min)…`, 'working');
+                log(`  Running qemu-img convert (this takes 10–20 minutes — no progress stream)…\n`);
+                await sshRunScriptStreaming(ftpConn, `
+set -e
+export PATH=$PATH:/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin
+rm -f "${localFile}"
+qemu-img convert -f qcow2 -O raw "${tmpQcow2}" "${localFile}" 2>&1
+echo "CONVERT_OK:$(stat -c%s "${localFile}") bytes"
+rm -f "${tmpQcow2}"
+`, chunk => { log(chunk); });
+
+                // Patch the BLS boot entry for IONOS KVM
+                step(`Patching BLS boot entry — ignition.platform.id=metal, IONOS network args…`, 'working');
+                const bGateway  = (process.env.OCP_BOOTSTRAP_GATEWAY || '').trim();
+                const bDnsRaw   = (process.env.OCP_BOOTSTRAP_DNS      || '').trim();
+                const bDnsKargs = bDnsRaw.split(/[;,\s]+/).filter(Boolean).map(d => `nameserver=${d}`).join(' ');
+                const blsMountDir = '/mnt/rhcos-bls-fix';
+
+                const blsPatch = await sshRunScript(ftpConn, `
+set -e
+export PATH=$PATH:/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin
+LOOP=$(losetup -f --show -P "${localFile}")
+mkdir -p "${blsMountDir}"
+if [ -b "\${LOOP}p3" ]; then BPART="\${LOOP}p3";
+elif [ -b "\${LOOP}p2" ]; then BPART="\${LOOP}p2";
+else echo "PART_FAIL"; losetup -d "$LOOP"; exit 1; fi
+mount "$BPART" "${blsMountDir}"
+BLS=$(find "${blsMountDir}/loader/entries" -name "ostree-*.conf" 2>/dev/null | head -1)
+if [ -z "$BLS" ]; then echo "BLS_FAIL"; umount "${blsMountDir}"; losetup -d "$LOOP"; exit 1; fi
+sed -i 's/ignition\\.platform\\.id=qemu/ignition.platform.id=metal/g' "$BLS"
+if ! grep -q 'rd.neednet=1' "$BLS"; then
+  NARGS="rd.neednet=1 ip=dhcp${bGateway ? ` rd.route=0.0.0.0/0:${bGateway}` : ''} ${bDnsKargs}"
+  sed -i "/^options /s|$| $NARGS|" "$BLS"
+fi
+sync
+umount "${blsMountDir}"
+losetup -d "$LOOP"
+echo "BLS_OK"
+`);
+                if (!blsPatch.stdout.includes('BLS_OK')) {
+                  throw new Error(`BLS patch failed:\n${blsPatch.stdout}\n${blsPatch.stderr || ''}`);
+                }
+                log(`  BLS patched: ignition.platform.id=metal, rd.neednet=1${bGateway ? `, rd.route=0.0.0.0/0:${bGateway}` : ''}${bDnsKargs ? `, ${bDnsKargs}` : ''}\n`);
+                step(`RHCOS QEMU image ready — BLS patched for IONOS KVM networking`, 'ok');
+
                 const dlCheck = await sshRunScript(ftpConn, `stat -c%s "${localFile}" 2>/dev/null || echo 0`);
                 sizeForLog = parseInt(dlCheck.stdout.trim(), 10) || 0;
-                if (sizeForLog < 1000000000) {
-                  const err = new Error(
-                    `Downloaded RHCOS image appears incomplete (${sizeForLog} bytes). ` +
-                    `The download may have failed — check management host internet connectivity and retry.`
-                  );
-                  err.status = 422;
-                  throw err;
+                if (sizeForLog < 5000000000) {
+                  throw new Error(`Converted RHCOS image is too small (${sizeForLog} bytes) — qemu-img conversion may have failed.`);
                 }
-                step(`RHCOS image downloaded (${(sizeForLog / 1e9).toFixed(2)} GB)`, 'ok');
               }
-              log(`  Using ${imgName} on management host (${(sizeForLog / 1e9).toFixed(2)} GB)\n`);
+              log(`  Using IONOS-patched QEMU image "${imgName}" (${(sizeForLog / 1e9).toFixed(2)} GB) — ignition.platform.id=metal, IONOS KVM networking\n`);
+
+              // Snapshot existing images in secondary location BEFORE upload so the
+              // poll below only accepts a genuinely new entry, not a stale pre-existing one.
+              const preUploadSnap = await ionosGet('/images?depth=1', ionosToken).catch(() => ({ items: [] }));
+              const preExistingIds = new Set(
+                (preUploadSnap.items || [])
+                  .filter(img => img.properties?.name === imgName && img.properties?.location === otherLocation)
+                  .map(img => img.id)
+              );
+              if (preExistingIds.size > 0) {
+                log(`  Pre-existing "${imgName}" in ${otherLocation}: ${[...preExistingIds].join(', ')} — will wait for new image after upload.\n`);
+              }
 
               // Step B: upload to destination FTP
               log(`  Uploading ${imgName} to ${destFtpHost}/hdd-images/…\n`);
@@ -842,23 +903,39 @@ rm -f ${destScript}`, chunk => { log(chunk); });
               ftpConn.end();
             }
 
-            // Poll IONOS until the image appears as AVAILABLE in the secondary location
-            step(`Waiting for image to be processed in ${otherLocation}…`, 'working');
-            const deadline = Date.now() + 20 * 60 * 1000;
-            while (!effectiveImageId || effectiveImageId === ionosImageId) {
-              await new Promise(r => setTimeout(r, 20000));
-              const imgs = await ionosGet('/images?depth=1', ionosToken);
-              for (const img of (imgs?.items || [])) {
-                if (img.properties?.name === imgName &&
-                    img.properties?.location === otherLocation &&
-                    img.metadata?.state === 'AVAILABLE') {
-                  effectiveImageId = img.id;
-                  break;
+            // Poll IONOS until the NEW image appears as AVAILABLE in the secondary location.
+            // We use the pre-upload snapshot to skip any pre-existing image with the same name
+            // (from a previous run) so we don't return "Done" before IONOS has processed the
+            // freshly uploaded file.
+            step(`Waiting for IONOS to process image in ${otherLocation}…`, 'working');
+            log(`Image submitted to IONOS. Processing typically takes 5–30 minutes for a 16 GB file.\n`);
+            const deadline = Date.now() + 45 * 60 * 1000;
+            let newImageFound = false;
+            while (!newImageFound) {
+              await new Promise(r => setTimeout(r, 30000));
+              const elapsed = Math.floor((Date.now() - (deadline - 45 * 60 * 1000)) / 1000);
+              log(`  Polling IONOS for "${imgName}" in ${otherLocation}… (${elapsed}s elapsed)\n`);
+              try {
+                const imgs = await ionosGet('/images?depth=1', ionosToken);
+                for (const img of (imgs?.items || [])) {
+                  if (img.properties?.name === imgName &&
+                      img.properties?.location === otherLocation &&
+                      img.metadata?.state === 'AVAILABLE' &&
+                      !preExistingIds.has(img.id)) {
+                    effectiveImageId = img.id;
+                    newImageFound = true;
+                    break;
+                  }
                 }
+              } catch (pollErr) {
+                log(`  Poll error (will retry): ${pollErr.message}\n`);
               }
-              if (effectiveImageId === ionosImageId) {
+              if (!newImageFound) {
                 if (Date.now() > deadline) {
-                  const err = new Error(`Image did not become AVAILABLE in ${otherLocation} within 20 minutes`);
+                  const err = new Error(
+                    `Image did not become AVAILABLE in ${otherLocation} within 45 minutes. ` +
+                    `Check IONOS DCD → Images for "${imgName}" in ${otherLocation}.`
+                  );
                   err.status = 504;
                   throw err;
                 }
