@@ -898,8 +898,11 @@ bye
 LFTP_EOF
 chmod 600 ${lsScript}`);
             const lsResult = await sshRunScript(ftpConn, `lftp -f ${lsScript} 2>/dev/null; rm -f ${lsScript}`);
+            // cls output is one entry per line, potentially prefixed with "hdd-images/"
             const existingFtpFiles = new Set(
-              lsResult.stdout.split('\n').map(l => l.trim()).filter(Boolean)
+              lsResult.stdout.split('\n')
+                .map(l => l.trim().replace(/^.*\//, ''))  // strip any directory prefix
+                .filter(Boolean)
             );
             log(`  FTP hdd-images/ contains: ${[...existingFtpFiles].join(', ') || '(empty)'}\n`);
 
