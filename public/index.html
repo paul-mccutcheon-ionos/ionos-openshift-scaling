@@ -388,6 +388,7 @@
     <div class="header-title">
       <h1>IONOS OpenShift Scaling Tool</h1>
       <p>Connect to your OpenShift cluster and IONOS Cloud account to manage worker nodes</p>
+      <p style="font-size:0.72rem;color:#475569;margin-top:0.3rem">v1.0.4</p>
     </div>
 
     <!-- Red Hat OpenShift logo — top right -->
@@ -691,17 +692,17 @@
     <!-- Section 1: MachineSet -->
     <div class="card-section-title" style="margin-top:0;border-top:none;padding-top:0">MachineSet</div>
     <div style="display:flex;gap:1.5rem;flex-wrap:wrap;margin-bottom:1rem">
+      <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;font-size:0.88rem;color:#e2e8f0" id="as-mode-ionos-lbl">
+        <input type="radio" name="as-ms-mode" value="ionos" id="as-mode-ionos" style="accent-color:#a78bfa;width:14px;height:14px" checked />
+        Create new IONOS MachineSet
+      </label>
       <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;font-size:0.88rem;color:#e2e8f0" id="as-mode-existing-lbl">
-        <input type="radio" name="as-ms-mode" value="existing" id="as-mode-existing" style="accent-color:#a78bfa;width:14px;height:14px" checked />
+        <input type="radio" name="as-ms-mode" value="existing" id="as-mode-existing" style="accent-color:#a78bfa;width:14px;height:14px" />
         Attach autoscaler to existing MachineSet
       </label>
       <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;font-size:0.88rem;color:#e2e8f0" id="as-mode-clone-lbl">
         <input type="radio" name="as-ms-mode" value="clone" id="as-mode-clone" style="accent-color:#a78bfa;width:14px;height:14px" />
         Clone existing MachineSet with new name
-      </label>
-      <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;font-size:0.88rem;color:#e2e8f0" id="as-mode-ionos-lbl">
-        <input type="radio" name="as-ms-mode" value="ionos" id="as-mode-ionos" style="accent-color:#a78bfa;width:14px;height:14px" />
-        Create new IONOS MachineSet
       </label>
     </div>
 
@@ -716,8 +717,8 @@
       </div>
       <div class="form-group" id="as-clone-name-group" style="display:none">
         <label for="as-ms-new-name">New MachineSet Name</label>
-        <input type="text" id="as-ms-new-name" placeholder="e.g. worker-autoscale" style="width:100%" />
-        <div class="field-note">Name for the cloned MachineSet (must be unique in openshift-machine-api)</div>
+        <input type="text" id="as-ms-new-name" placeholder="e.g. worker-autoscale" style="width:100%" oninput="this.value=this.value.toLowerCase()" />
+        <div class="field-note">Name for the cloned MachineSet (must be unique in openshift-machine-api) — lowercase only</div>
       </div>
       <div class="form-group" id="as-clone-replicas-group" style="display:none">
         <label for="as-ms-init-replicas">Initial Replicas</label>
@@ -731,8 +732,8 @@
       <div class="form-grid">
         <div class="form-group">
           <label for="as-ionos-ms-name">MachineSet Name</label>
-          <input type="text" id="as-ionos-ms-name" placeholder="e.g. worker-ionos" style="width:100%" />
-          <div class="field-note">Name for the new MachineSet (must be unique in openshift-machine-api)</div>
+          <input type="text" id="as-ionos-ms-name" placeholder="e.g. worker-ionos" style="width:100%" oninput="this.value=this.value.toLowerCase()" />
+          <div class="field-note">Name for the new MachineSet (must be unique in openshift-machine-api) — lowercase only</div>
         </div>
         <div class="form-group">
           <label for="as-ionos-init-replicas">Initial Replicas</label>
@@ -741,7 +742,84 @@
         </div>
       </div>
 
-      <div class="card-section-title" style="margin-top:0.5rem">IONOS Cloud — Machine Configuration</div>
+      <!-- Frankfurt Intra-geographical Diversity -->
+      <div id="frankfurt-diversity-panel" style="display:none;margin-top:0.75rem;border:1px solid #1e3a5f;border-radius:8px;padding:0.85rem 1rem">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.4rem">
+          <span style="font-size:0.82rem;font-weight:600;color:#38bdf8">&#127961; Frankfurt Intra-geographical Diversity</span>
+          <span id="frankfurt-loc-badge" style="font-size:0.72rem;font-family:monospace;padding:0.15rem 0.5rem;border-radius:4px;background:#1e293b;color:#94a3b8;border:1px solid #334155">—</span>
+        </div>
+        <p id="frankfurt-desc" style="font-size:0.78rem;color:#64748b;margin:0 0 0.6rem">
+          Browse VDCs and select a Frankfurt datacenter (de/fra or de/fra2) to enable this option.
+        </p>
+        <label style="display:flex;align-items:center;gap:0.6rem;cursor:pointer;font-size:0.85rem;font-weight:600;color:#cbd5e1">
+          <input type="checkbox" id="frankfurt-diversity-enabled" style="width:16px;height:16px;cursor:pointer" />
+          <span id="frankfurt-checkbox-label">Enable Frankfurt intra-geographical diversity</span>
+        </label>
+
+        <div id="frankfurt-diversity-form" style="display:none;margin-top:0.85rem">
+          <div style="display:flex;gap:1.5rem;margin-bottom:0.85rem;font-size:0.85rem;color:#cbd5e1">
+            <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer">
+              <input type="radio" name="frankfurt-submode" value="create" checked />
+              Create new secondary VDC &amp; PCC
+            </label>
+            <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer">
+              <input type="radio" name="frankfurt-submode" value="existing" />
+              Use existing secondary VDC
+            </label>
+          </div>
+
+          <!-- Create mode fields -->
+          <div id="frankfurt-create-form">
+            <div class="form-grid">
+              <div class="form-group">
+                <label for="frankfurt-vdc-name">Secondary VDC Name</label>
+                <input type="text" id="frankfurt-vdc-name" placeholder="e.g. OpenShift-Workers-FRA2" style="width:100%" />
+                <div class="field-note">Name for the new VDC at the other Frankfurt site</div>
+              </div>
+              <div class="form-group">
+                <label for="frankfurt-pcc-name">Private Cross Connect Name</label>
+                <input type="text" id="frankfurt-pcc-name" value="OCP-Frankfurt-PCC" style="width:100%" />
+                <div class="field-note">Name for the PCC linking the two Frankfurt VDCs</div>
+              </div>
+              <div class="form-group">
+                <label for="frankfurt-primary-lan">Primary VDC LAN ID to cross-connect</label>
+                <input type="number" id="frankfurt-primary-lan" value="1" min="1" style="width:100px" />
+                <div class="field-note">Private LAN ID in your primary cluster VDC to link via PCC</div>
+              </div>
+            </div>
+            <div style="font-size:0.78rem;color:#475569;margin-top:0.4rem;padding:0.5rem 0.75rem;background:#0a0d14;border-radius:6px;border:1px solid #1e293b">
+              First-time setup: creates the secondary VDC, a private LAN, the PCC, and cross-connects both LANs.
+              Use <em>existing secondary VDC</em> mode for subsequent MachineSets at the same site.
+            </div>
+          </div>
+
+          <!-- Existing mode fields -->
+          <div id="frankfurt-existing-form" style="display:none">
+            <div class="form-grid">
+              <div class="form-group" style="grid-column:1/-1">
+                <label for="frankfurt-existing-dc-select">Secondary VDC</label>
+                <div style="display:flex;gap:0.5rem;align-items:center">
+                  <select id="frankfurt-existing-dc-select" style="flex:1;font-family:monospace;font-size:0.8rem">
+                    <option value="">— click Browse to load Frankfurt VDCs —</option>
+                  </select>
+                  <button type="button" class="btn btn-sm" id="frankfurt-browse-dc-btn" style="white-space:nowrap;height:2.5rem">
+                    <span id="frankfurt-browse-dc-label">Browse VDCs</span>
+                    <span class="spinner hidden" id="frankfurt-browse-dc-spinner"></span>
+                  </button>
+                </div>
+                <div class="field-note">Existing secondary Frankfurt VDC (already PCC-connected) — only shows VDCs at the other Frankfurt site</div>
+              </div>
+              <div class="form-group">
+                <label for="frankfurt-existing-lan-id">Secondary VDC LAN ID</label>
+                <input type="number" id="frankfurt-existing-lan-id" value="1" min="1" style="width:100px" />
+                <div class="field-note">Private LAN ID in the secondary VDC for worker node NICs</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card-section-title" style="margin-top:0.75rem">IONOS Cloud — Machine Configuration</div>
       <div class="form-grid">
         <div class="form-group" style="grid-column:1/-1">
           <label for="as-ionos-image-id">RHCOS Image UUID</label>
@@ -750,6 +828,66 @@
             <button class="btn btn-sm" id="as-ionos-browse-btn" style="white-space:nowrap">Browse Images</button>
           </div>
           <div class="field-note">UUID of the RHCOS public image — click Browse to search. Filter: name contains <code style="color:#38bdf8">rhcos</code></div>
+          <!-- Image browser results -->
+          <div id="as-ionos-images-panel" style="display:none;margin-top:0.5rem">
+            <div style="font-size:0.8rem;color:#64748b;margin-bottom:0.4rem">Select an image to use its UUID:</div>
+            <div id="as-ionos-images-list" style="max-height:180px;overflow-y:auto;border:1px solid #2d3348;border-radius:6px;background:#0a0d14;font-size:0.78rem"></div>
+          </div>
+          <!-- Upload RHCOS image sub-panel -->
+          <div style="margin-top:1rem;border:1px solid #312e51;border-radius:8px;overflow:hidden">
+            <div style="display:flex;justify-content:space-between;align-items:center;padding:0.65rem 0.9rem;background:#1a1730;cursor:pointer" id="rhcos-upload-toggle">
+              <span style="font-size:0.85rem;color:#a78bfa;font-weight:600">&#8593; Upload RHCOS Image to IONOS Cloud</span>
+              <span id="rhcos-upload-chevron" style="color:#64748b;font-size:0.75rem">&#9660; expand</span>
+            </div>
+            <div id="rhcos-upload-panel" style="display:none;padding:0.85rem 1rem">
+              <p style="font-size:0.78rem;color:#64748b;margin-bottom:0.85rem">
+                Downloads the RHCOS metal raw image from Red Hat's mirror to the management host, then uploads it to your IONOS account using <code style="color:#38bdf8">lftp</code> over FTPS.
+                The FTP server is automatically selected based on your datacenter location (e.g. <code style="color:#38bdf8">ftp-fra-2.ionos.com</code> for Frankfurt).
+                Images are placed in <code style="color:#38bdf8">hdd-images/</code> and become available as private images in your IONOS account.
+                Requires your IONOS <strong style="color:#94a3b8">account login and password</strong> (not the API token), and <code style="color:#38bdf8">lftp</code> installed on the management host.
+                On success, the image UUID is auto-filled in the field above.
+              </p>
+              <div class="form-grid">
+                <div class="form-group">
+                  <label for="rhcos-ocp-version">OCP Version</label>
+                  <input type="text" id="rhcos-ocp-version" value="4.17" placeholder="e.g. 4.17" style="width:120px" />
+                  <div class="field-note">Major.minor — determines the RHCOS image from Red Hat's mirror</div>
+                </div>
+                <div class="form-group">
+                  <label for="rhcos-image-name">Image Name in IONOS</label>
+                  <input type="text" id="rhcos-image-name" placeholder="auto: rhcos-4.17" style="width:100%" />
+                  <div class="field-note">Leave blank to use <code style="color:#38bdf8">rhcos-{version}</code></div>
+                </div>
+                <div class="form-group">
+                  <label for="rhcos-ftp-user">IONOS Login</label>
+                  <input type="text" id="rhcos-ftp-user" placeholder="username@cloud.ionos.com" autocomplete="username" style="width:100%" />
+                  <div class="field-note">Format: <code style="color:#38bdf8">username@cloud.ionos.com</code> — same as DCD login, used for the IONOS FTPS image upload server</div>
+                </div>
+                <div class="form-group">
+                  <label for="rhcos-ftp-pass">IONOS Password</label>
+                  <input type="password" id="rhcos-ftp-pass" placeholder="account password" autocomplete="current-password" style="width:100%" />
+                  <div class="field-note">Your IONOS account password — transmitted over SSH only, never stored</div>
+                </div>
+              </div>
+
+              <div id="rhcos-steps" class="hidden" style="display:flex;flex-direction:column;gap:0.35rem;margin-top:0.75rem;margin-bottom:0.6rem">
+                <div class="iso-step" id="rhcos-s1" data-status="pending"><span class="iso-step-icon">○</span><span>Determine datacenter region &amp; FTP server</span></div>
+                <div class="iso-step" id="rhcos-s2" data-status="pending"><span class="iso-step-icon">○</span><span>Connect to management host via SSH</span></div>
+                <div class="iso-step" id="rhcos-s3" data-status="pending"><span class="iso-step-icon">○</span><span>Download RHCOS image to management host</span></div>
+                <div class="iso-step" id="rhcos-s4" data-status="pending"><span class="iso-step-icon">○</span><span>Upload image to IONOS via FTP</span></div>
+                <div class="iso-step" id="rhcos-s5" data-status="pending"><span class="iso-step-icon">○</span><span>Wait for IONOS to process &amp; activate image</span></div>
+              </div>
+
+              <pre id="rhcos-log" class="hidden" style="max-height:200px;overflow-y:auto;background:#0a0d14;padding:0.6rem 0.8rem;border-radius:6px;font-size:0.75rem;color:#94a3b8;white-space:pre-wrap;margin-bottom:0.75rem"></pre>
+              <div id="rhcos-done" class="hidden" style="background:#2e1065;border:1px solid #7c3aed;border-radius:8px;padding:0.75rem 1rem;font-size:0.85rem;color:#c4b5fd;margin-bottom:0.75rem"></div>
+              <div class="error-box" id="rhcos-error"></div>
+
+              <button class="btn" id="rhcos-upload-btn" style="background:#312e51;color:#a78bfa;font-weight:600;padding:0.6rem 1.2rem;border:1px solid #4c1d95">
+                <span id="rhcos-upload-label">&#8593; Upload RHCOS Image</span>
+                <span class="spinner hidden" id="rhcos-upload-spinner" style="border-top-color:#a78bfa"></span>
+              </button>
+            </div>
+          </div>
         </div>
 
         <div class="form-group">
@@ -812,67 +950,6 @@
         </div>
       </div>
 
-      <!-- Image browser results -->
-      <div id="as-ionos-images-panel" style="display:none;margin-top:0.5rem">
-        <div style="font-size:0.8rem;color:#64748b;margin-bottom:0.4rem">Select an image to use its UUID:</div>
-        <div id="as-ionos-images-list" style="max-height:180px;overflow-y:auto;border:1px solid #2d3348;border-radius:6px;background:#0a0d14;font-size:0.78rem"></div>
-      </div>
-
-      <!-- Upload RHCOS image sub-panel -->
-      <div style="margin-top:1rem;border:1px solid #312e51;border-radius:8px;overflow:hidden">
-        <div style="display:flex;justify-content:space-between;align-items:center;padding:0.65rem 0.9rem;background:#1a1730;cursor:pointer" id="rhcos-upload-toggle">
-          <span style="font-size:0.85rem;color:#a78bfa;font-weight:600">&#8593; Upload RHCOS Image to IONOS Cloud</span>
-          <span id="rhcos-upload-chevron" style="color:#64748b;font-size:0.75rem">&#9660; expand</span>
-        </div>
-        <div id="rhcos-upload-panel" style="display:none;padding:0.85rem 1rem">
-          <p style="font-size:0.78rem;color:#64748b;margin-bottom:0.85rem">
-            Downloads the RHCOS metal raw image from Red Hat's mirror to the management host, then uploads it to your IONOS account using <code style="color:#38bdf8">lftp</code> over FTPS.
-            The FTP server is automatically selected based on your datacenter location (e.g. <code style="color:#38bdf8">ftp-fra-2.ionos.com</code> for Frankfurt).
-            Images are placed in <code style="color:#38bdf8">hdd-images/</code> and become available as private images in your IONOS account.
-            Requires your IONOS <strong style="color:#94a3b8">account login and password</strong> (not the API token), and <code style="color:#38bdf8">lftp</code> installed on the management host.
-            On success, the image UUID is auto-filled in the field above.
-          </p>
-          <div class="form-grid">
-            <div class="form-group">
-              <label for="rhcos-ocp-version">OCP Version</label>
-              <input type="text" id="rhcos-ocp-version" value="4.17" placeholder="e.g. 4.17" style="width:120px" />
-              <div class="field-note">Major.minor — determines the RHCOS image from Red Hat's mirror</div>
-            </div>
-            <div class="form-group">
-              <label for="rhcos-image-name">Image Name in IONOS</label>
-              <input type="text" id="rhcos-image-name" placeholder="auto: rhcos-4.17" style="width:100%" />
-              <div class="field-note">Leave blank to use <code style="color:#38bdf8">rhcos-{version}</code></div>
-            </div>
-            <div class="form-group">
-              <label for="rhcos-ftp-user">IONOS Login</label>
-              <input type="text" id="rhcos-ftp-user" placeholder="username@cloud.ionos.com" autocomplete="username" style="width:100%" />
-              <div class="field-note">Format: <code style="color:#38bdf8">username@cloud.ionos.com</code> — same as DCD login, used for the IONOS FTPS image upload server</div>
-            </div>
-            <div class="form-group">
-              <label for="rhcos-ftp-pass">IONOS Password</label>
-              <input type="password" id="rhcos-ftp-pass" placeholder="account password" autocomplete="current-password" style="width:100%" />
-              <div class="field-note">Your IONOS account password — transmitted over SSH only, never stored</div>
-            </div>
-          </div>
-
-          <div id="rhcos-steps" class="hidden" style="display:flex;flex-direction:column;gap:0.35rem;margin-top:0.75rem;margin-bottom:0.6rem">
-            <div class="iso-step" id="rhcos-s1" data-status="pending"><span class="iso-step-icon">○</span><span>Determine datacenter region &amp; FTP server</span></div>
-            <div class="iso-step" id="rhcos-s2" data-status="pending"><span class="iso-step-icon">○</span><span>Connect to management host via SSH</span></div>
-            <div class="iso-step" id="rhcos-s3" data-status="pending"><span class="iso-step-icon">○</span><span>Download RHCOS image to management host</span></div>
-            <div class="iso-step" id="rhcos-s4" data-status="pending"><span class="iso-step-icon">○</span><span>Upload image to IONOS via FTP</span></div>
-            <div class="iso-step" id="rhcos-s5" data-status="pending"><span class="iso-step-icon">○</span><span>Wait for IONOS to process &amp; activate image</span></div>
-          </div>
-
-          <pre id="rhcos-log" class="hidden" style="max-height:200px;overflow-y:auto;background:#0a0d14;padding:0.6rem 0.8rem;border-radius:6px;font-size:0.75rem;color:#94a3b8;white-space:pre-wrap;margin-bottom:0.75rem"></pre>
-          <div id="rhcos-done" class="hidden" style="background:#2e1065;border:1px solid #7c3aed;border-radius:8px;padding:0.75rem 1rem;font-size:0.85rem;color:#c4b5fd;margin-bottom:0.75rem"></div>
-          <div class="error-box" id="rhcos-error"></div>
-
-          <button class="btn" id="rhcos-upload-btn" style="background:#312e51;color:#a78bfa;font-weight:600;padding:0.6rem 1.2rem;border:1px solid #4c1d95">
-            <span id="rhcos-upload-label">&#8593; Upload RHCOS Image</span>
-            <span class="spinner hidden" id="rhcos-upload-spinner" style="border-top-color:#a78bfa"></span>
-          </button>
-        </div>
-      </div>
     </div>
 
     <!-- Provider deployment toggle (IONOS mode only) -->
@@ -982,7 +1059,13 @@
       <div class="iso-step hidden" id="as-si0" data-status="pending"><span class="iso-step-icon">○</span><span>Deploy Machine API provider</span></div>
       <div class="iso-step hidden" id="as-si1" data-status="pending"><span class="iso-step-icon">○</span><span>Create IONOS credentials Secret</span></div>
       <div class="iso-step hidden" id="as-si2" data-status="pending"><span class="iso-step-icon">○</span><span>Verify worker-user-data Secret</span></div>
+      <!-- Frankfurt diversity steps — shown only when Frankfurt create mode is active -->
+      <div class="iso-step hidden" id="as-fra1" data-status="pending"><span class="iso-step-icon">○</span><span>Create secondary Frankfurt VDC</span></div>
+      <div class="iso-step hidden" id="as-fra2" data-status="pending"><span class="iso-step-icon">○</span><span>Create private LAN in secondary VDC</span></div>
       <div class="iso-step hidden" id="as-si3" data-status="pending"><span class="iso-step-icon">○</span><span>Create IONOS MachineSet</span></div>
+      <div class="iso-step hidden" id="as-fra3" data-status="pending"><span class="iso-step-icon">○</span><span>Create Private Cross Connect (PCC)</span></div>
+      <div class="iso-step hidden" id="as-fra4" data-status="pending"><span class="iso-step-icon">○</span><span>Connect primary VDC LAN to PCC</span></div>
+      <div class="iso-step hidden" id="as-fra5" data-status="pending"><span class="iso-step-icon">○</span><span>Connect secondary VDC LAN to PCC</span></div>
       <!-- shared steps -->
       <div class="iso-step" id="as-s3" data-status="pending"><span class="iso-step-icon">○</span><span>Apply ClusterAutoscaler</span></div>
       <div class="iso-step" id="as-s4" data-status="pending"><span class="iso-step-icon">○</span><span>Apply MachineAutoscaler</span></div>
@@ -1522,11 +1605,39 @@
         datacenterLocation = opt?.dataset?.location || '';
         loadLans(tok, sel.value, opt?.text || '');
         loadIonosCpuFamilies();
+        detectFrankfurt();
       };
     } catch (err) {
       alert('Failed to load VDCs: ' + err.message);
     } finally {
       setLoading('browse-dc-label', 'browse-dc-spinner', 'browse-dc-btn', false, 'Browse VDCs');
+    }
+  });
+
+  // ── Browse Frankfurt secondary VDC (existing mode) ────────────────────────
+  document.getElementById('frankfurt-browse-dc-btn').addEventListener('click', async () => {
+    const tok = document.getElementById('ionos-token').value.trim();
+    if (!tok) { alert('Please enter your IONOS Cloud API Token first.'); return; }
+
+    setLoading('frankfurt-browse-dc-label', 'frankfurt-browse-dc-spinner', 'frankfurt-browse-dc-btn', true, 'Loading…');
+    try {
+      const data = await apiPost('/api/ionos/datacenters', { ionosToken: tok });
+      // Only show VDCs at the other Frankfurt site
+      const otherLoc = datacenterLocation === 'de/fra' ? 'de/fra2' : 'de/fra';
+      const filtered = data.datacenters.filter(dc => dc.location === otherLoc);
+      const sel = document.getElementById('frankfurt-existing-dc-select');
+      if (filtered.length === 0) {
+        sel.innerHTML = `<option value="">— no VDCs found at ${otherLoc} —</option>`;
+      } else {
+        sel.innerHTML = `<option value="">— select secondary VDC at ${otherLoc} —</option>` +
+          filtered.map(dc =>
+            `<option value="${escHtml(dc.id)}">${escHtml(dc.name)} (${escHtml(dc.location)})</option>`
+          ).join('');
+      }
+    } catch (err) {
+      alert('Failed to load VDCs: ' + err.message);
+    } finally {
+      setLoading('frankfurt-browse-dc-label', 'frankfurt-browse-dc-spinner', 'frankfurt-browse-dc-btn', false, 'Browse VDCs');
     }
   });
 
@@ -2461,6 +2572,8 @@
     // IONOS group
     document.getElementById('as-ionos-group').style.display              = isIonos ? '' : 'none';
     document.getElementById('as-provider-deploy-group').style.display    = isIonos ? '' : 'none';
+    document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? 'block' : 'none';
+    if (isIonos) detectFrankfurt();
     // Step visibility
     document.getElementById('as-s1').classList.toggle('hidden', !isClone);
     document.getElementById('as-s2').classList.toggle('hidden', !isClone);
@@ -2473,6 +2586,46 @@
   document.querySelectorAll('input[name="as-ms-mode"]').forEach(r => r.addEventListener('change', () => {
     applyAsModeVisibility();
     if (r.value === 'ionos') loadIonosCpuFamilies();
+  }));
+
+  // Update Frankfurt diversity panel — always visible in IONOS mode.
+  // Enables the checkbox only when the selected VDC is in de/fra or de/fra2.
+  function detectFrankfurt() {
+    // Fall back to reading the dropdown if the JS variable was cleared by a refresh
+    if (!datacenterLocation) {
+      const dcSel = document.getElementById('datacenter-select');
+      const opt   = dcSel?.options?.[dcSel?.selectedIndex];
+      if (opt?.dataset?.location) datacenterLocation = opt.dataset.location;
+    }
+    const isFra   = datacenterLocation === 'de/fra' || datacenterLocation === 'de/fra2';
+    const locText = datacenterLocation || '—';
+
+    document.getElementById('frankfurt-loc-badge').textContent = locText;
+    const descEl = document.getElementById('frankfurt-desc');
+
+    if (isFra) {
+      const other = datacenterLocation === 'de/fra' ? 'de/fra2' : 'de/fra';
+      document.getElementById('frankfurt-vdc-name').value =
+        other === 'de/fra2' ? 'OpenShift-Workers-FRA2' : 'OpenShift-Workers-FRA';
+      descEl.innerHTML = `Your cluster VDC is in <strong style="color:#94a3b8">${datacenterLocation}</strong>.
+        Tick the box to place worker nodes at the other Frankfurt site
+        (<strong style="color:#94a3b8">${other}</strong>)
+        via Private Cross Connect (PCC).`;
+    } else if (datacenterLocation) {
+      descEl.textContent = `VDC location: ${datacenterLocation} — Frankfurt diversity requires de/fra or de/fra2.`;
+    } else {
+      descEl.textContent = 'Browse VDCs and select a datacenter to check Frankfurt diversity eligibility.';
+    }
+  }
+
+  document.getElementById('frankfurt-diversity-enabled').addEventListener('change', function () {
+    document.getElementById('frankfurt-diversity-form').style.display = this.checked ? '' : 'none';
+  });
+
+  document.querySelectorAll('input[name="frankfurt-submode"]').forEach(r => r.addEventListener('change', () => {
+    const isCreate = document.querySelector('input[name="frankfurt-submode"]:checked')?.value === 'create';
+    document.getElementById('frankfurt-create-form').style.display   = isCreate ? '' : 'none';
+    document.getElementById('frankfurt-existing-form').style.display = isCreate ? 'none' : '';
   }));
 
   // Show/hide registry fields when deploy-provider checkbox changes
@@ -2712,6 +2865,15 @@
     const ionosDiskType    = document.getElementById('as-ionos-disk-type').value;
     const ionosLanId       = parseInt(document.getElementById('as-ionos-lan').value, 10) || 1;
 
+    // Frankfurt Intra-geographical Diversity
+    const frankfurtEnabled    = document.getElementById('frankfurt-diversity-enabled').checked;
+    const frankfurtSubMode    = document.querySelector('input[name="frankfurt-submode"]:checked')?.value || 'create';
+    const frankfurtVdcName    = document.getElementById('frankfurt-vdc-name').value.trim();
+    const frankfurtPccName    = document.getElementById('frankfurt-pcc-name').value.trim();
+    const frankfurtPrimaryLan = parseInt(document.getElementById('frankfurt-primary-lan').value, 10) || 1;
+    const frankfurtExistingDc = document.getElementById('frankfurt-existing-dc-select').value.trim();
+    const frankfurtExistingLan= parseInt(document.getElementById('frankfurt-existing-lan-id').value, 10) || 1;
+
     // Validation
     if (msMode === 'existing' || msMode === 'clone') {
       if (!msSource) { showError('as-error', 'Select a source MachineSet.'); return; }
@@ -2722,6 +2884,14 @@
       if (!ionosImageId) { showError('as-error', 'Enter the RHCOS image UUID (use Browse Images to find it).'); return; }
       if (!ionosToken) { showError('as-error', 'IONOS API token is required for IONOS MachineSet creation.'); return; }
       if (!datacenterId) { showError('as-error', 'Connect to a VDC first (IONOS Datacenter ID is required).'); return; }
+      if (frankfurtEnabled) {
+        if (frankfurtSubMode === 'create') {
+          if (!frankfurtVdcName) { showError('as-error', 'Enter a name for the secondary Frankfurt VDC.'); return; }
+          if (!frankfurtPccName) { showError('as-error', 'Enter a name for the Private Cross Connect.'); return; }
+        } else {
+          if (!frankfurtExistingDc) { showError('as-error', 'Select the existing secondary Frankfurt VDC (click Browse VDCs).'); return; }
+        }
+      }
     }
     if (isNaN(minReplicas) || isNaN(maxReplicas) || minReplicas > maxReplicas) {
       showError('as-error', 'Min replicas must be ≤ max replicas.'); return;
@@ -2741,9 +2911,24 @@
     document.getElementById('as-si2').classList.toggle('hidden', !isIonos);
     document.getElementById('as-si3').classList.toggle('hidden', !isIonos);
 
+    // Show Frankfurt diversity steps when create mode is active
+    const fraCreate = isIonos && frankfurtEnabled && frankfurtSubMode === 'create';
+    ['as-fra1','as-fra2','as-fra3','as-fra4','as-fra5'].forEach(id => {
+      document.getElementById(id).classList.toggle('hidden', !fraCreate);
+    });
+
     // Build ordered active step list for the server's sequential events
+    // Frankfurt create order: VDC → LAN → MachineSet → PCC → connect LANs
+    const fraSteps = fraCreate
+      ? ['as-fra1','as-fra2','as-si3','as-fra3','as-fra4','as-fra5']
+      : ['as-si3'];
     asActiveStepIds = isClone ? ['as-s1','as-s2','as-s3','as-s4']
-                   : isIonos ? (deployProvider ? ['as-si0','as-si1','as-si2','as-si3','as-s3','as-s4'] : ['as-si1','as-si2','as-si3','as-s3','as-s4'])
+                   : isIonos ? [
+                       ...(deployProvider ? ['as-si0'] : []),
+                       'as-si1','as-si2',
+                       ...fraSteps,
+                       'as-s3','as-s4'
+                     ]
                    :           ['as-s3','as-s4'];
 
     const targetMsName = isClone ? msNewName : isIonos ? ionosMsName : msSource;
@@ -2793,7 +2978,15 @@
           machRamGiB:       ionosRamGiB,
           machDiskGB:       ionosDiskGB,
           machDiskType:     ionosDiskType,
-          machLanId:        ionosLanId
+          machLanId:        ionosLanId,
+          // Frankfurt Intra-geographical Diversity
+          frankfurtDiversity:   msMode === 'ionos' && frankfurtEnabled,
+          frankfurtSubMode,
+          frankfurtVdcName,
+          frankfurtPccName,
+          frankfurtPrimaryLanId: frankfurtPrimaryLan,
+          frankfurtExistingDcId: frankfurtExistingDc,
+          frankfurtExistingLanId: frankfurtExistingLan
         })
       });
 
@@ -3004,6 +3197,9 @@
       document.getElementById('scale-in-btn').disabled = false;
     }
   });
+
+  // Initialise form state to match the default-selected radio (Create new IONOS MachineSet)
+  applyAsModeVisibility();
 
 </script>
 </body>

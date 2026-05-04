@@ -479,7 +479,11 @@ app.post('/api/setup-autoscaler', async (req, res) => {
           serverType, region,
           deployProvider,
           // Container registry for provider image
-          registryType, registryImage, registryUsername, registryPassword } = req.body;
+          registryType, registryImage, registryUsername, registryPassword,
+          // Frankfurt Intra-geographical Diversity
+          frankfurtDiversity, frankfurtSubMode,
+          frankfurtVdcName, frankfurtPccName, frankfurtPrimaryLanId,
+          frankfurtExistingDcId, frankfurtExistingLanId } = req.body;
 
   if (!clusterApiUrl || !ocpToken || !targetMsName)
     return res.status(400).json({ error: 'clusterApiUrl, ocpToken and targetMsName are required.' });
@@ -683,6 +687,48 @@ app.post('/api/setup-autoscaler', async (req, res) => {
         step('worker-user-data: not found (see log)', 'ok');
       }
 
+      // ── Frankfurt Diversity Phase 1: Create secondary VDC + LAN (before MachineSet) ─
+      let effectiveDcId   = datacenterId;
+      let effectiveLanId  = parseInt(machLanId, 10) || 1;
+      let effectiveRegion = region;
+      let _fraDoPcc       = false;   // triggers Phase 2 after MachineSet
+      let _fraPrimaryLan  = 0;
+
+      if (frankfurtDiversity) {
+        const otherLocation = region === 'de/fra' ? 'de/fra2' : 'de/fra';
+        effectiveRegion = otherLocation;
+
+        if (frankfurtSubMode === 'create') {
+          // fra1: Create secondary VDC
+          step(`Creating secondary VDC "${frankfurtVdcName}" at ${otherLocation}…`, 'working');
+          const newDc = await ionosPost('/datacenters', ionosToken, {
+            properties: { name: frankfurtVdcName, location: otherLocation }
+          });
+          effectiveDcId = newDc.id;
+          log(`  Secondary VDC ID: ${effectiveDcId}\n`);
+          await ionosWaitAvailable(`/datacenters/${effectiveDcId}`, ionosToken, 300000);
+          step(`Secondary VDC "${frankfurtVdcName}" ready at ${otherLocation}`, 'ok');
+
+          // fra2: Create private LAN in secondary VDC (LAN ID now known for MachineSet NIC)
+          step('Creating private LAN in secondary VDC…', 'working');
+          const newLan = await ionosPost(`/datacenters/${effectiveDcId}/lans`, ionosToken, {
+            properties: { name: 'Internal', public: false }
+          });
+          effectiveLanId = parseInt(newLan.id, 10) || 1;
+          log(`  Secondary LAN ID: ${effectiveLanId}\n`);
+          await ionosWaitAvailable(`/datacenters/${effectiveDcId}/lans/${effectiveLanId}`, ionosToken, 120000);
+          step(`Private LAN ${effectiveLanId} created in secondary VDC`, 'ok');
+
+          _fraDoPcc      = true;
+          _fraPrimaryLan = parseInt(frankfurtPrimaryLanId, 10) || 1;
+
+        } else {
+          effectiveDcId  = frankfurtExistingDcId;
+          effectiveLanId = parseInt(frankfurtExistingLanId, 10) || 1;
+          log(`Using existing secondary Frankfurt VDC: ${effectiveDcId} (LAN: ${effectiveLanId})\n`);
+        }
+      }
+
       // ── Step 3: Create IONOS-backed MachineSet ────────────────────────────
       step(`Creating IONOS MachineSet "${targetMsName}"…`, 'working');
       const ramMB      = (parseInt(machRamGiB, 10) || 8) * 1024;
@@ -692,7 +738,7 @@ app.post('/api/setup-autoscaler', async (req, res) => {
       const az         = availabilityZone     || 'AUTO';
       const diskAz     = diskAvailabilityZone || az;
       const cpuFam     = cpuFamily            || 'INTEL_ICELAKE';
-      const lanId      = parseInt(machLanId, 10) || 1;
+      const lanId      = effectiveLanId;
       const srvType    = serverType           || 'ENTERPRISE';
       const isVcpu     = srvType === 'VCPU';
 
@@ -702,12 +748,12 @@ app.post('/api/setup-autoscaler', async (req, res) => {
       const providerSpec = {
         apiVersion: 'ionoscloudproviderconfig.openshift.io/v1alpha1',
         kind:       'IONOSCloudMachineProviderSpec',
-        datacenterID:      datacenterId,
+        datacenterID:      effectiveDcId,
         cores,
         ram:               ramMB,
         ...(isVcpu ? {} : { cpuFamily: cpuFam }),
         serverType:        srvType,
-        ...(region ? { region } : {}),
+        ...(effectiveRegion ? { region: effectiveRegion } : {}),
         availabilityZone:  az,
         image:             ionosImageId,
         disk: {
@@ -755,8 +801,47 @@ app.post('/api/setup-autoscaler', async (req, res) => {
       log(`MachineSet "${targetMsName}" created with IONOS providerSpec\n`);
       log(`  Image: ${ionosImageId}\n`);
       log(`  ${cores} cores / ${machRamGiB} GiB RAM / ${diskGB} GB ${diskType} / LAN ${lanId}\n`);
-      log(`  Type: ${srvType}${isVcpu ? '' : ` / CPU: ${cpuFam}`} / AZ: ${az}${region ? ` / Region: ${region}` : ''}\n`);
+      log(`  VDC: ${effectiveDcId}${effectiveRegion ? ` (${effectiveRegion})` : ''}\n`);
+      log(`  Type: ${srvType}${isVcpu ? '' : ` / CPU: ${cpuFam}`} / AZ: ${az}\n`);
       step(`IONOS MachineSet "${targetMsName}" created`, 'ok');
+
+      // ── Frankfurt Diversity Phase 2: PCC + LAN connections (after MachineSet) ─
+      if (_fraDoPcc) {
+        // fra3: Create Private Cross Connect
+        step(`Creating Private Cross Connect "${frankfurtPccName}"…`, 'working');
+        const pcc = await ionosPost('/pccs', ionosToken, {
+          properties: { name: frankfurtPccName }
+        });
+        const pccId = pcc.id;
+        log(`  PCC ID: ${pccId}\n`);
+        await ionosWaitAvailable(`/pccs/${pccId}`, ionosToken, 120000);
+        step(`PCC "${frankfurtPccName}" ready`, 'ok');
+
+        // fra4: Connect primary VDC LAN to PCC
+        step(`Connecting primary VDC LAN ${_fraPrimaryLan} to PCC…`, 'working');
+        await ionosPatch(
+          `/datacenters/${datacenterId}/lans/${_fraPrimaryLan}`,
+          ionosToken,
+          { pcc: pccId }
+        );
+        await ionosWaitAvailable(`/datacenters/${datacenterId}`, ionosToken, 120000);
+        step(`Primary VDC LAN ${_fraPrimaryLan} connected to PCC`, 'ok');
+
+        // fra5: Connect secondary VDC LAN to PCC
+        step(`Connecting secondary VDC LAN ${effectiveLanId} to PCC…`, 'working');
+        await ionosPatch(
+          `/datacenters/${effectiveDcId}/lans/${effectiveLanId}`,
+          ionosToken,
+          { pcc: pccId }
+        );
+        await ionosWaitAvailable(`/datacenters/${effectiveDcId}`, ionosToken, 120000);
+        step(`Secondary VDC LAN ${effectiveLanId} connected to PCC`, 'ok');
+
+        log(`\nFrankfurt diversity complete:\n`);
+        log(`  Primary VDC:   ${datacenterId} (${region}) — LAN ${_fraPrimaryLan}\n`);
+        log(`  Secondary VDC: ${effectiveDcId} (${effectiveRegion}) — LAN ${effectiveLanId}\n`);
+        log(`  PCC:           ${pccId} ("${frankfurtPccName}")\n\n`);
+      }
 
     } else if (msMode === 'clone') {
       // ── Step 1+2: Clone existing MachineSet ──────────────────────────────
