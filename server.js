@@ -750,17 +750,73 @@ app.post('/api/setup-autoscaler', async (req, res) => {
               const checkRes = await sshRunScript(ftpConn,
                 `[ -f "${localFile}" ] && stat -c%s "${localFile}" || echo MISSING`);
               const cachedBytes = checkRes.stdout.trim();
-              if (cachedBytes === 'MISSING' || parseInt(cachedBytes, 10) < 1000000000) {
-                const err = new Error(
-                  `Image file "${localFile}" is not cached on the management host (${mgmtAddr}). ` +
-                  `IONOS FTP does not support downloads — you must first upload the RHCOS image ` +
-                  `to a ${imgLocation} datacenter using the "Upload RHCOS Image" tool, which ` +
-                  `caches the .raw file at that path. Then re-run.`
-                );
-                err.status = 422;
-                throw err;
+              let sizeForLog = parseInt(cachedBytes, 10) || 0;
+              if (cachedBytes === 'MISSING' || sizeForLog < 1000000000) {
+                // Not cached — download fresh from Red Hat mirror (same flow as Upload RHCOS Image tool).
+                log(`  Image not cached on management host — downloading from Red Hat mirror…\n`);
+                step('Downloading RHCOS from Red Hat mirror…', 'working');
+
+                const verMatch = imgName.match(/rhcos-(\d+\.\d+)/i);
+                if (!verMatch) {
+                  const err = new Error(
+                    `Cannot determine RHCOS version from image name "${imgName}". ` +
+                    `Please use the "Upload RHCOS Image" tool to upload the image to ` +
+                    `the secondary datacenter first, then re-run.`
+                  );
+                  err.status = 422;
+                  throw err;
+                }
+                const rhcosVer = verMatch[1];
+                const tmpGz    = `/tmp/rhcos-upload/rhcos-dl-temp.raw.gz`;
+                const tmpRaw   = `/tmp/rhcos-upload/rhcos-dl-temp.raw`;
+
+                const urlRes = await sshRunScript(ftpConn, `
+export PATH=$PATH:/usr/local/bin:/usr/bin
+MIRROR="https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/${rhcosVer}/latest/"
+FILENAME=$(curl -sL "$MIRROR" | grep -oE 'rhcos-[0-9.]+-x86_64-metal\\.x86_64\\.raw\\.gz' | head -1)
+if [ -z "$FILENAME" ]; then echo "URL_FAIL"; else echo "URL_OK:$MIRROR$FILENAME"; fi
+`);
+                const urlLine = urlRes.stdout.trim();
+                if (!urlLine.startsWith('URL_OK:')) {
+                  const err = new Error(
+                    `Could not find RHCOS ${rhcosVer} metal image on mirror.openshift.com. ` +
+                    `Please use the "Upload RHCOS Image" tool to upload the image manually.`
+                  );
+                  err.status = 422;
+                  throw err;
+                }
+                const rhcosUrl = urlLine.slice(7);
+                log(`  Found: ${rhcosUrl}\n  Downloading (~1 GB compressed — this will take a few minutes)…\n`);
+
+                await sshRunScriptStreaming(ftpConn, `
+set -e
+mkdir -p /tmp/rhcos-upload
+rm -f "${tmpGz}" "${tmpRaw}"
+curl -L --progress-bar -o "${tmpGz}" "${rhcosUrl}" 2>&1
+echo "DL_OK"
+`, chunk => { log(chunk); });
+
+                log(`  Decompressing…\n`);
+                await sshRunScriptStreaming(ftpConn, `
+set -e
+gunzip -f "${tmpGz}"
+mv -f "${tmpRaw}" "${localFile}"
+echo "DECOMP_OK"
+`, chunk => { log(chunk); });
+
+                const dlCheck = await sshRunScript(ftpConn, `stat -c%s "${localFile}" 2>/dev/null || echo 0`);
+                sizeForLog = parseInt(dlCheck.stdout.trim(), 10) || 0;
+                if (sizeForLog < 1000000000) {
+                  const err = new Error(
+                    `Downloaded RHCOS image appears incomplete (${sizeForLog} bytes). ` +
+                    `The download may have failed — check management host internet connectivity and retry.`
+                  );
+                  err.status = 422;
+                  throw err;
+                }
+                step(`RHCOS image downloaded (${(sizeForLog / 1e9).toFixed(2)} GB)`, 'ok');
               }
-              log(`  Found ${imgName} on management host (${(parseInt(cachedBytes, 10) / 1e9).toFixed(2)} GB)\n`);
+              log(`  Using ${imgName} on management host (${(sizeForLog / 1e9).toFixed(2)} GB)\n`);
 
               // Step B: upload to destination FTP
               log(`  Uploading ${imgName} to ${destFtpHost}/hdd-images/…\n`);
