@@ -695,7 +695,7 @@ app.post('/api/setup-autoscaler', async (req, res) => {
       let _fraPrimaryLan  = 0;
 
       if (frankfurtDiversity) {
-        const otherLocation = region === 'de/fra' ? 'de/fra2' : 'de/fra';
+        const otherLocation = region === 'de/fra' ? 'de/fra/2' : 'de/fra';
         effectiveRegion = otherLocation;
 
         if (frankfurtSubMode === 'create') {

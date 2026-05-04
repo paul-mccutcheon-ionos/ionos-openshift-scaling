@@ -749,7 +749,7 @@
           <span id="frankfurt-loc-badge" style="font-size:0.72rem;font-family:monospace;padding:0.15rem 0.5rem;border-radius:4px;background:#1e293b;color:#94a3b8;border:1px solid #334155">—</span>
         </div>
         <p id="frankfurt-desc" style="font-size:0.78rem;color:#64748b;margin:0 0 0.6rem">
-          Browse VDCs and select a Frankfurt datacenter (de/fra or de/fra2) to enable this option.
+          Browse VDCs and select a Frankfurt datacenter (de/fra or de/fra/2) to enable this option.
         </p>
         <label style="display:flex;align-items:center;gap:0.6rem;cursor:pointer;font-size:0.85rem;font-weight:600;color:#cbd5e1">
           <input type="checkbox" id="frankfurt-diversity-enabled" style="width:16px;height:16px;cursor:pointer" />
@@ -1623,7 +1623,7 @@
     try {
       const data = await apiPost('/api/ionos/datacenters', { ionosToken: tok });
       // Only show VDCs at the other Frankfurt site
-      const otherLoc = datacenterLocation === 'de/fra' ? 'de/fra2' : 'de/fra';
+      const otherLoc = datacenterLocation === 'de/fra' ? 'de/fra/2' : 'de/fra';
       const filtered = data.datacenters.filter(dc => dc.location === otherLoc);
       const sel = document.getElementById('frankfurt-existing-dc-select');
       if (filtered.length === 0) {
@@ -2589,7 +2589,7 @@
   }));
 
   // Update Frankfurt diversity panel — always visible in IONOS mode.
-  // Enables the checkbox only when the selected VDC is in de/fra or de/fra2.
+  // Enables the checkbox only when the selected VDC is in de/fra or de/fra/2.
   function detectFrankfurt() {
     // Fall back to reading the dropdown if the JS variable was cleared by a refresh
     if (!datacenterLocation) {
@@ -2597,22 +2597,22 @@
       const opt   = dcSel?.options?.[dcSel?.selectedIndex];
       if (opt?.dataset?.location) datacenterLocation = opt.dataset.location;
     }
-    const isFra   = datacenterLocation === 'de/fra' || datacenterLocation === 'de/fra2';
+    const isFra   = datacenterLocation === 'de/fra' || datacenterLocation === 'de/fra/2';
     const locText = datacenterLocation || '—';
 
     document.getElementById('frankfurt-loc-badge').textContent = locText;
     const descEl = document.getElementById('frankfurt-desc');
 
     if (isFra) {
-      const other = datacenterLocation === 'de/fra' ? 'de/fra2' : 'de/fra';
+      const other = datacenterLocation === 'de/fra' ? 'de/fra/2' : 'de/fra';
       document.getElementById('frankfurt-vdc-name').value =
-        other === 'de/fra2' ? 'OpenShift-Workers-FRA2' : 'OpenShift-Workers-FRA';
+        other === 'de/fra/2' ? 'OpenShift-Workers-FRA2' : 'OpenShift-Workers-FRA';
       descEl.innerHTML = `Your cluster VDC is in <strong style="color:#94a3b8">${datacenterLocation}</strong>.
         Tick the box to place worker nodes at the other Frankfurt site
         (<strong style="color:#94a3b8">${other}</strong>)
         via Private Cross Connect (PCC).`;
     } else if (datacenterLocation) {
-      descEl.textContent = `VDC location: ${datacenterLocation} — Frankfurt diversity requires de/fra or de/fra2.`;
+      descEl.textContent = `VDC location: ${datacenterLocation} — Frankfurt diversity requires de/fra or de/fra/2.`;
     } else {
       descEl.textContent = 'Browse VDCs and select a datacenter to check Frankfurt diversity eligibility.';
     }
