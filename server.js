@@ -726,52 +726,71 @@ app.post('/api/setup-autoscaler', async (req, res) => {
               throw err;
             }
 
-            // FTP server for the secondary location  (de/fra → ftp-fra.ionos.com, de/fra/2 → ftp-fra-2.ionos.com)
-            const locParts = otherLocation.split('/');
-            const city     = locParts[1] || locParts[0] || 'fra';
-            const zone     = locParts[2] || '';
-            const ftpHost  = `ftp-${zone ? `${city}-${zone}` : city}.ionos.com`;
+            // Derive FTP hostnames from location strings
+            // de/fra   → ftp-fra.ionos.com,   de/fra/2 → ftp-fra-2.ionos.com
+            const ftpHostFor = loc => {
+              const p = loc.split('/');
+              const c = p[1] || p[0] || 'fra';
+              const z = p[2] || '';
+              return `ftp-${z ? `${c}-${z}` : c}.ionos.com`;
+            };
+            const srcFtpHost  = ftpHostFor(imgLocation);   // where the image currently lives
+            const destFtpHost = ftpHostFor(otherLocation); // where we need it
 
-            step(`Connecting to management host for FTP copy…`, 'working');
+            step(`Connecting to management host to copy image between FTP servers…`, 'working');
             const ftpConn = await sshConnect(mgmtAddr, 'root', mgmtKey);
             try {
-              // The RHCOS upload flow saves images to /tmp/rhcos-upload/<imgName>
               const localFile = `/tmp/rhcos-upload/${imgName}`;
-              const checkRes  = await sshRunScript(ftpConn,
-                `[ -f "${localFile}" ] && stat -c%s "${localFile}" || echo MISSING`
-              );
-              const checkOut = checkRes.stdout.trim();
-              if (checkOut === 'MISSING') {
-                const err = new Error(
-                  `Image file "${localFile}" not found on management host ${mgmtAddr}. ` +
-                  `Run the "Upload RHCOS Image" step for any ${imgLocation} datacenter first so the file is cached locally, then retry.`
-                );
-                err.status = 422;
-                throw err;
-              }
-              log(`  Found ${imgName} on management host (${(parseInt(checkOut, 10) / 1e9).toFixed(2)} GB)\n`);
-              log(`  Uploading to ${ftpHost}/hdd-images/ via lftp…\n`);
-              step(`Uploading image to ${ftpHost}…`, 'working');
+              const ts = Date.now();
+              const srcScript  = `/tmp/.lftp-src-${ts}`;
+              const destScript = `/tmp/.lftp-dest-${ts}`;
 
-              const lftpScript = `/tmp/.fra-copy-lftp-${Date.now()}`;
-              await sshRunScript(ftpConn, `
-cat > ${lftpScript} << 'LFTP_EOF'
+              // Step A: download from source FTP (skip if already cached locally)
+              const checkRes = await sshRunScript(ftpConn,
+                `[ -f "${localFile}" ] && stat -c%s "${localFile}" || echo MISSING`);
+              if (checkRes.stdout.trim() === 'MISSING') {
+                log(`  Downloading ${imgName} from ${srcFtpHost}…\n`);
+                step(`Downloading image from ${srcFtpHost}…`, 'working');
+                await sshRunScript(ftpConn, `mkdir -p /tmp/rhcos-upload
+cat > ${srcScript} << 'LFTP_EOF'
 set ftp:ssl-allow true
-set ftp:ssl-allow/${ftpHost} true
-open ${ftpHost}
+set ftp:ssl-allow/${srcFtpHost} true
+open ${srcFtpHost}
+user "${ftpUser}" "${ftpPass}"
+cd hdd-images
+get ${imgName} -o ${localFile}
+bye
+LFTP_EOF
+chmod 600 ${srcScript}`);
+                await sshRunScriptStreaming(ftpConn, `set -e
+lftp -f ${srcScript}
+echo "DOWNLOAD_OK"
+rm -f ${srcScript}`, chunk => { log(chunk); });
+                log(`  Download complete\n`);
+              } else {
+                log(`  ${imgName} already cached on management host — skipping download\n`);
+              }
+
+              // Step B: upload to destination FTP
+              log(`  Uploading ${imgName} to ${destFtpHost}/hdd-images/…\n`);
+              step(`Uploading image to ${destFtpHost}…`, 'working');
+              await sshRunScript(ftpConn, `
+cat > ${destScript} << 'LFTP_EOF'
+set ftp:ssl-allow true
+set ftp:ssl-allow/${destFtpHost} true
+open ${destFtpHost}
 user "${ftpUser}" "${ftpPass}"
 cd hdd-images
 put ${localFile}
 bye
 LFTP_EOF
-chmod 600 ${lftpScript}`);
-
+chmod 600 ${destScript}`);
               await sshRunScriptStreaming(ftpConn, `set -e
-lftp -f ${lftpScript}
-echo "FTP_UPLOAD_OK"
-rm -f ${lftpScript}`, chunk => { log(chunk); });
+lftp -f ${destScript}
+echo "UPLOAD_OK"
+rm -f ${destScript}`, chunk => { log(chunk); });
 
-              step(`Image uploaded to ${ftpHost}`, 'ok');
+              step(`Image copied to ${destFtpHost}`, 'ok');
             } finally {
               ftpConn.end();
             }
