@@ -698,6 +698,26 @@ app.post('/api/setup-autoscaler', async (req, res) => {
         const otherLocation = region === 'de/fra' ? 'de/fra/2' : 'de/fra';
         effectiveRegion = otherLocation;
 
+        // Pre-flight: verify the selected image exists in the secondary location
+        step(`Checking image availability in ${otherLocation}…`, 'working');
+        try {
+          const imgData = await ionosGet(`/images/${encodeURIComponent(ionosImageId)}`, ionosToken);
+          const imgLocation = imgData?.properties?.location;
+          if (imgLocation && imgLocation !== otherLocation) {
+            const err = new Error(
+              `Image ${ionosImageId} is in location "${imgLocation}" but the secondary VDC will be at "${otherLocation}". ` +
+              `Upload or copy the RHCOS image to ${otherLocation} first, then re-run with its new image ID.`
+            );
+            err.status = 422;
+            throw err;
+          }
+        } catch (e) {
+          if (e.status === 422) throw e;
+          // If we can't fetch the image (e.g. it's a system image with no location), allow it through
+          log(`  Image location check skipped: ${e.message}\n`);
+        }
+        step(`Image available in ${otherLocation}`, 'ok');
+
         if (frankfurtSubMode === 'create') {
           // fra1: Create secondary VDC
           step(`Creating secondary VDC "${frankfurtVdcName}" at ${otherLocation}…`, 'working');
@@ -804,6 +824,21 @@ app.post('/api/setup-autoscaler', async (req, res) => {
       log(`  VDC: ${effectiveDcId}${effectiveRegion ? ` (${effectiveRegion})` : ''}\n`);
       log(`  Type: ${srvType}${isVcpu ? '' : ` / CPU: ${cpuFam}`} / AZ: ${az}\n`);
       step(`IONOS MachineSet "${targetMsName}" created`, 'ok');
+
+      // Delete any stale Machines that belong to this MachineSet but have a different
+      // datacenterID — left over from a previous failed run where the VDC was recreated.
+      try {
+        const machineApiBase = `${apiUrl}/apis/machine.openshift.io/v1beta1/namespaces/openshift-machine-api/machines`;
+        const labelSel = `machine.openshift.io%2Fcluster-api-machineset=${encodeURIComponent(targetMsName)}`;
+        const existing = await ocpReq('GET', `${machineApiBase}?labelSelector=${labelSel}`, undefined);
+        for (const m of existing.data?.items || []) {
+          const mDcId = m.spec?.providerSpec?.value?.datacenterID;
+          if (mDcId && mDcId !== effectiveDcId) {
+            log(`  Deleting stale Machine "${m.metadata.name}" (old VDC: ${mDcId})\n`);
+            await ocpReq('DELETE', `${machineApiBase}/${encodeURIComponent(m.metadata.name)}`, undefined);
+          }
+        }
+      } catch (_) { /* non-fatal — MachineSet controller will sort it out */ }
 
       // ── Frankfurt Diversity Phase 2: PCC + LAN connections (after MachineSet) ─
       if (_fraDoPcc) {
