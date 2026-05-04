@@ -841,41 +841,53 @@
             </div>
             <div id="rhcos-upload-panel" style="display:none;padding:0.85rem 1rem">
               <p style="font-size:0.78rem;color:#64748b;margin-bottom:0.85rem">
-                Downloads the RHCOS metal raw image from Red Hat's mirror to the management host, then uploads it to your IONOS account using <code style="color:#38bdf8">lftp</code> over FTPS.
-                The FTP server is automatically selected based on your datacenter location (e.g. <code style="color:#38bdf8">ftp-fra-2.ionos.com</code> for Frankfurt).
-                Images are placed in <code style="color:#38bdf8">hdd-images/</code> and become available as private images in your IONOS account.
-                Requires your IONOS <strong style="color:#94a3b8">account login and password</strong> (not the API token), and <code style="color:#38bdf8">lftp</code> installed on the management host.
-                On success, the image UUID is auto-filled in the field above.
+                Downloads the RHCOS <strong style="color:#94a3b8">QEMU/KVM</strong> qcow2 image from Red Hat's mirror, converts it to raw, patches the BLS boot entry for IONOS networking (gateway, DNS, <code style="color:#38bdf8">ignition.platform.id=metal</code>), then uploads to your IONOS account.
+                The metal image will <strong style="color:#f87171">not boot</strong> on IONOS — only the QEMU variant includes the VirtIO drivers IONOS KVM requires.
+                Requires <code style="color:#38bdf8">qemu-img</code> and <code style="color:#38bdf8">lftp</code> on the management host (<code style="color:#38bdf8">dnf install qemu-img lftp</code>).
+                On success the image UUID is auto-filled above.
               </p>
               <div class="form-grid">
                 <div class="form-group">
                   <label for="rhcos-ocp-version">OCP Version</label>
-                  <input type="text" id="rhcos-ocp-version" value="4.17" placeholder="e.g. 4.17" style="width:120px" />
-                  <div class="field-note">Major.minor — determines the RHCOS image from Red Hat's mirror</div>
+                  <input type="text" id="rhcos-ocp-version" value="4.18" placeholder="e.g. 4.18" style="width:120px" />
+                  <div class="field-note">Major.minor — selects the RHCOS qemu qcow2 from Red Hat's mirror</div>
                 </div>
                 <div class="form-group">
                   <label for="rhcos-image-name">Image Name in IONOS</label>
-                  <input type="text" id="rhcos-image-name" placeholder="auto: rhcos-4.17" style="width:100%" />
-                  <div class="field-note">Leave blank to use <code style="color:#38bdf8">rhcos-{version}</code></div>
+                  <input type="text" id="rhcos-image-name" placeholder="auto: rhcos-4.18-qemu" style="width:100%" />
+                  <div class="field-note">Leave blank to use <code style="color:#38bdf8">rhcos-{version}-qemu</code></div>
                 </div>
                 <div class="form-group">
                   <label for="rhcos-ftp-user">IONOS Login</label>
                   <input type="text" id="rhcos-ftp-user" placeholder="username@cloud.ionos.com" autocomplete="username" style="width:100%" />
-                  <div class="field-note">Format: <code style="color:#38bdf8">username@cloud.ionos.com</code> — same as DCD login, used for the IONOS FTPS image upload server</div>
+                  <div class="field-note">Same as DCD login — used for the IONOS FTPS image upload server</div>
                 </div>
                 <div class="form-group">
                   <label for="rhcos-ftp-pass">IONOS Password</label>
                   <input type="password" id="rhcos-ftp-pass" placeholder="account password" autocomplete="current-password" style="width:100%" />
                   <div class="field-note">Your IONOS account password — transmitted over SSH only, never stored</div>
                 </div>
+                <div class="form-group">
+                  <label for="rhcos-gateway">Worker Gateway IP</label>
+                  <input type="text" id="rhcos-gateway" placeholder="e.g. 10.7.224.1" style="width:100%" />
+                  <div class="field-note">NAT gateway for the worker private LAN — embedded in BLS kernel args as <code style="color:#38bdf8">rd.route</code>. Pre-filled from .env.</div>
+                </div>
+                <div class="form-group">
+                  <label for="rhcos-dns">DNS Servers</label>
+                  <input type="text" id="rhcos-dns" placeholder="e.g. 212.227.123.16;212.227.123.17;" style="width:100%" />
+                  <div class="field-note">Semicolon-separated — embedded in BLS as <code style="color:#38bdf8">nameserver=</code> kernel args. Pre-filled from .env.</div>
+                </div>
               </div>
 
               <div id="rhcos-steps" class="hidden" style="display:flex;flex-direction:column;gap:0.35rem;margin-top:0.75rem;margin-bottom:0.6rem">
                 <div class="iso-step" id="rhcos-s1" data-status="pending"><span class="iso-step-icon">○</span><span>Determine datacenter region &amp; FTP server</span></div>
                 <div class="iso-step" id="rhcos-s2" data-status="pending"><span class="iso-step-icon">○</span><span>Connect to management host via SSH</span></div>
-                <div class="iso-step" id="rhcos-s3" data-status="pending"><span class="iso-step-icon">○</span><span>Download RHCOS image to management host</span></div>
-                <div class="iso-step" id="rhcos-s4" data-status="pending"><span class="iso-step-icon">○</span><span>Upload image to IONOS via FTP</span></div>
-                <div class="iso-step" id="rhcos-s5" data-status="pending"><span class="iso-step-icon">○</span><span>Wait for IONOS to process &amp; activate image</span></div>
+                <div class="iso-step" id="rhcos-s3" data-status="pending"><span class="iso-step-icon">○</span><span>Download RHCOS QEMU image to management host</span></div>
+                <div class="iso-step" id="rhcos-s4" data-status="pending"><span class="iso-step-icon">○</span><span>Convert qcow2 → raw (~16 GB, 10–20 min)</span></div>
+                <div class="iso-step" id="rhcos-s5" data-status="pending"><span class="iso-step-icon">○</span><span>Patch BLS boot entry (networking)</span></div>
+                <div class="iso-step" id="rhcos-s6" data-status="pending"><span class="iso-step-icon">○</span><span>Upload image to IONOS via FTP (~20–40 min)</span></div>
+                <div class="iso-step" id="rhcos-s7" data-status="pending"><span class="iso-step-icon">○</span><span>Wait for IONOS to process &amp; activate image</span></div>
+                <div class="iso-step" id="rhcos-s8" data-status="pending"><span class="iso-step-icon">○</span><span>Patch image metadata (UEFI, cloudInit)</span></div>
               </div>
 
               <pre id="rhcos-log" class="hidden" style="max-height:200px;overflow-y:auto;background:#0a0d14;padding:0.6rem 0.8rem;border-radius:6px;font-size:0.75rem;color:#94a3b8;white-space:pre-wrap;margin-bottom:0.75rem"></pre>
@@ -1415,6 +1427,8 @@
     window._workerNamePrefix = env.workerNamePrefix || '';
     if (env.ionosFtpUser)     document.getElementById('rhcos-ftp-user').value     = env.ionosFtpUser;
     if (env.ionosFtpPass)     document.getElementById('rhcos-ftp-pass').value     = env.ionosFtpPass;
+    if (env.bootstrapGateway) document.getElementById('rhcos-gateway').value      = env.bootstrapGateway;
+    if (env.bootstrapDns)     document.getElementById('rhcos-dns').value          = env.bootstrapDns;
     if (env.registryType)     { const el = document.getElementById('as-registry-type');     if (el) { el.value = env.registryType;     el.dispatchEvent(new Event('change')); } }
     if (env.registryImage)    { const el = document.getElementById('as-registry-image');    if (el) el.value = env.registryImage; }
     if (env.registryUsername) { const el = document.getElementById('as-registry-username'); if (el) el.value = env.registryUsername; }
@@ -1496,6 +1510,8 @@
           case 'IONOS_API_TOKEN':          document.getElementById('ionos-token').value       = val; break;
           case 'IONOS_FTP_USER':           document.getElementById('rhcos-ftp-user').value    = val; break;
           case 'IONOS_FTP_PASS':           document.getElementById('rhcos-ftp-pass').value    = val; break;
+          case 'OCP_BOOTSTRAP_GATEWAY':    document.getElementById('rhcos-gateway').value     = val; break;
+          case 'OCP_BOOTSTRAP_DNS':        document.getElementById('rhcos-dns').value         = val; break;
           case 'REGISTRY_TYPE': {
             const el = document.getElementById('as-registry-type');
             if (el) { el.value = val; el.dispatchEvent(new Event('change')); } break;
@@ -2718,7 +2734,7 @@
     chevron.textContent   = open ? '▲ collapse' : '▼ expand';
   });
 
-  const RHCOS_STEP_IDS = ['rhcos-s1','rhcos-s2','rhcos-s3','rhcos-s4','rhcos-s5'];
+  const RHCOS_STEP_IDS = ['rhcos-s1','rhcos-s2','rhcos-s3','rhcos-s4','rhcos-s5','rhcos-s6','rhcos-s7','rhcos-s8'];
   let rhcosStepIdx = 0;
 
   function resetRhcosSteps() {
@@ -2737,15 +2753,17 @@
   }
 
   document.getElementById('rhcos-upload-btn').addEventListener('click', async () => {
-    const ocpVersion = document.getElementById('rhcos-ocp-version').value.trim();
-    const imageName  = document.getElementById('rhcos-image-name').value.trim();
-    const ftpUser    = document.getElementById('rhcos-ftp-user').value.trim();
-    const ftpPass    = document.getElementById('rhcos-ftp-pass').value;
+    const ocpVersion      = document.getElementById('rhcos-ocp-version').value.trim();
+    const imageName       = document.getElementById('rhcos-image-name').value.trim();
+    const ftpUser         = document.getElementById('rhcos-ftp-user').value.trim();
+    const ftpPass         = document.getElementById('rhcos-ftp-pass').value;
+    const bootstrapGateway = document.getElementById('rhcos-gateway').value.trim();
+    const bootstrapDns     = document.getElementById('rhcos-dns').value.trim();
     // mgmt host creds come from the connection state
     const sshKey     = document.getElementById('ssh-key').value.trim();
     const sshUser    = document.getElementById('ssh-user').value.trim() || 'root';
 
-    if (!ocpVersion) { showError('rhcos-error', 'Enter the OCP version (e.g. 4.17).'); return; }
+    if (!ocpVersion) { showError('rhcos-error', 'Enter the OCP version (e.g. 4.18).'); return; }
     if (!ftpUser || !ftpPass) { showError('rhcos-error', 'Enter your IONOS FTP username and password.'); return; }
     if (!mgmtHost) { showError('rhcos-error', 'Connect to the cluster first (management host is required).'); return; }
     if (!sshKey) { showError('rhcos-error', 'Management host SSH key is required.'); return; }
@@ -2783,6 +2801,7 @@
           ionosToken, datacenterId,
           ocpVersion, imageName,
           ftpUser, ftpPass,
+          bootstrapGateway, bootstrapDns,
           mgmtHost, mgmtSshKey: sshKey, mgmtSshUser: sshUser
         })
       });

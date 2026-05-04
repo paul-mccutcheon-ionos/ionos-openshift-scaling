@@ -2949,28 +2949,42 @@ echo "SSD_GONE_TIMEOUT"
   }
 });
 
-// Download RHCOS metal image to management host, upload to IONOS Cloud via FTP,
-// and wait until the image becomes AVAILABLE in the account.
-// Streams progress via SSE; on success emits done with JSON { imageId, imageName }.
+// Download the RHCOS QEMU/KVM qcow2 image, convert to raw, patch the BLS boot entry
+// for IONOS networking, upload to IONOS Cloud via FTP, wait for AVAILABLE, then patch
+// image metadata. Streams progress via SSE; on success emits done with JSON { imageId, imageName }.
+//
+// WHY QEMU and not metal:
+//   IONOS runs KVM. The metal .raw.gz image lacks VirtIO drivers and will not boot.
+//   The qemu.x86_64.qcow2.gz variant ships with VirtIO disk/NIC drivers.
+//
+// BLS PATCH:
+//   The boot entry needs ignition.platform.id=metal (not qemu) and network kernel args
+//   (rd.neednet=1 ip=dhcp rd.route gateway/nameservers) so the node can reach the
+//   OpenShift Machine Config Server during first boot to pull its Ignition config.
 app.post('/api/upload-rhcos-image', async (req, res) => {
   if (!requireFields(res, req.body, ['ionosToken','datacenterId','ocpVersion','ftpUser','ftpPass','mgmtHost','mgmtSshKey'])) return;
   const {
     ionosToken, datacenterId,
     ocpVersion, imageName: reqImageName,
     ftpUser, ftpPass,
-    mgmtHost, mgmtSshKey, mgmtSshUser = 'root', sshPassphrase
+    mgmtHost, mgmtSshKey, mgmtSshUser = 'root', sshPassphrase,
+    bootstrapGateway: reqGateway,
+    bootstrapDns: reqDns
   } = req.body;
 
   // Sanitise inputs
   const safeVersion = ocpVersion.replace(/[^0-9.]/g, '');
-  const finalName   = (reqImageName || `rhcos-${safeVersion}`).replace(/[^a-zA-Z0-9._-]/g, '-');
+  const finalName   = (reqImageName || `rhcos-${safeVersion}-qemu`).replace(/[^a-zA-Z0-9._-]/g, '-');
   const localDir    = '/tmp/rhcos-upload';
   const localRaw    = `${localDir}/${finalName}.raw`;
-  const localGz     = `${localRaw}.gz`;
+  const localQcow2  = `${localDir}/rhcos-qemu-temp.qcow2`;
+  const localQcow2Gz = `${localQcow2}.gz`;
 
-  // IONOS FTP upload server — one per datacenter site, named ftp-{city}-2.ionos.com.
-  // The city code is the second segment of the datacenter location string (e.g. "de/fra" → "fra").
-  // Reference: https://docs.ionos.com/cloud/storage-and-backup/images-snapshots/private-images#ftp-access-endpoints
+  // Network config for BLS patch — read from request or fall back to .env
+  const gateway   = (reqGateway || process.env.OCP_BOOTSTRAP_GATEWAY || '').trim();
+  const dnsRaw    = (reqDns    || process.env.OCP_BOOTSTRAP_DNS      || '').trim();
+  // Convert semicolon/comma separated DNS list to "nameserver=X nameserver=Y"
+  const dnsKargs  = dnsRaw.split(/[;,\s]+/).filter(Boolean).map(d => `nameserver=${d}`).join(' ');
 
   res.setHeader('Content-Type',  'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -2988,16 +3002,15 @@ app.post('/api/upload-rhcos-image', async (req, res) => {
     // ── Step 1: Determine datacenter region → FTP server ─────────────────────
     step('Determining datacenter region…', 'working');
     const dcData   = await ionosGet(`/datacenters/${encodeURIComponent(datacenterId)}`, ionosToken);
-    const location = (dcData.properties?.location || '').toLowerCase(); // e.g. "de/fra" or "de/fra/2"
+    const location = (dcData.properties?.location || '').toLowerCase();
     const locParts = location.split('/');
     const city     = locParts[1] || locParts[0] || 'fra';
     const zone     = locParts[2] || '';
-    // "de/fra"   → ftp-fra.ionos.com
-    // "de/fra/2" → ftp-fra-2.ionos.com
     const ftpSite  = zone ? `${city}-${zone}` : city;
     const ftpHost  = `ftp-${ftpSite}.ionos.com`;
     log(`Datacenter: ${dcData.properties?.name || datacenterId} (${location})\n`);
     log(`FTP upload server: ${ftpHost}\n`);
+    log(`Network args: gateway=${gateway || '(none — set OCP_BOOTSTRAP_GATEWAY in .env)'} ${dnsKargs || '(no DNS — set OCP_BOOTSTRAP_DNS in .env)'}\n`);
     step(`Location: ${location} → ${ftpHost}`, 'ok');
 
     // ── Step 2: SSH connect ───────────────────────────────────────────────────
@@ -3005,12 +3018,12 @@ app.post('/api/upload-rhcos-image', async (req, res) => {
     conn = await sshConnect(mgmtHost, mgmtSshUser, mgmtSshKey, sshPassphrase || undefined);
     step('SSH connected', 'ok');
 
-    // ── Step 3: Download RHCOS image (skip if already present) ───────────────
-    step(`Checking for RHCOS ${safeVersion} image on management host…`, 'working');
+    // ── Step 3: Download RHCOS QEMU qcow2 image (skip if .raw already present) ──
+    step(`Checking for RHCOS ${safeVersion} QEMU image on management host…`, 'working');
 
     const checkRes = await sshRunScript(conn, `
 mkdir -p ${localDir}
-if [ -f "${localRaw}" ] && [ "$(stat -c%s "${localRaw}" 2>/dev/null || echo 0)" -gt 1000000000 ]; then
+if [ -f "${localRaw}" ] && [ "$(stat -c%s "${localRaw}" 2>/dev/null || echo 0)" -gt 5000000000 ]; then
   echo "EXISTS:$(stat -c%s "${localRaw}")"
 else
   echo "MISSING"
@@ -3020,65 +3033,148 @@ fi
 
     if (existsLine.startsWith('EXISTS:')) {
       const bytes = parseInt(existsLine.split(':')[1], 10) || 0;
-      log(`Image already on management host (${(bytes / 1e9).toFixed(2)} GB) — skipping download.\n`);
-      step(`RHCOS image already present — skipped download`, 'ok');
+      log(`Raw image already on management host (${(bytes / 1e9).toFixed(2)} GB) — skipping download and conversion.\n`);
+      step(`RHCOS raw image already present — skipped download`, 'ok');
     } else {
-      step(`Downloading RHCOS ${safeVersion} metal image…`, 'working');
+      // Check qemu-img is installed
+      const qemuCheck = await sshRunScript(conn, `command -v qemu-img 2>/dev/null || echo MISSING`);
+      if (qemuCheck.stdout.trim() === 'MISSING') {
+        throw new Error(
+          'qemu-img is not installed on the management host. ' +
+          'Install it with: dnf install qemu-img  (or: dnf install qemu-kvm-tools) then retry.'
+        );
+      }
 
-      // Find the exact filename on the Red Hat mirror
+      step(`Downloading RHCOS ${safeVersion} QEMU image…`, 'working');
+
+      // Find the exact qemu qcow2 filename on the Red Hat mirror
       const lookupRes = await sshRunScript(conn, `
 export PATH=$PATH:/usr/local/bin:/usr/bin
 MIRROR="https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/${safeVersion}/latest/"
-FILENAME=$(curl -sL "$MIRROR" | grep -oE 'rhcos-[0-9.]+-x86_64-metal\\.x86_64\\.raw\\.gz' | head -1)
+FILENAME=$(curl -sL "$MIRROR" | grep -oE 'rhcos-[0-9.]+-x86_64-qemu\\.x86_64\\.qcow2\\.gz' | head -1)
 if [ -z "$FILENAME" ]; then echo "URL_FAIL"; else echo "URL_OK:$MIRROR$FILENAME"; fi
 `);
       const urlLine = lookupRes.stdout.trim();
       if (!urlLine.startsWith('URL_OK:')) {
-        throw new Error(`Could not find RHCOS ${safeVersion} metal image on mirror.openshift.com — check the version number`);
+        throw new Error(`Could not find RHCOS ${safeVersion} QEMU qcow2 image on mirror.openshift.com — check the version number`);
       }
-      const rhcosUrl = urlLine.slice(7); // strip "URL_OK:"
+      const rhcosUrl = urlLine.slice(7);
       log(`Found: ${rhcosUrl}\n`);
-      log(`Downloading to ${localGz} (this will take a few minutes)…\n`);
+      log(`Downloading to ${localQcow2Gz} (~1 GB compressed — a few minutes)…\n`);
 
-      // Stream download progress
       await sshRunScriptStreaming(conn, `
 set -e
 export PATH=$PATH:/usr/local/bin:/usr/bin
-rm -f "${localGz}"
-curl -L --progress-bar -o "${localGz}" "${rhcosUrl}" 2>&1
+rm -f "${localQcow2Gz}" "${localQcow2}"
+curl -L --progress-bar -o "${localQcow2Gz}" "${rhcosUrl}" 2>&1
 echo ""
-echo "DOWNLOAD_OK:$(stat -c%s "${localGz}") bytes"
-`, chunk => {
-        log(chunk);
-      });
+echo "DOWNLOAD_OK:$(stat -c%s "${localQcow2Gz}") bytes"
+`, chunk => { log(chunk); });
 
-      log(`Decompressing…\n`);
+      log(`Decompressing qcow2…\n`);
       await sshRunScriptStreaming(conn, `
 set -e
-cd "${localDir}"
-gunzip -f "${finalName}.raw.gz"
-echo "DECOMP_OK:$(stat -c%s "${localRaw}") bytes uncompressed"
-`, chunk => {
-        log(chunk);
-      });
+gunzip -f "${localQcow2Gz}"
+echo "DECOMP_OK:$(stat -c%s "${localQcow2}") bytes"
+`, chunk => { log(chunk); });
+
+      // ── Step 4: Convert qcow2 → raw ───────────────────────────────────────
+      step(`Converting qcow2 → raw (this takes 10–20 minutes for ~16 GB)…`, 'working');
+      log(`Running: qemu-img convert -f qcow2 -O raw ${localQcow2} ${localRaw}\n`);
+      log(`The raw image will be ~16 GB. Progress is not streamed — please wait.\n`);
+
+      await sshRunScriptStreaming(conn, `
+set -e
+export PATH=$PATH:/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin
+rm -f "${localRaw}"
+qemu-img convert -f qcow2 -O raw "${localQcow2}" "${localRaw}" 2>&1
+echo "CONVERT_OK:$(stat -c%s "${localRaw}") bytes"
+rm -f "${localQcow2}"
+`, chunk => { log(chunk); });
 
       const sizeRes = await sshRunScript(conn, `stat -c%s "${localRaw}" 2>/dev/null || echo 0`);
       const rawBytes = parseInt(sizeRes.stdout.trim(), 10) || 0;
-      log(`Image ready: ${(rawBytes / 1e9).toFixed(2)} GB\n`);
-      step(`RHCOS image downloaded — ${(rawBytes / 1e9).toFixed(2)} GB`, 'ok');
+      log(`Raw image ready: ${(rawBytes / 1e9).toFixed(2)} GB\n`);
+      step(`RHCOS raw image ready — ${(rawBytes / 1e9).toFixed(2)} GB`, 'ok');
     }
 
-    // ── Step 4: FTP upload via lftp ───────────────────────────────────────────
-    step(`Uploading to IONOS (${ftpHost}) via lftp…`, 'working');
-    log(`Uploading ${finalName}.raw to ${ftpHost}/hdd-images/\n`);
-    log(`File is ~4 GB — typically takes 5–15 minutes.\n`);
+    // ── Step 5: Patch BLS boot entry ─────────────────────────────────────────
+    // Mount the raw image, fix the BLS entry so RHCOS boots correctly on IONOS KVM:
+    //   - ignition.platform.id=qemu → metal  (tells Ignition it's a bare-metal-like boot)
+    //   - Add rd.neednet=1 ip=dhcp rd.route + nameservers so the node reaches the MCS
+    step('Patching BLS boot entry for IONOS networking…', 'working');
+    const mountDir = '/mnt/rhcos-bls-fix';
+    const blsResult = await sshRunScript(conn, `
+set -e
+export PATH=$PATH:/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin
 
-    // Write an lftp script to a temp file so credentials never appear in ps output.
-    // lftp uses FTPS (FTP over TLS) with the ssl-allow settings matching the example
-    // in the IONOS documentation.
+# Mount raw image via loopback, -P auto-creates partition devices (loopXp1, loopXp2, …)
+LOOP=$(losetup -f --show -P "${localRaw}")
+echo "LOOP:$LOOP"
+
+mkdir -p "${mountDir}"
+
+# Partition 3 is the ext4 /boot partition on RHCOS QEMU images
+if [ -b "\${LOOP}p3" ]; then
+  BOOT_PART="\${LOOP}p3"
+elif [ -b "\${LOOP}p2" ]; then
+  BOOT_PART="\${LOOP}p2"
+else
+  echo "PART_FAIL: cannot find boot partition on $LOOP"
+  losetup -d "$LOOP"
+  exit 1
+fi
+echo "BOOT_PART:$BOOT_PART"
+
+mount "$BOOT_PART" "${mountDir}"
+
+# Find the BLS config file
+BLS_FILE=$(find "${mountDir}/loader/entries" -name "ostree-*.conf" 2>/dev/null | head -1)
+if [ -z "$BLS_FILE" ]; then
+  echo "BLS_FAIL: no ostree-*.conf found in ${mountDir}/loader/entries"
+  ls "${mountDir}/" 2>/dev/null
+  umount "${mountDir}" || true
+  losetup -d "$LOOP" || true
+  exit 1
+fi
+echo "BLS_FILE:$BLS_FILE"
+
+echo "--- BLS before patch ---"
+cat "$BLS_FILE"
+echo "---"
+
+# 1. Fix platform.id: qemu → metal
+sed -i 's/ignition\\.platform\\.id=qemu/ignition.platform.id=metal/g' "$BLS_FILE"
+
+# 2. Append network kernel args to the options line (skip if already present)
+if ! grep -q 'rd.neednet=1' "$BLS_FILE"; then
+  NETARGS="rd.neednet=1 ip=dhcp${gateway ? ` rd.route=0.0.0.0/0:${gateway}` : ''} ${dnsKargs}"
+  sed -i "/^options /s|$| $NETARGS|" "$BLS_FILE"
+fi
+
+echo "--- BLS after patch ---"
+cat "$BLS_FILE"
+echo "---"
+
+sync
+umount "${mountDir}"
+losetup -d "$LOOP"
+echo "BLS_PATCH_OK"
+`);
+
+    const blsOut = blsResult.stdout;
+    log(blsOut + '\n');
+
+    if (!blsOut.includes('BLS_PATCH_OK')) {
+      throw new Error(`BLS patching failed. Output:\n${blsOut}\n${blsResult.stderr || ''}`);
+    }
+    step('BLS boot entry patched', 'ok');
+
+    // ── Step 6: FTP upload via lftp ───────────────────────────────────────────
+    step(`Uploading to IONOS (${ftpHost}) via lftp…`, 'working');
+    log(`Uploading ${finalName}.raw to ${ftpHost}/hdd-images/ (~16 GB — typically 20–40 minutes)\n`);
+
     const lftpScript = `/tmp/.rhcos-lftp-${Date.now()}`;
-    // We can't use a heredoc here because ftpPass may contain special chars;
-    // write the script via a node Buffer passed over the SSH stdin stream.
     await sshRunScript(conn, `
 cat > ${lftpScript} << 'LFTP_SCRIPT_EOF'
 set ftp:ssl-allow true
@@ -3093,13 +3189,9 @@ LFTP_SCRIPT_EOF
 chmod 600 ${lftpScript}
 `);
 
-    // Check lftp is installed
     const lftpCheck = await sshRunScript(conn, `command -v lftp 2>/dev/null || echo MISSING`);
     if (lftpCheck.stdout.trim() === 'MISSING') {
-      throw new Error(
-        'lftp is not installed on the management host.\n' +
-        'Install it with: dnf install lftp  (or apt install lftp) then retry.'
-      );
+      throw new Error('lftp is not installed on the management host.\nInstall it with: dnf install lftp  (or apt install lftp) then retry.');
     }
 
     await sshRunScriptStreaming(conn, `
@@ -3111,20 +3203,17 @@ echo "Connecting to ${ftpHost}…"
 lftp -f ${lftpScript}
 echo "FTP_UPLOAD_OK"
 rm -f ${lftpScript}
-`, chunk => {
-      log(chunk);
-    });
+`, chunk => { log(chunk); });
 
-    // Clean up script in case streaming ended early
     await sshRunScript(conn, `rm -f ${lftpScript}`).catch(() => {});
     step(`FTP upload complete`, 'ok');
 
-    // ── Step 5: Wait for IONOS to process the image ───────────────────────────
+    // ── Step 7: Wait for IONOS to process the image ───────────────────────────
     step('Waiting for IONOS to process image…', 'working');
-    log(`Image submitted to IONOS. Processing can take 5–30 minutes.\n`);
+    log(`Image submitted. IONOS processing typically takes 5–30 minutes.\n`);
 
     const uploadedAt = Date.now();
-    const maxWaitMs  = 45 * 60 * 1000; // 45 min
+    const maxWaitMs  = 45 * 60 * 1000;
     let imageId      = null;
 
     while (Date.now() - uploadedAt < maxWaitMs) {
@@ -3157,15 +3246,39 @@ rm -f ${lftpScript}
         `Check the IONOS DCD → Resources → Images for an image named "${finalName}.raw" and copy its UUID manually.`
       );
     }
+    step(`Image available — ${imageId}`, 'ok');
+
+    // ── Step 8: Patch IONOS image metadata ────────────────────────────────────
+    // Set UEFI boot, cloudInit V1, and hotplug flags required for RHCOS on IONOS KVM.
+    step('Patching IONOS image metadata…', 'working');
+    log(`Patching image ${imageId} (UEFI, cloudInit=V1, hotplug flags)…\n`);
+    try {
+      await ionosPatch(`/images/${imageId}`, ionosToken, {
+        requireLegacyBios:    false,
+        licenceType:          'LINUX',
+        cloudInit:            'V1',
+        cpuHotPlug:           true,
+        cpuHotUnplug:         true,
+        ramHotPlug:           true,
+        ramHotUnplug:         true,
+        nicHotPlug:           true,
+        nicHotUnplug:         true,
+        discVirtioHotPlug:    true,
+        discVirtioHotUnplug:  true
+      });
+      log(`Metadata patched.\n`);
+      step('Image metadata patched', 'ok');
+    } catch (patchErr) {
+      log(`WARNING: metadata patch failed (${patchErr.message}) — image is still usable but you may need to patch manually.\n`);
+      step('Image metadata patch failed (non-fatal)', 'ok');
+    }
 
     log(`\nImage AVAILABLE:\n  Name: ${finalName}.raw\n  UUID: ${imageId}\n`);
-    step(`Image available — ${imageId}`, 'ok');
     done(JSON.stringify({ imageId, imageName: finalName }));
 
   } catch (err) {
-    // Best-effort cleanup of any temp lftp script or netrc
     if (conn) {
-      sshRunScript(conn, `rm -f /tmp/.rhcos-lftp-* /tmp/.rhcos-netrc`).catch(() => {});
+      sshRunScript(conn, `rm -f /tmp/.rhcos-lftp-* /tmp/.rhcos-netrc; umount /mnt/rhcos-bls-fix 2>/dev/null; losetup -d $(losetup -j "${localRaw}" 2>/dev/null | cut -d: -f1) 2>/dev/null`).catch(() => {});
     }
     fail(err.message || String(err));
   } finally {
