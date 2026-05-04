@@ -831,7 +831,13 @@ echo "DECOMP_OK"
 
               step(`Converting qcow2 → raw for IONOS KVM (~16 GB, 10–20 min)…`, 'working');
               log(`  Running qemu-img convert (10–20 minutes, no progress stream)…\n`);
-              await sshRunScriptStreaming(ftpConn, `
+              const convertStart = Date.now();
+              const convertKeepalive = setInterval(() => {
+                const mins = Math.floor((Date.now() - convertStart) / 60000);
+                log(`  qemu-img convert in progress… (${mins} min elapsed)\n`);
+              }, 25000);
+              try {
+                await sshRunScriptStreaming(ftpConn, `
 set -e
 export PATH=$PATH:/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin
 rm -f "${localFile}"
@@ -839,6 +845,9 @@ qemu-img convert -f qcow2 -O raw "${tmpQcow2}" "${localFile}" 2>&1
 echo "CONVERT_OK:$(stat -c%s "${localFile}") bytes"
 rm -f "${tmpQcow2}"
 `, chunk => { log(chunk); });
+              } finally {
+                clearInterval(convertKeepalive);
+              }
 
               step(`Patching BLS boot entry — ignition.platform.id=metal, IONOS network args…`, 'working');
               const bGateway    = (process.env.OCP_BOOTSTRAP_GATEWAY || '').trim();
@@ -941,10 +950,20 @@ put ${localFile} -o ${uploadName}
 bye
 LFTP_EOF
 chmod 600 ${destScript}`);
-            await sshRunScriptStreaming(ftpConn, `set -e
+            // lftp sends no stdout during upload — keep SSE alive with periodic log lines
+            const ftpUploadStart = Date.now();
+            const ftpKeepalive = setInterval(() => {
+              const mins = Math.floor((Date.now() - ftpUploadStart) / 60000);
+              log(`  FTP upload in progress… (${mins} min elapsed)\n`);
+            }, 25000);
+            try {
+              await sshRunScriptStreaming(ftpConn, `set -e
 lftp -f ${destScript}
 echo "UPLOAD_OK"
 rm -f ${destScript}`, chunk => { log(chunk); });
+            } finally {
+              clearInterval(ftpKeepalive);
+            }
 
             step(`"${uploadName}" uploaded to ${destFtpHost}`, 'ok');
             imgName = uploadName;
