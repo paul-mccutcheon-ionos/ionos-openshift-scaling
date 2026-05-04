@@ -882,8 +882,33 @@ echo "BLS_OK"
             }
             log(`  Using IONOS-patched QEMU image "${imgName}" (${(sizeForLog / 1e9).toFixed(2)} GB) — ignition.platform.id=metal, IONOS KVM networking\n`);
 
-            // Step B: upload to destination FTP
+            // Step B: upload to destination FTP.
+            // IONOS FTP returns 550 if a file with the same name already exists (no overwrite).
+            // Strategy: first try lftp `rm` to delete the FTP file directly (IONOS API delete
+            // may not propagate to FTP immediately), then upload with up to 2 retries.
             step(`Uploading "${imgName}" to ${destFtpHost} (~16 GB, 20–40 min)…`, 'working');
+            log(`  Attempting FTP delete of existing "${imgName}" on ${destFtpHost} (if any)…\n`);
+            const rmScript = `/tmp/.lftp-rm-${Date.now()}`;
+            await sshRunScript(ftpConn, `
+cat > ${rmScript} << 'LFTP_EOF'
+set ftp:ssl-allow true
+set ftp:ssl-allow/${destFtpHost} true
+open ${destFtpHost}
+user "${ftpUser}" "${ftpPass}"
+rm hdd-images/${imgName}
+bye
+LFTP_EOF
+chmod 600 ${rmScript}`);
+            // Ignore rm errors — file might not exist or FTP may not allow rm
+            const rmResult = await sshRunScript(ftpConn, `lftp -f ${rmScript} 2>&1; rm -f ${rmScript}; echo "RM_DONE"`);
+            if (rmResult.stdout.includes('550') || rmResult.stdout.includes('failed')) {
+              log(`  FTP rm returned an error (may be expected): ${rmResult.stdout.trim()}\n  Waiting 60 s for IONOS to propagate API deletion…\n`);
+              await new Promise(r => setTimeout(r, 60000));
+            } else {
+              log(`  FTP rm succeeded. Waiting 10 s…\n`);
+              await new Promise(r => setTimeout(r, 10000));
+            }
+
             log(`  Uploading ${imgName} to ${destFtpHost}/hdd-images/…\n`);
             await sshRunScript(ftpConn, `
 cat > ${destScript} << 'LFTP_EOF'
@@ -896,10 +921,28 @@ put ${localFile}
 bye
 LFTP_EOF
 chmod 600 ${destScript}`);
-            await sshRunScriptStreaming(ftpConn, `set -e
+            let uploadOk = false;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+              try {
+                await sshRunScriptStreaming(ftpConn, `set -e
 lftp -f ${destScript}
-echo "UPLOAD_OK"
-rm -f ${destScript}`, chunk => { log(chunk); });
+echo "UPLOAD_OK"`, chunk => { log(chunk); });
+                uploadOk = true;
+                break;
+              } catch (ftpErr) {
+                if (attempt < 3 && ftpErr.message && ftpErr.message.includes('550')) {
+                  log(`  FTP 550 on attempt ${attempt} — waiting 90 s for IONOS to clear FTP slot…\n`);
+                  await new Promise(r => setTimeout(r, 90000));
+                } else {
+                  await sshRunScript(ftpConn, `rm -f ${destScript}`).catch(() => {});
+                  throw ftpErr;
+                }
+              }
+            }
+            await sshRunScript(ftpConn, `rm -f ${destScript}`).catch(() => {});
+            if (!uploadOk) {
+              throw new Error(`FTP upload of "${imgName}" to ${destFtpHost} failed after 3 attempts. Delete the existing image from IONOS DCD → Images and retry.`);
+            }
 
             step(`"${imgName}" uploaded to ${destFtpHost}`, 'ok');
           } finally {
