@@ -702,104 +702,120 @@ app.post('/api/setup-autoscaler', async (req, res) => {
         // Pre-flight: ensure selected image is available in the secondary location.
         // If it's only in the primary location, auto-copy via FTP from the management host.
         step(`Checking image in ${otherLocation}…`, 'working');
+        let imgName          = '';
+        let imgNeedsLocalCopy = false;
         try {
-          const imgData = await ionosGet(`/images/${encodeURIComponent(ionosImageId)}`, ionosToken);
+          const imgData     = await ionosGet(`/images/${encodeURIComponent(ionosImageId)}`, ionosToken);
           const imgLocation = imgData?.properties?.location;
-          const imgName     = imgData?.properties?.name || '';
+          imgName           = imgData?.properties?.name || '';
 
           if (imgLocation && imgLocation !== otherLocation) {
-            log(`Image "${imgName}" is at ${imgLocation} — copying to ${otherLocation} via FTP…\n`);
+            imgNeedsLocalCopy = true;
+            log(`Image "${imgName}" is at ${imgLocation} — need to copy to ${otherLocation} via FTP.\n`);
+          } else {
+            step(`Image available in ${otherLocation}`, 'ok');
+          }
+        } catch (e) {
+          if (e.status) throw e;
+          // IONOS system images have no location property — allow through
+          log(`  Image location check skipped: ${e.message}\n`);
+          step(`Image check skipped (system image)`, 'ok');
+        }
 
-            // Decode management host SSH key from env
-            const rawKey     = (process.env.OCP_MGMT_HOST_SSH_KEY || '').trim();
-            const mgmtKey    = rawKey.includes('\\n') ? rawKey.replace(/\\n/g, '\n') : rawKey;
-            const mgmtAddr   = process.env.OCP_MGMT_HOST   || '';
-            const ftpUser    = process.env.IONOS_FTP_USER  || '';
-            const ftpPass    = process.env.IONOS_FTP_PASS  || '';
+        // FTP copy pipeline — outside the system-image catch so errors surface correctly.
+        if (imgNeedsLocalCopy) {
+          const rawKey     = (process.env.OCP_MGMT_HOST_SSH_KEY || '').trim();
+          const mgmtKey    = rawKey.includes('\\n') ? rawKey.replace(/\\n/g, '\n') : rawKey;
+          const mgmtAddr   = process.env.OCP_MGMT_HOST   || '';
+          const ftpUser    = process.env.IONOS_FTP_USER  || '';
+          const ftpPass    = process.env.IONOS_FTP_PASS  || '';
 
-            if (!mgmtAddr || !mgmtKey || !ftpUser || !ftpPass) {
-              const err = new Error(
-                'Cannot auto-copy image: OCP_MGMT_HOST, OCP_MGMT_HOST_SSH_KEY, IONOS_FTP_USER ' +
-                'or IONOS_FTP_PASS not set in .env'
-              );
-              err.status = 422;
-              throw err;
+          if (!mgmtAddr || !mgmtKey || !ftpUser || !ftpPass) {
+            const err = new Error(
+              'Cannot auto-copy image: OCP_MGMT_HOST, OCP_MGMT_HOST_SSH_KEY, IONOS_FTP_USER ' +
+              'or IONOS_FTP_PASS not set in .env'
+            );
+            err.status = 422;
+            throw err;
+          }
+
+          // de/fra → ftp-fra.ionos.com,  de/fra/2 → ftp-fra-2.ionos.com
+          const ftpHostFor = loc => {
+            const p = loc.split('/');
+            const c = p[1] || p[0] || 'fra';
+            const z = p[2] || '';
+            return `ftp-${z ? `${c}-${z}` : c}.ionos.com`;
+          };
+          const destFtpHost = ftpHostFor(otherLocation);
+
+          // Before uploading, delete any stale same-named images in the secondary location.
+          // IONOS FTP returns 550 if you try to upload a file whose name matches an existing
+          // image — the only way to replace it is to delete the old one via the API first.
+          const staleSnap  = await ionosGet('/images?depth=1', ionosToken).catch(() => ({ items: [] }));
+          const staleImgs  = (staleSnap.items || []).filter(img =>
+            img.properties?.name === imgName && img.properties?.location === otherLocation
+          );
+          if (staleImgs.length > 0) {
+            step(`Removing ${staleImgs.length} stale image(s) from ${otherLocation}…`, 'working');
+            for (const stale of staleImgs) {
+              log(`  Deleting stale image "${stale.properties.name}" (${stale.id}) from ${otherLocation}…\n`);
+              await ionosDetach(`/images/${stale.id}`, ionosToken);
             }
+            log(`  Waiting 15 s for IONOS to finalize deletion…\n`);
+            await new Promise(r => setTimeout(r, 15000));
+          }
 
-            // Derive FTP hostnames from location strings
-            // de/fra   → ftp-fra.ionos.com,   de/fra/2 → ftp-fra-2.ionos.com
-            const ftpHostFor = loc => {
-              const p = loc.split('/');
-              const c = p[1] || p[0] || 'fra';
-              const z = p[2] || '';
-              return `ftp-${z ? `${c}-${z}` : c}.ionos.com`;
-            };
-            const srcFtpHost  = ftpHostFor(imgLocation);   // where the image currently lives
-            const destFtpHost = ftpHostFor(otherLocation); // where we need it
+          step(`Connecting to management host…`, 'working');
+          const ftpConn = await sshConnect(mgmtAddr, 'root', mgmtKey);
+          try {
+            const localFile  = `/tmp/rhcos-upload/${imgName}`;
+            const destScript = `/tmp/.lftp-dest-${Date.now()}`;
 
-            step(`Connecting to management host to copy image between FTP servers…`, 'working');
-            const ftpConn = await sshConnect(mgmtAddr, 'root', mgmtKey);
-            try {
-              const localFile  = `/tmp/rhcos-upload/${imgName}`;
-              const destScript = `/tmp/.lftp-dest-${Date.now()}`;
+            const checkRes   = await sshRunScript(ftpConn,
+              `[ -f "${localFile}" ] && stat -c%s "${localFile}" || echo MISSING`);
+            const cachedBytes = checkRes.stdout.trim();
+            let sizeForLog    = parseInt(cachedBytes, 10) || 0;
+            // Require > 5 GB — the metal .raw is only ~3.78 GB and will NOT boot on IONOS KVM.
+            if (cachedBytes === 'MISSING' || sizeForLog < 5000000000) {
+              if (sizeForLog > 0 && sizeForLog < 5000000000) {
+                log(`  Found ${imgName} at ${(sizeForLog / 1e9).toFixed(2)} GB — metal image (wrong type). Re-downloading as QEMU qcow2…\n`);
+              } else {
+                log(`  Image not cached — downloading RHCOS QEMU image from Red Hat mirror…\n`);
+              }
 
-              // Step A: ensure the image file is present on the management host.
-              // IONOS FTP is upload-only — downloading via lftp get silently produces
-              // an empty file. So if the file isn't already cached we fail immediately
-              // with a clear message rather than uploading a zero-byte file.
-              const checkRes = await sshRunScript(ftpConn,
-                `[ -f "${localFile}" ] && stat -c%s "${localFile}" || echo MISSING`);
-              const cachedBytes = checkRes.stdout.trim();
-              let sizeForLog = parseInt(cachedBytes, 10) || 0;
-              // Require > 5 GB to be considered a valid QEMU raw image.
-              // The metal .raw is only ~3.78 GB — if we find that size it means the wrong
-              // image type was previously downloaded and we must redo it with the QEMU pipeline.
-              if (cachedBytes === 'MISSING' || sizeForLog < 5000000000) {
-                // Not cached (or wrong image type) — run the full QEMU qcow2 + BLS patch pipeline.
-                // IMPORTANT: IONOS KVM requires the QEMU image variant (VirtIO drivers).
-                // The metal image will NOT boot. We also must patch the BLS boot entry with
-                // ignition.platform.id=metal and network kernel args before uploading.
-                if (sizeForLog > 0 && sizeForLog < 5000000000) {
-                  log(`  Found ${imgName} at ${(sizeForLog / 1e9).toFixed(2)} GB — this is the metal image (wrong type for IONOS KVM). Re-downloading as QEMU qcow2…\n`);
-                } else {
-                  log(`  Image not cached on management host — downloading RHCOS QEMU image from Red Hat mirror…\n`);
-                }
+              const verMatch = imgName.match(/rhcos-(\d+\.\d+)/i);
+              if (!verMatch) {
+                const err = new Error(
+                  `Cannot determine RHCOS version from image name "${imgName}". ` +
+                  `Please use the "Upload RHCOS Image" tool to upload the patched QEMU image first.`
+                );
+                err.status = 422;
+                throw err;
+              }
+              const rhcosVer   = verMatch[1];
+              const tmpQcow2Gz = `/tmp/rhcos-upload/rhcos-qemu-temp.qcow2.gz`;
+              const tmpQcow2   = `/tmp/rhcos-upload/rhcos-qemu-temp.qcow2`;
 
-                const verMatch = imgName.match(/rhcos-(\d+\.\d+)/i);
-                if (!verMatch) {
-                  const err = new Error(
-                    `Cannot determine RHCOS version from image name "${imgName}". ` +
-                    `Please use the "Upload RHCOS Image" tool to create and upload the patched QEMU image first.`
-                  );
-                  err.status = 422;
-                  throw err;
-                }
-                const rhcosVer   = verMatch[1];
-                const tmpQcow2Gz = `/tmp/rhcos-upload/rhcos-qemu-temp.qcow2.gz`;
-                const tmpQcow2   = `/tmp/rhcos-upload/rhcos-qemu-temp.qcow2`;
+              const qemuChk = await sshRunScript(ftpConn, `command -v qemu-img 2>/dev/null || echo MISSING`);
+              if (qemuChk.stdout.trim() === 'MISSING') {
+                throw new Error('qemu-img is not installed on the management host. Install with: dnf install qemu-img');
+              }
 
-                // Check qemu-img is available
-                const qemuChk = await sshRunScript(ftpConn, `command -v qemu-img 2>/dev/null || echo MISSING`);
-                if (qemuChk.stdout.trim() === 'MISSING') {
-                  throw new Error('qemu-img is not installed on the management host. Install with: dnf install qemu-img');
-                }
-
-                step(`Downloading RHCOS ${rhcosVer} QEMU image from Red Hat mirror…`, 'working');
-
-                const urlRes = await sshRunScript(ftpConn, `
+              step(`Downloading RHCOS ${rhcosVer} QEMU image from Red Hat mirror…`, 'working');
+              const urlRes = await sshRunScript(ftpConn, `
 export PATH=$PATH:/usr/local/bin:/usr/bin
 MIRROR="https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/${rhcosVer}/latest/"
 FILENAME=$(curl -sL "$MIRROR" | grep -oE 'rhcos-[0-9.]+-x86_64-qemu\\.x86_64\\.qcow2\\.gz' | head -1)
 if [ -z "$FILENAME" ]; then echo "URL_FAIL"; else echo "URL_OK:$MIRROR$FILENAME"; fi
 `);
-                const urlLine = urlRes.stdout.trim();
-                if (!urlLine.startsWith('URL_OK:')) {
-                  throw new Error(`Could not find RHCOS ${rhcosVer} QEMU qcow2 on mirror.openshift.com. Use the "Upload RHCOS Image" tool to upload manually.`);
-                }
-                const rhcosUrl = urlLine.slice(7);
-                log(`  Found: ${rhcosUrl}\n  Downloading QEMU qcow2 (~1 GB compressed)…\n`);
+              const urlLine = urlRes.stdout.trim();
+              if (!urlLine.startsWith('URL_OK:')) {
+                throw new Error(`Could not find RHCOS ${rhcosVer} QEMU qcow2 on mirror.openshift.com. Use the "Upload RHCOS Image" tool to upload manually.`);
+              }
+              const rhcosUrl = urlLine.slice(7);
+              log(`  Found: ${rhcosUrl}\n  Downloading (~1 GB compressed)…\n`);
 
-                await sshRunScriptStreaming(ftpConn, `
+              await sshRunScriptStreaming(ftpConn, `
 set -e
 export PATH=$PATH:/usr/local/bin:/usr/bin
 rm -f "${tmpQcow2Gz}" "${tmpQcow2}"
@@ -807,16 +823,16 @@ curl -L --progress-bar -o "${tmpQcow2Gz}" "${rhcosUrl}" 2>&1
 echo "DL_OK"
 `, chunk => { log(chunk); });
 
-                log(`  Decompressing qcow2…\n`);
-                await sshRunScriptStreaming(ftpConn, `
+              log(`  Decompressing qcow2…\n`);
+              await sshRunScriptStreaming(ftpConn, `
 set -e
 gunzip -f "${tmpQcow2Gz}"
 echo "DECOMP_OK"
 `, chunk => { log(chunk); });
 
-                step(`Converting qcow2 → raw for IONOS KVM (~16 GB, 10–20 min)…`, 'working');
-                log(`  Running qemu-img convert (this takes 10–20 minutes — no progress stream)…\n`);
-                await sshRunScriptStreaming(ftpConn, `
+              step(`Converting qcow2 → raw for IONOS KVM (~16 GB, 10–20 min)…`, 'working');
+              log(`  Running qemu-img convert (10–20 minutes, no progress stream)…\n`);
+              await sshRunScriptStreaming(ftpConn, `
 set -e
 export PATH=$PATH:/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin
 rm -f "${localFile}"
@@ -825,14 +841,13 @@ echo "CONVERT_OK:$(stat -c%s "${localFile}") bytes"
 rm -f "${tmpQcow2}"
 `, chunk => { log(chunk); });
 
-                // Patch the BLS boot entry for IONOS KVM
-                step(`Patching BLS boot entry — ignition.platform.id=metal, IONOS network args…`, 'working');
-                const bGateway  = (process.env.OCP_BOOTSTRAP_GATEWAY || '').trim();
-                const bDnsRaw   = (process.env.OCP_BOOTSTRAP_DNS      || '').trim();
-                const bDnsKargs = bDnsRaw.split(/[;,\s]+/).filter(Boolean).map(d => `nameserver=${d}`).join(' ');
-                const blsMountDir = '/mnt/rhcos-bls-fix';
+              step(`Patching BLS boot entry — ignition.platform.id=metal, IONOS network args…`, 'working');
+              const bGateway    = (process.env.OCP_BOOTSTRAP_GATEWAY || '').trim();
+              const bDnsRaw     = (process.env.OCP_BOOTSTRAP_DNS      || '').trim();
+              const bDnsKargs   = bDnsRaw.split(/[;,\s]+/).filter(Boolean).map(d => `nameserver=${d}`).join(' ');
+              const blsMountDir = '/mnt/rhcos-bls-fix';
 
-                const blsPatch = await sshRunScript(ftpConn, `
+              const blsPatch = await sshRunScript(ftpConn, `
 set -e
 export PATH=$PATH:/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin
 LOOP=$(losetup -f --show -P "${localFile}")
@@ -853,36 +868,24 @@ umount "${blsMountDir}"
 losetup -d "$LOOP"
 echo "BLS_OK"
 `);
-                if (!blsPatch.stdout.includes('BLS_OK')) {
-                  throw new Error(`BLS patch failed:\n${blsPatch.stdout}\n${blsPatch.stderr || ''}`);
-                }
-                log(`  BLS patched: ignition.platform.id=metal, rd.neednet=1${bGateway ? `, rd.route=0.0.0.0/0:${bGateway}` : ''}${bDnsKargs ? `, ${bDnsKargs}` : ''}\n`);
-                step(`RHCOS QEMU image ready — BLS patched for IONOS KVM networking`, 'ok');
-
-                const dlCheck = await sshRunScript(ftpConn, `stat -c%s "${localFile}" 2>/dev/null || echo 0`);
-                sizeForLog = parseInt(dlCheck.stdout.trim(), 10) || 0;
-                if (sizeForLog < 5000000000) {
-                  throw new Error(`Converted RHCOS image is too small (${sizeForLog} bytes) — qemu-img conversion may have failed.`);
-                }
+              if (!blsPatch.stdout.includes('BLS_OK')) {
+                throw new Error(`BLS patch failed:\n${blsPatch.stdout}\n${blsPatch.stderr || ''}`);
               }
-              log(`  Using IONOS-patched QEMU image "${imgName}" (${(sizeForLog / 1e9).toFixed(2)} GB) — ignition.platform.id=metal, IONOS KVM networking\n`);
+              log(`  BLS patched: ignition.platform.id=metal, rd.neednet=1${bGateway ? `, rd.route=0.0.0.0/0:${bGateway}` : ''}${bDnsKargs ? `, ${bDnsKargs}` : ''}\n`);
+              step(`RHCOS QEMU image ready — BLS patched for IONOS KVM networking`, 'ok');
 
-              // Snapshot existing images in secondary location BEFORE upload so the
-              // poll below only accepts a genuinely new entry, not a stale pre-existing one.
-              const preUploadSnap = await ionosGet('/images?depth=1', ionosToken).catch(() => ({ items: [] }));
-              const preExistingIds = new Set(
-                (preUploadSnap.items || [])
-                  .filter(img => img.properties?.name === imgName && img.properties?.location === otherLocation)
-                  .map(img => img.id)
-              );
-              if (preExistingIds.size > 0) {
-                log(`  Pre-existing "${imgName}" in ${otherLocation}: ${[...preExistingIds].join(', ')} — will wait for new image after upload.\n`);
+              const dlCheck = await sshRunScript(ftpConn, `stat -c%s "${localFile}" 2>/dev/null || echo 0`);
+              sizeForLog = parseInt(dlCheck.stdout.trim(), 10) || 0;
+              if (sizeForLog < 5000000000) {
+                throw new Error(`Converted RHCOS image is too small (${sizeForLog} bytes) — qemu-img conversion may have failed.`);
               }
+            }
+            log(`  Using IONOS-patched QEMU image "${imgName}" (${(sizeForLog / 1e9).toFixed(2)} GB) — ignition.platform.id=metal, IONOS KVM networking\n`);
 
-              // Step B: upload to destination FTP
-              log(`  Uploading ${imgName} to ${destFtpHost}/hdd-images/…\n`);
-              step(`Uploading image to ${destFtpHost}…`, 'working');
-              await sshRunScript(ftpConn, `
+            // Step B: upload to destination FTP
+            step(`Uploading "${imgName}" to ${destFtpHost} (~16 GB, 20–40 min)…`, 'working');
+            log(`  Uploading ${imgName} to ${destFtpHost}/hdd-images/…\n`);
+            await sshRunScript(ftpConn, `
 cat > ${destScript} << 'LFTP_EOF'
 set ftp:ssl-allow true
 set ftp:ssl-allow/${destFtpHost} true
@@ -893,65 +896,55 @@ put ${localFile}
 bye
 LFTP_EOF
 chmod 600 ${destScript}`);
-              await sshRunScriptStreaming(ftpConn, `set -e
+            await sshRunScriptStreaming(ftpConn, `set -e
 lftp -f ${destScript}
 echo "UPLOAD_OK"
 rm -f ${destScript}`, chunk => { log(chunk); });
 
-              step(`Image copied to ${destFtpHost}`, 'ok');
-            } finally {
-              ftpConn.end();
-            }
-
-            // Poll IONOS until the NEW image appears as AVAILABLE in the secondary location.
-            // We use the pre-upload snapshot to skip any pre-existing image with the same name
-            // (from a previous run) so we don't return "Done" before IONOS has processed the
-            // freshly uploaded file.
-            step(`Waiting for IONOS to process image in ${otherLocation}…`, 'working');
-            log(`Image submitted to IONOS. Processing typically takes 5–30 minutes for a 16 GB file.\n`);
-            const deadline = Date.now() + 45 * 60 * 1000;
-            let newImageFound = false;
-            while (!newImageFound) {
-              await new Promise(r => setTimeout(r, 30000));
-              const elapsed = Math.floor((Date.now() - (deadline - 45 * 60 * 1000)) / 1000);
-              log(`  Polling IONOS for "${imgName}" in ${otherLocation}… (${elapsed}s elapsed)\n`);
-              try {
-                const imgs = await ionosGet('/images?depth=1', ionosToken);
-                for (const img of (imgs?.items || [])) {
-                  if (img.properties?.name === imgName &&
-                      img.properties?.location === otherLocation &&
-                      img.metadata?.state === 'AVAILABLE' &&
-                      !preExistingIds.has(img.id)) {
-                    effectiveImageId = img.id;
-                    newImageFound = true;
-                    break;
-                  }
-                }
-              } catch (pollErr) {
-                log(`  Poll error (will retry): ${pollErr.message}\n`);
-              }
-              if (!newImageFound) {
-                if (Date.now() > deadline) {
-                  const err = new Error(
-                    `Image did not become AVAILABLE in ${otherLocation} within 45 minutes. ` +
-                    `Check IONOS DCD → Images for "${imgName}" in ${otherLocation}.`
-                  );
-                  err.status = 504;
-                  throw err;
-                }
-                log('  Still processing…\n');
-              }
-            }
-            log(`  Image ready in ${otherLocation}: ${effectiveImageId}\n`);
-            step(`Image "${imgName}" ready in ${otherLocation}`, 'ok');
-          } else {
-            step(`Image available in ${otherLocation}`, 'ok');
+            step(`"${imgName}" uploaded to ${destFtpHost}`, 'ok');
+          } finally {
+            ftpConn.end();
           }
-        } catch (e) {
-          if (e.status) throw e;
-          // System images have no location — allow through
-          log(`  Image location check skipped: ${e.message}\n`);
-          step(`Image check skipped (system image)`, 'ok');
+
+          // Poll IONOS until the freshly uploaded image appears as AVAILABLE.
+          // We already deleted any stale same-named image above, so any match is the new one.
+          step(`Waiting for IONOS to process "${imgName}" in ${otherLocation}…`, 'working');
+          log(`Image submitted to IONOS. Processing typically takes 5–30 minutes for a 16 GB file.\n`);
+          const uploadedAt  = Date.now();
+          const imgDeadline = uploadedAt + 45 * 60 * 1000;
+          let newImageFound  = false;
+          while (!newImageFound) {
+            await new Promise(r => setTimeout(r, 30000));
+            const elapsed = Math.floor((Date.now() - uploadedAt) / 1000);
+            log(`  Polling IONOS for "${imgName}" in ${otherLocation}… (${elapsed}s elapsed)\n`);
+            try {
+              const imgs = await ionosGet('/images?depth=1', ionosToken);
+              for (const img of (imgs?.items || [])) {
+                if (img.properties?.name === imgName &&
+                    img.properties?.location === otherLocation &&
+                    img.metadata?.state === 'AVAILABLE') {
+                  effectiveImageId = img.id;
+                  newImageFound = true;
+                  break;
+                }
+              }
+            } catch (pollErr) {
+              log(`  Poll error (will retry): ${pollErr.message}\n`);
+            }
+            if (!newImageFound) {
+              if (Date.now() > imgDeadline) {
+                const err = new Error(
+                  `Image did not become AVAILABLE in ${otherLocation} within 45 minutes. ` +
+                  `Check IONOS DCD → Images for "${imgName}" in ${otherLocation}.`
+                );
+                err.status = 504;
+                throw err;
+              }
+              log('  Still processing…\n');
+            }
+          }
+          log(`  Image ready in ${otherLocation}: ${effectiveImageId}\n`);
+          step(`Image "${imgName}" ready in ${otherLocation}`, 'ok');
         }
 
         if (frankfurtSubMode === 'create') {
