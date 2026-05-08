@@ -1136,25 +1136,33 @@ rm -f "${patchedFile}"`, chunk => { log(chunk); });
           }
         } else if (frankfurtStaticIp) {
           // Image is already at the target location — no FTP copy needed.
-          // Still need to update worker.ign on the management host with the static IP NM keyfile
-          // so the worker fetches the right config on first boot.
+          // The image must have already had its BLS patched (via a previous imgNeedsLocalCopy run)
+          // with ip=<staticIp> and ignition.config.url pointing to worker-fra-<IP>.ign.
+          // Here we (re-)write that per-worker ignition file on the management host.
+          //
+          // NOTE: If the image was NOT previously BLS-patched for static IP (e.g. an old DHCP-era
+          // image), this path will not work — select a primary VDC (de/fra/2) image instead so
+          // the tool performs the full copy+patch pipeline.
           const rawKeyAlt  = (process.env.OCP_MGMT_HOST_SSH_KEY || '').trim();
           const mgmtKeyAlt = rawKeyAlt.includes('\\n') ? rawKeyAlt.replace(/\\n/g, '\n') : rawKeyAlt;
           const mgmtAddrAlt = process.env.OCP_MGMT_HOST || '';
           if (!mgmtAddrAlt || !mgmtKeyAlt) throw new Error('OCP_MGMT_HOST and OCP_MGMT_HOST_SSH_KEY are required for Frankfurt diversity static IP.');
 
-          const fraStaticIpAlt = frankfurtStaticIp.trim();
-          const gwPrimaryAlt   = (process.env.OCP_BOOTSTRAP_GATEWAY || '10.7.224.1').trim();
-          const dnsRawAlt      = (process.env.OCP_BOOTSTRAP_DNS || '212.227.123.16;212.227.123.17;').trim();
+          const fraStaticIpAlt  = frankfurtStaticIp.trim();
+          const safeIpAlt       = fraStaticIpAlt.replace(/\./g, '-');
+          const ignitionHostAlt = frankfurtIgnitionIp || mgmtAddrAlt;
+          const ignFileAlt      = `/root/ignition-serve/worker-fra-${safeIpAlt}.ign`;
+          const gwPrimaryAlt    = (process.env.OCP_BOOTSTRAP_GATEWAY || '10.7.224.1').trim();
+          const dnsRawAlt       = (process.env.OCP_BOOTSTRAP_DNS || '212.227.123.16;212.227.123.17;').trim();
           const nmKeyfileAlt = [
             '[connection]', 'id=worker-fra-static', 'type=ethernet',
-            'interface-name=ens6', 'autoconnect=true', '',
+            'interface-name=ens3', 'autoconnect=true', '',
             '[ethernet]', '', '[ipv4]', 'method=manual',
             `address1=${fraStaticIpAlt}/24,${gwPrimaryAlt}`, `dns=${dnsRawAlt}`,
             'ignore-auto-dns=true', '', '[ipv6]', 'method=disabled', '',
           ].join('\n');
 
-          step(`Updating worker.ign on management host with static IP ${fraStaticIpAlt}…`, 'working');
+          step(`Writing worker-fra-${safeIpAlt}.ign on management host…`, 'working');
           const altConn = await sshConnect(mgmtAddrAlt, 'root', mgmtKeyAlt);
           try {
             const wIgnRes = await sshRunScript(altConn, `cat /root/ignition-serve/worker.ign 2>/dev/null`);
@@ -1163,7 +1171,7 @@ rm -f "${patchedFile}"`, chunk => { log(chunk); });
             catch (e) { throw new Error(`Cannot parse /root/ignition-serve/worker.ign: ${e.message}`); }
             if (!ignCfgAlt.storage) ignCfgAlt.storage = {};
             if (!ignCfgAlt.storage.files) ignCfgAlt.storage.files = [];
-            ignCfgAlt.storage.files = ignCfgAlt.storage.files.filter(f => !((f.path || '').includes('worker-fra')));
+            ignCfgAlt.storage.files = ignCfgAlt.storage.files.filter(f => !((f.path || '').includes('worker-fra-static')));
             ignCfgAlt.storage.files.push({
               path: '/etc/NetworkManager/system-connections/worker-fra-static.nmconnection',
               mode: 384, overwrite: true,
@@ -1172,15 +1180,16 @@ rm -f "${patchedFile}"`, chunk => { log(chunk); });
             const ignB64Alt = Buffer.from(JSON.stringify(ignCfgAlt)).toString('base64').match(/.{1,76}/g).join('\n');
             const wRes = await sshRunScript(altConn, `
 set -e
-base64 -d > "/root/ignition-serve/worker.ign" << 'IGNB64EOF'
+mkdir -p /root/ignition-serve
+base64 -d > "${ignFileAlt}" << 'IGNB64EOF'
 ${ignB64Alt}
 IGNB64EOF
-chmod 644 "/root/ignition-serve/worker.ign"
+chmod 644 "${ignFileAlt}"
 echo "ALT_WRITE_OK"
 `);
-            if (!wRes.stdout.includes('ALT_WRITE_OK')) throw new Error(`Failed to update worker.ign: ${wRes.stdout} ${wRes.stderr || ''}`);
-            log(`  worker.ign updated — static IP ${fraStaticIpAlt}, gateway ${gwPrimaryAlt}.\n`);
-            step(`worker.ign updated for static IP ${fraStaticIpAlt}`, 'ok');
+            if (!wRes.stdout.includes('ALT_WRITE_OK')) throw new Error(`Failed to write ${ignFileAlt}: ${wRes.stdout} ${wRes.stderr || ''}`);
+            log(`  ${ignFileAlt} written — static IP ${fraStaticIpAlt}, gateway ${gwPrimaryAlt}.\n`);
+            step(`worker-fra-${safeIpAlt}.ign written for static IP ${fraStaticIpAlt}`, 'ok');
           } finally {
             altConn.end();
           }
