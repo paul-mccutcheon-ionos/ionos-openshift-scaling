@@ -961,7 +961,7 @@ chmod 600 ${lsScript}`);
               '',
               '[ipv4]',
               'method=manual',
-              `address1=${fraStaticIp}/24,${gwPrimary}`,
+              `address1=${fraStaticIp}/23,${gwPrimary}`,
               `dns=${dnsRaw}`,
               'ignore-auto-dns=true',
               '',
@@ -1019,7 +1019,7 @@ mount "$BPART" "${blsMountDir}"
 BLS=$(find "${blsMountDir}/loader/entries" -name "ostree-*.conf" 2>/dev/null | head -1)
 if [ -z "$BLS" ]; then echo "BLS_FAIL"; umount "${blsMountDir}"; losetup -d "$LOOP"; exit 1; fi
 # Replace DHCP with static IP (dracut format: ip=IP::GW:MASK::IFACE:none)
-sed -i 's|ip=dhcp|ip=${fraStaticIp}::${gwPrimary}:255.255.255.0::ens3:none|g' "$BLS"
+sed -i 's|ip=dhcp|ip=${fraStaticIp}::${gwPrimary}:255.255.254.0::ens3:none|g' "$BLS"
 # Remove any rd.route= args (not needed — worker is on the primary subnet via PCC)
 sed -i 's| rd\.route=[^ ]*||g' "$BLS"
 # Bake in the per-worker ignition URL
@@ -1158,7 +1158,7 @@ rm -f "${patchedFile}"`, chunk => { log(chunk); });
             '[connection]', 'id=worker-fra-static', 'type=ethernet',
             'interface-name=ens3', 'autoconnect=true', '',
             '[ethernet]', '', '[ipv4]', 'method=manual',
-            `address1=${fraStaticIpAlt}/24,${gwPrimaryAlt}`, `dns=${dnsRawAlt}`,
+            `address1=${fraStaticIpAlt}/23,${gwPrimaryAlt}`, `dns=${dnsRawAlt}`,
             'ignore-auto-dns=true', '', '[ipv6]', 'method=disabled', '',
           ].join('\n');
 
