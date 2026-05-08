@@ -751,6 +751,17 @@
         <p id="frankfurt-desc" style="font-size:0.78rem;color:#64748b;margin:0 0 0.6rem">
           Browse VDCs and select a Frankfurt datacenter (de/fra or de/fra/2) to enable this option.
         </p>
+        <div id="frankfurt-site-override" style="display:none;margin:0 0 0.6rem;padding:0.4rem 0.6rem;background:#0a0d14;border:1px solid #1e293b;border-radius:6px;font-size:0.78rem;color:#94a3b8">
+          <span style="margin-right:0.75rem">My cluster site:</span>
+          <label style="display:inline-flex;align-items:center;gap:0.3rem;cursor:pointer;margin-right:0.75rem">
+            <input type="radio" name="frankfurt-actual-site" value="de/fra" />
+            <span>de/fra (FRA-1)</span>
+          </label>
+          <label style="display:inline-flex;align-items:center;gap:0.3rem;cursor:pointer">
+            <input type="radio" name="frankfurt-actual-site" value="de/fra/2" />
+            <span>de/fra/2 (FRA-2)</span>
+          </label>
+        </div>
         <label style="display:flex;align-items:center;gap:0.6rem;cursor:pointer;font-size:0.85rem;font-weight:600;color:#cbd5e1">
           <input type="checkbox" id="frankfurt-diversity-enabled" style="width:16px;height:16px;cursor:pointer" />
           <span id="frankfurt-checkbox-label">Enable Frankfurt intra-geographical diversity</span>
@@ -783,7 +794,11 @@
               </div>
               <div class="form-group">
                 <label for="frankfurt-primary-lan">Primary VDC LAN ID to cross-connect</label>
-                <input type="number" id="frankfurt-primary-lan" value="1" min="1" style="width:100px" />
+                <div style="display:flex;align-items:center;gap:0.5rem">
+                  <input type="number" id="frankfurt-primary-lan" value="1" min="1" style="width:100px" />
+                  <button type="button" id="frankfurt-browse-lans-btn" style="font-size:0.75rem;padding:0.2rem 0.5rem;background:#1e3a5f;color:#94a3b8;border:1px solid #334155;border-radius:4px;cursor:pointer" onclick="browsePrimaryLans()">Browse LANs</button>
+                </div>
+                <div id="frankfurt-lans-list" style="display:none;margin-top:0.4rem;font-size:0.77rem;color:#64748b"></div>
                 <div class="field-note">Private LAN ID in your primary cluster VDC to link via PCC</div>
               </div>
             </div>
@@ -814,6 +829,20 @@
                 <input type="number" id="frankfurt-existing-lan-id" value="1" min="1" style="width:100px" />
                 <div class="field-note">Private LAN ID in the secondary VDC for worker node NICs</div>
               </div>
+            </div>
+          </div>
+
+          <!-- Shared fields — needed for both create and existing modes -->
+          <div class="form-grid" style="margin-top:0.75rem;padding-top:0.75rem;border-top:1px solid #1e293b">
+            <div class="form-group">
+              <label for="frankfurt-static-ip">Worker node static IP</label>
+              <input type="text" id="frankfurt-static-ip" placeholder="e.g. 10.7.224.30" style="width:100%" />
+              <div class="field-note">An unused IP from the primary VDC subnet (10.7.224.0/24). Assigned as the worker's permanent IP via Ignition — directly reachable from the cluster via PCC, no routing tricks needed.</div>
+            </div>
+            <div class="form-group">
+              <label for="frankfurt-ignition-ip">Management host primary VDC IP</label>
+              <input type="text" id="frankfurt-ignition-ip" placeholder="e.g. 10.7.224.11" style="width:100%" />
+              <div class="field-note">The management host's NIC IP on the primary VDC subnet — serves the per-worker Ignition config on port 8080. The secondary-VDC worker reaches this via PCC once it has a primary-subnet static IP.</div>
             </div>
           </div>
         </div>
@@ -2606,7 +2635,7 @@
 
   // Update Frankfurt diversity panel — always visible in IONOS mode.
   // Enables the checkbox only when the selected VDC is in de/fra or de/fra/2.
-  function detectFrankfurt() {
+  function detectFrankfurt(preserveOverride) {
     // Fall back to reading the dropdown if the JS variable was cleared by a refresh
     if (!datacenterLocation) {
       const dcSel = document.getElementById('datacenter-select');
@@ -2617,20 +2646,33 @@
     const locText = datacenterLocation || '—';
 
     document.getElementById('frankfurt-loc-badge').textContent = locText;
-    const descEl = document.getElementById('frankfurt-desc');
+    const descEl          = document.getElementById('frankfurt-desc');
+    const overridePanel   = document.getElementById('frankfurt-site-override');
 
     if (isFra) {
-      const other = datacenterLocation === 'de/fra' ? 'de/fra/2' : 'de/fra';
+      overridePanel.style.display = '';
+      // Initialise the override radio to the API-detected location (unless user already changed it)
+      if (!preserveOverride) {
+        const radios = document.querySelectorAll('input[name="frankfurt-actual-site"]');
+        radios.forEach(r => { r.checked = (r.value === datacenterLocation); });
+      }
+      // Effective location = whatever radio is selected (user override or default)
+      const checkedRadio = document.querySelector('input[name="frankfurt-actual-site"]:checked');
+      const effectiveLoc = checkedRadio ? checkedRadio.value : datacenterLocation;
+      const other = effectiveLoc === 'de/fra' ? 'de/fra/2' : 'de/fra';
       document.getElementById('frankfurt-vdc-name').value =
         other === 'de/fra/2' ? 'OpenShift-Workers-FRA2' : 'OpenShift-Workers-FRA';
-      descEl.innerHTML = `Your cluster VDC is in <strong style="color:#94a3b8">${datacenterLocation}</strong>.
+      descEl.innerHTML = `Your cluster VDC is in <strong style="color:#94a3b8">${effectiveLoc}</strong>.
         Tick the box to place worker nodes at the other Frankfurt site
         (<strong style="color:#94a3b8">${other}</strong>)
         via Private Cross Connect (PCC).`;
-    } else if (datacenterLocation) {
-      descEl.textContent = `VDC location: ${datacenterLocation} — Frankfurt diversity requires de/fra or de/fra/2.`;
     } else {
-      descEl.textContent = 'Browse VDCs and select a datacenter to check Frankfurt diversity eligibility.';
+      overridePanel.style.display = 'none';
+      if (datacenterLocation) {
+        descEl.textContent = `VDC location: ${datacenterLocation} — Frankfurt diversity requires de/fra or de/fra/2.`;
+      } else {
+        descEl.textContent = 'Browse VDCs and select a datacenter to check Frankfurt diversity eligibility.';
+      }
     }
   }
 
@@ -2638,11 +2680,48 @@
     document.getElementById('frankfurt-diversity-form').style.display = this.checked ? '' : 'none';
   });
 
+  document.querySelectorAll('input[name="frankfurt-actual-site"]').forEach(r => r.addEventListener('change', () => {
+    detectFrankfurt(true);
+  }));
+
   document.querySelectorAll('input[name="frankfurt-submode"]').forEach(r => r.addEventListener('change', () => {
     const isCreate = document.querySelector('input[name="frankfurt-submode"]:checked')?.value === 'create';
     document.getElementById('frankfurt-create-form').style.display   = isCreate ? '' : 'none';
     document.getElementById('frankfurt-existing-form').style.display = isCreate ? 'none' : '';
   }));
+
+  async function browsePrimaryLans() {
+    const btn    = document.getElementById('frankfurt-browse-lans-btn');
+    const listEl = document.getElementById('frankfurt-lans-list');
+    if (!ionosToken) { listEl.style.display = ''; listEl.textContent = 'Connect to IONOS first (token required).'; return; }
+    if (!datacenterId) { listEl.style.display = ''; listEl.textContent = 'Select a datacenter first.'; return; }
+    btn.disabled = true;
+    btn.textContent = '…';
+    listEl.style.display = '';
+    listEl.textContent = 'Loading…';
+    try {
+      const resp = await fetch('/api/ionos/lans', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ionosToken, datacenterId })
+      });
+      const data = await resp.json();
+      const lans = data.lans || [];
+      if (!lans.length) { listEl.textContent = 'No LANs found in this VDC.'; return; }
+      listEl.innerHTML = lans.map(l =>
+        `<span style="margin-right:0.75rem;cursor:pointer;color:#38bdf8" title="Click to select"
+          onclick="document.getElementById('frankfurt-primary-lan').value=${l.id};document.getElementById('frankfurt-lans-list').style.display='none'">
+          [${l.id}] ${l.name}${l.public ? ' (public)' : ' (private)'}
+        </span>`
+      ).join('');
+    } catch (e) {
+      listEl.textContent = `Error: ${e.message}`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Browse LANs';
+    }
+  }
+  window.browsePrimaryLans = browsePrimaryLans;
 
   // Show/hide registry fields when deploy-provider checkbox changes
   document.getElementById('as-deploy-provider').addEventListener('change', function () {
@@ -2888,10 +2967,15 @@
     const frankfurtEnabled    = document.getElementById('frankfurt-diversity-enabled').checked;
     const frankfurtSubMode    = document.querySelector('input[name="frankfurt-submode"]:checked')?.value || 'create';
     const frankfurtVdcName    = document.getElementById('frankfurt-vdc-name').value.trim();
+    // Effective primary location — user may have overridden the IONOS API value via the site radio
+    const frankfurtSiteRadio  = document.querySelector('input[name="frankfurt-actual-site"]:checked');
+    const effectiveRegion     = (frankfurtEnabled && frankfurtSiteRadio) ? frankfurtSiteRadio.value : datacenterLocation;
     const frankfurtPccName    = document.getElementById('frankfurt-pcc-name').value.trim();
     const frankfurtPrimaryLan = parseInt(document.getElementById('frankfurt-primary-lan').value, 10) || 1;
     const frankfurtExistingDc = document.getElementById('frankfurt-existing-dc-select').value.trim();
     const frankfurtExistingLan= parseInt(document.getElementById('frankfurt-existing-lan-id').value, 10) || 1;
+    const frankfurtIgnitionIp = document.getElementById('frankfurt-ignition-ip').value.trim();
+    const frankfurtStaticIp   = document.getElementById('frankfurt-static-ip').value.trim();
 
     // Validation
     if (msMode === 'existing' || msMode === 'clone') {
@@ -2904,6 +2988,8 @@
       if (!ionosToken) { showError('as-error', 'IONOS API token is required for IONOS MachineSet creation.'); return; }
       if (!datacenterId) { showError('as-error', 'Connect to a VDC first (IONOS Datacenter ID is required).'); return; }
       if (frankfurtEnabled) {
+        if (!frankfurtStaticIp) { showError('as-error', 'Enter a static IP for the worker node (Frankfurt diversity — primary VDC subnet, e.g. 10.7.224.30).'); return; }
+        if (!frankfurtIgnitionIp) { showError('as-error', 'Enter the management host primary VDC IP (Frankfurt diversity field, e.g. 10.7.224.11).'); return; }
         if (frankfurtSubMode === 'create') {
           if (!frankfurtVdcName) { showError('as-error', 'Enter a name for the secondary Frankfurt VDC.'); return; }
           if (!frankfurtPccName) { showError('as-error', 'Enter a name for the Private Cross Connect.'); return; }
@@ -2988,7 +3074,7 @@
           ionosImageId,
           serverType:           ionosServerType,
           cpuFamily:            ionosCpuFamily,
-          region:               datacenterLocation,
+          region:               effectiveRegion,
           availabilityZone:     ionosAz,
           diskAvailabilityZone: ionosDiskAz,
           deployProvider,
@@ -3005,7 +3091,9 @@
           frankfurtPccName,
           frankfurtPrimaryLanId: frankfurtPrimaryLan,
           frankfurtExistingDcId: frankfurtExistingDc,
-          frankfurtExistingLanId: frankfurtExistingLan
+          frankfurtExistingLanId: frankfurtExistingLan,
+          frankfurtIgnitionIp,
+          frankfurtStaticIp
         })
       });
 

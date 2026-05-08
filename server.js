@@ -483,7 +483,8 @@ app.post('/api/setup-autoscaler', async (req, res) => {
           // Frankfurt Intra-geographical Diversity
           frankfurtDiversity, frankfurtSubMode,
           frankfurtVdcName, frankfurtPccName, frankfurtPrimaryLanId,
-          frankfurtExistingDcId, frankfurtExistingLanId } = req.body;
+          frankfurtExistingDcId, frankfurtExistingLanId,
+          frankfurtIgnitionIp, frankfurtStaticIp } = req.body;
 
   if (!clusterApiUrl || !ocpToken || !targetMsName)
     return res.status(400).json({ error: 'clusterApiUrl, ocpToken and targetMsName are required.' });
@@ -937,8 +938,108 @@ chmod 600 ${lsScript}`);
               log(`  "${imgName}" already in FTP — uploading as "${uploadName}"\n`);
             }
 
+            // Static-IP approach: secondary-VDC workers get an IP from the primary VDC
+            // subnet so they are directly reachable via PCC — no routing tricks needed.
+            if (!frankfurtStaticIp) throw new Error('Worker static IP is required for Frankfurt diversity. Enter an unused IP from the primary VDC subnet (e.g. 10.7.224.30).');
+            const fraStaticIp      = frankfurtStaticIp.trim();
+            const safeIp           = fraStaticIp.replace(/\./g, '-');
+            const ignitionHost     = frankfurtIgnitionIp || mgmtAddr;
+            const ignitionUrl      = `http://${ignitionHost}:8080/worker-fra-${safeIp}.ign`;
+            const workerFraIgnPath = `/root/ignition-serve/worker-fra-${safeIp}.ign`;
+            const gwPrimary        = (process.env.OCP_BOOTSTRAP_GATEWAY || '10.7.224.1').trim();
+            const dnsRaw           = (process.env.OCP_BOOTSTRAP_DNS || '212.227.123.16;212.227.123.17;').trim();
+
+            // Build NM keyfile for the static IP (persists through MCO reboots via Ignition)
+            const nmKeyfile = [
+              '[connection]',
+              'id=worker-fra-static',
+              'type=ethernet',
+              'interface-name=ens3',
+              'autoconnect=true',
+              '',
+              '[ethernet]',
+              '',
+              '[ipv4]',
+              'method=manual',
+              `address1=${fraStaticIp}/24,${gwPrimary}`,
+              `dns=${dnsRaw}`,
+              'ignore-auto-dns=true',
+              '',
+              '[ipv6]',
+              'method=disabled',
+              '',
+            ].join('\n');
+
+            // Read worker.ign from management host, replace NM keyfile, write per-worker file
+            step(`Generating per-worker Ignition config for ${fraStaticIp}…`, 'working');
+            const workerIgnResult = await sshRunScript(ftpConn, `cat /root/ignition-serve/worker.ign 2>/dev/null`);
+            let ignConfig;
+            try {
+              ignConfig = JSON.parse(workerIgnResult.stdout.trim());
+            } catch (e) {
+              throw new Error(`Cannot parse /root/ignition-serve/worker.ign on management host: ${e.message}. Ensure it exists and is valid JSON.`);
+            }
+            if (!ignConfig.storage) ignConfig.storage = {};
+            if (!ignConfig.storage.files) ignConfig.storage.files = [];
+            ignConfig.storage.files = ignConfig.storage.files.filter(f => !((f.path || '').includes('worker-fra')));
+            ignConfig.storage.files.push({
+              path: '/etc/NetworkManager/system-connections/worker-fra-static.nmconnection',
+              mode: 384,
+              overwrite: true,
+              contents: { source: `data:text/plain;charset=utf-8;base64,${Buffer.from(nmKeyfile).toString('base64')}` }
+            });
+            const ignB64Lines = Buffer.from(JSON.stringify(ignConfig)).toString('base64').match(/.{1,76}/g).join('\n');
+            const writeIgnResult = await sshRunScript(ftpConn, `
+set -e
+base64 -d > "${workerFraIgnPath}" << 'IGNB64EOF'
+${ignB64Lines}
+IGNB64EOF
+chmod 644 "${workerFraIgnPath}"
+echo "IGN_WRITE_OK"
+`);
+            if (!writeIgnResult.stdout.includes('IGN_WRITE_OK')) {
+              throw new Error(`Failed to write per-worker Ignition file: ${writeIgnResult.stdout} ${writeIgnResult.stderr || ''}`);
+            }
+            log(`  Per-worker Ignition config: ${workerFraIgnPath}\n`);
+            log(`  ignition.config.url = ${ignitionUrl}\n`);
+            step(`Per-worker Ignition config ready for ${fraStaticIp}`, 'ok');
+
+            // Patch a copy of the image: replace ip=dhcp with static IP, set ignition URL
+            const blsMountDir = `/mnt/rhcos-fra-bls`;
+            const patchedFile = `/tmp/rhcos-upload/.fra-patched-${Date.now()}.raw`;
+            step(`Patching fra image BLS (static IP ${fraStaticIp} + ignition URL)…`, 'working');
+            log(`  Copying ${localFile} → ${patchedFile} and patching BLS…\n`);
+            const blsPatch = await sshRunScript(ftpConn, `
+set -e
+cp --reflink=auto "${localFile}" "${patchedFile}" 2>/dev/null || cp "${localFile}" "${patchedFile}"
+LOOP=$(losetup -f --show -P "${patchedFile}")
+mkdir -p "${blsMountDir}"
+if [ -b "\${LOOP}p3" ]; then BPART="\${LOOP}p3"; elif [ -b "\${LOOP}p2" ]; then BPART="\${LOOP}p2"; else echo "PART_FAIL"; losetup -d "$LOOP"; exit 1; fi
+mount "$BPART" "${blsMountDir}"
+BLS=$(find "${blsMountDir}/loader/entries" -name "ostree-*.conf" 2>/dev/null | head -1)
+if [ -z "$BLS" ]; then echo "BLS_FAIL"; umount "${blsMountDir}"; losetup -d "$LOOP"; exit 1; fi
+# Replace DHCP with static IP (dracut format: ip=IP::GW:MASK::IFACE:none)
+sed -i 's|ip=dhcp|ip=${fraStaticIp}::${gwPrimary}:255.255.255.0::ens3:none|g' "$BLS"
+# Remove any rd.route= args (not needed — worker is on the primary subnet via PCC)
+sed -i 's| rd\.route=[^ ]*||g' "$BLS"
+# Bake in the per-worker ignition URL
+if ! grep -q 'ignition.config.url' "$BLS"; then
+  sed -i '/^options /s|$| ignition.config.url=${ignitionUrl}|' "$BLS"
+fi
+sync
+umount "${blsMountDir}"
+losetup -d "$LOOP"
+echo "PATCH_OK"
+`);
+            if (!blsPatch.stdout.includes('PATCH_OK')) {
+              log(`  Warning: BLS patch may have failed (${blsPatch.stdout.trim()}) — continuing with unpatched image.\n`);
+            } else {
+              log(`  BLS patched — static IP ${fraStaticIp}, ignition URL set.\n`);
+            }
+            const uploadFile = blsPatch.stdout.includes('PATCH_OK') ? patchedFile : localFile;
+
             step(`Uploading "${uploadName}" to ${destFtpHost} (~16 GB, 20–40 min)…`, 'working');
-            log(`  Uploading ${localFile} → ${destFtpHost}/hdd-images/${uploadName}\n`);
+            log(`  Uploading ${uploadFile} → ${destFtpHost}/hdd-images/${uploadName}\n`);
             await sshRunScript(ftpConn, `
 cat > ${destScript} << 'LFTP_EOF'
 set ftp:ssl-allow true
@@ -946,7 +1047,7 @@ set ftp:ssl-allow/${destFtpHost} true
 open ${destFtpHost}
 user "${ftpUser}" "${ftpPass}"
 cd hdd-images
-put ${localFile} -o ${uploadName}
+put ${uploadFile} -o ${uploadName}
 bye
 LFTP_EOF
 chmod 600 ${destScript}`);
@@ -960,7 +1061,8 @@ chmod 600 ${destScript}`);
               await sshRunScriptStreaming(ftpConn, `set -e
 lftp -f ${destScript}
 echo "UPLOAD_OK"
-rm -f ${destScript}`, chunk => { log(chunk); });
+rm -f ${destScript}
+rm -f "${patchedFile}"`, chunk => { log(chunk); });
             } finally {
               clearInterval(ftpKeepalive);
             }
@@ -1010,6 +1112,78 @@ rm -f ${destScript}`, chunk => { log(chunk); });
           }
           log(`  Image ready in ${otherLocation}: ${effectiveImageId}\n`);
           step(`Image "${imgName}" ready in ${otherLocation}`, 'ok');
+
+          // Patch the newly uploaded image with the required IONOS metadata so
+          // Machine API can pass userData (RHCOS Ignition config) to the volume.
+          log(`  Patching image metadata (cloudInit=V1, licenceType=LINUX, UEFI, hotplug)…\n`);
+          try {
+            await ionosPatch(`/images/${effectiveImageId}`, ionosToken, {
+              requireLegacyBios:    false,
+              licenceType:          'LINUX',
+              cloudInit:            'V1',
+              cpuHotPlug:           true,
+              cpuHotUnplug:         true,
+              ramHotPlug:           true,
+              ramHotUnplug:         true,
+              nicHotPlug:           true,
+              nicHotUnplug:         true,
+              discVirtioHotPlug:    true,
+              discVirtioHotUnplug:  true
+            });
+            log(`  Image metadata patched.\n`);
+          } catch (patchErr) {
+            log(`  Warning: image metadata patch failed (${patchErr.message}) — you may need to set cloudInit=V1 manually.\n`);
+          }
+        } else if (frankfurtStaticIp) {
+          // Image is already at the target location — no FTP copy needed.
+          // Still need to update worker.ign on the management host with the static IP NM keyfile
+          // so the worker fetches the right config on first boot.
+          const rawKeyAlt  = (process.env.OCP_MGMT_HOST_SSH_KEY || '').trim();
+          const mgmtKeyAlt = rawKeyAlt.includes('\\n') ? rawKeyAlt.replace(/\\n/g, '\n') : rawKeyAlt;
+          const mgmtAddrAlt = process.env.OCP_MGMT_HOST || '';
+          if (!mgmtAddrAlt || !mgmtKeyAlt) throw new Error('OCP_MGMT_HOST and OCP_MGMT_HOST_SSH_KEY are required for Frankfurt diversity static IP.');
+
+          const fraStaticIpAlt = frankfurtStaticIp.trim();
+          const gwPrimaryAlt   = (process.env.OCP_BOOTSTRAP_GATEWAY || '10.7.224.1').trim();
+          const dnsRawAlt      = (process.env.OCP_BOOTSTRAP_DNS || '212.227.123.16;212.227.123.17;').trim();
+          const nmKeyfileAlt = [
+            '[connection]', 'id=worker-fra-static', 'type=ethernet',
+            'interface-name=ens6', 'autoconnect=true', '',
+            '[ethernet]', '', '[ipv4]', 'method=manual',
+            `address1=${fraStaticIpAlt}/24,${gwPrimaryAlt}`, `dns=${dnsRawAlt}`,
+            'ignore-auto-dns=true', '', '[ipv6]', 'method=disabled', '',
+          ].join('\n');
+
+          step(`Updating worker.ign on management host with static IP ${fraStaticIpAlt}…`, 'working');
+          const altConn = await sshConnect(mgmtAddrAlt, 'root', mgmtKeyAlt);
+          try {
+            const wIgnRes = await sshRunScript(altConn, `cat /root/ignition-serve/worker.ign 2>/dev/null`);
+            let ignCfgAlt;
+            try { ignCfgAlt = JSON.parse(wIgnRes.stdout.trim()); }
+            catch (e) { throw new Error(`Cannot parse /root/ignition-serve/worker.ign: ${e.message}`); }
+            if (!ignCfgAlt.storage) ignCfgAlt.storage = {};
+            if (!ignCfgAlt.storage.files) ignCfgAlt.storage.files = [];
+            ignCfgAlt.storage.files = ignCfgAlt.storage.files.filter(f => !((f.path || '').includes('worker-fra')));
+            ignCfgAlt.storage.files.push({
+              path: '/etc/NetworkManager/system-connections/worker-fra-static.nmconnection',
+              mode: 384, overwrite: true,
+              contents: { source: `data:text/plain;charset=utf-8;base64,${Buffer.from(nmKeyfileAlt).toString('base64')}` }
+            });
+            const ignB64Alt = Buffer.from(JSON.stringify(ignCfgAlt)).toString('base64').match(/.{1,76}/g).join('\n');
+            const wRes = await sshRunScript(altConn, `
+set -e
+base64 -d > "/root/ignition-serve/worker.ign" << 'IGNB64EOF'
+${ignB64Alt}
+IGNB64EOF
+chmod 644 "/root/ignition-serve/worker.ign"
+echo "ALT_WRITE_OK"
+`);
+            if (!wRes.stdout.includes('ALT_WRITE_OK')) throw new Error(`Failed to update worker.ign: ${wRes.stdout} ${wRes.stderr || ''}`);
+            log(`  worker.ign updated — static IP ${fraStaticIpAlt}, gateway ${gwPrimaryAlt}.\n`);
+            step(`worker.ign updated for static IP ${fraStaticIpAlt}`, 'ok');
+          } finally {
+            altConn.end();
+          }
         }
 
         if (frankfurtSubMode === 'create') {
@@ -1148,6 +1322,25 @@ rm -f ${destScript}`, chunk => { log(chunk); });
 
         // fra4: Connect primary VDC LAN to PCC
         step(`Connecting primary VDC LAN ${_fraPrimaryLan} to PCC…`, 'working');
+        // Validate the LAN exists before patching — gives a clear error if the user entered a wrong ID
+        {
+          let lansResp;
+          try {
+            lansResp = await ionosGet(`/datacenters/${datacenterId}/lans?depth=1`, ionosToken);
+          } catch (lanListErr) {
+            const err = new Error(`Failed to list LANs in primary VDC (${datacenterId}): ${lanListErr.message}. Check that "IONOS Datacenter ID" in the form is your primary cluster VDC.`);
+            err.status = 400;
+            throw err;
+          }
+          const availIds = (lansResp.items || []).map(l => `${l.id} ("${l.properties?.name || 'unnamed'}")`);
+          const lanExists = (lansResp.items || []).some(l => String(l.id) === String(_fraPrimaryLan));
+          if (!lanExists) {
+            const listStr = availIds.length ? availIds.join(', ') : '(none found)';
+            const err = new Error(`LAN ${_fraPrimaryLan} does not exist in primary VDC (${datacenterId}). Available LANs: ${listStr}. Update "Primary VDC LAN ID" in the form and try again.`);
+            err.status = 400;
+            throw err;
+          }
+        }
         await ionosPatch(
           `/datacenters/${datacenterId}/lans/${_fraPrimaryLan}`,
           ionosToken,
