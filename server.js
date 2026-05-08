@@ -1251,7 +1251,9 @@ echo "ALT_WRITE_OK"
           availabilityZone: diskAz
         },
         nics: [
-          { lan: lanId, dhcp: true, firewallActive: false, name: `${targetMsName}-nic0` }
+          frankfurtStaticIp
+            ? { lan: lanId, dhcp: false, ips: [frankfurtStaticIp.trim()], firewallActive: false, name: `${targetMsName}-nic0` }
+            : { lan: lanId, dhcp: true,                                   firewallActive: false, name: `${targetMsName}-nic0` }
         ],
         credentialsSecret: { name: 'ionoscloud-credentials', namespace: 'openshift-machine-api' },
         userDataSecret:    { name: 'worker-user-data',       namespace: 'openshift-machine-api' }
