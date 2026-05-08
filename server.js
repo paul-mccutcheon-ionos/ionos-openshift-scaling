@@ -1052,8 +1052,10 @@ if [ -z "$BLS" ]; then echo "BLS_FAIL"; umount "${blsMountDir}"; losetup -d "$LO
 sed -i 's|ip=dhcp|ip=${fraStaticIp}::${gwPrimary}:255.255.254.0::ens3:none|g' "$BLS"
 # Remove any rd.route= args (not needed — worker is on the primary subnet via PCC)
 sed -i 's| rd\.route=[^ ]*||g' "$BLS"
-# Bake in the per-worker ignition URL
-if ! grep -q 'ignition.config.url' "$BLS"; then
+# Replace existing ignition URL or append if absent
+if grep -q 'ignition.config.url' "$BLS"; then
+  sed -i 's|ignition\\.config\\.url=[^ ]*|ignition.config.url=${ignitionUrl}|g' "$BLS"
+else
   sed -i '/^options /s|$| ignition.config.url=${ignitionUrl}|' "$BLS"
 fi
 sync
