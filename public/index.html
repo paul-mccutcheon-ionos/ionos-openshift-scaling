@@ -1668,7 +1668,9 @@
     try {
       const data = await apiPost('/api/ionos/datacenters', { ionosToken: tok });
       // Only show VDCs at the other Frankfurt site
-      const otherLoc = datacenterLocation === 'de/fra' ? 'de/fra/2' : 'de/fra';
+      const checkedSite = document.querySelector('input[name="frankfurt-actual-site"]:checked');
+      const effectiveSite = checkedSite ? checkedSite.value : datacenterLocation;
+      const otherLoc = effectiveSite === 'de/fra' ? 'de/fra/2' : 'de/fra';
       const filtered = data.datacenters.filter(dc => dc.location === otherLoc);
       const sel = document.getElementById('frankfurt-existing-dc-select');
       if (filtered.length === 0) {
