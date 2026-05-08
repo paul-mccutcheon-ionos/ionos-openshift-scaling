@@ -1462,6 +1462,7 @@
     if (env.registryImage)    { const el = document.getElementById('as-registry-image');    if (el) el.value = env.registryImage; }
     if (env.registryUsername) { const el = document.getElementById('as-registry-username'); if (el) el.value = env.registryUsername; }
     if (env.registryPassword) { const el = document.getElementById('as-registry-password'); if (el) el.value = env.registryPassword; }
+    if (env.mgmtInternalIp)   { const el = document.getElementById('frankfurt-ignition-ip'); if (el && !el.value) el.value = env.mgmtInternalIp; }
   }
 
   (async () => {
@@ -2678,8 +2679,20 @@
     }
   }
 
-  document.getElementById('frankfurt-diversity-enabled').addEventListener('change', function () {
+  document.getElementById('frankfurt-diversity-enabled').addEventListener('change', async function () {
     document.getElementById('frankfurt-diversity-form').style.display = this.checked ? '' : 'none';
+    if (!this.checked) return;
+    const ipEl = document.getElementById('frankfurt-static-ip');
+    if (ipEl && !ipEl.value) {
+      ipEl.placeholder = 'Checking available IPs…';
+      try {
+        const r = await fetch('/api/frankfurt/suggest-ip');
+        const d = await r.json();
+        if (d.suggestedIp) { ipEl.value = d.suggestedIp; ipEl.placeholder = 'e.g. 10.7.224.30'; }
+      } catch (_) {
+        ipEl.placeholder = 'e.g. 10.7.224.30';
+      }
+    }
   });
 
   document.querySelectorAll('input[name="frankfurt-actual-site"]').forEach(r => r.addEventListener('change', () => {

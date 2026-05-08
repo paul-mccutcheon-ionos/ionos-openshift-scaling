@@ -372,7 +372,37 @@ app.get('/api/env-prefill', async (req, res) => {
     registryImage:     str('REGISTRY_IMAGE'),
     registryUsername:  str('REGISTRY_USERNAME'),
     registryPassword:  str('REGISTRY_PASSWORD'),
+    mgmtInternalIp:    str('OCP_MGMT_INTERNAL_IP'),
   });
+});
+
+// Return the next free IP in the primary VDC subnet for a Frankfurt diversity worker.
+// SSHs to the management host to get current node IPs, then scans from .30 upwards.
+app.get('/api/frankfurt/suggest-ip', async (req, res) => {
+  try {
+    const rawKey  = (process.env.OCP_MGMT_HOST_SSH_KEY || '').trim();
+    const mgmtKey = rawKey.includes('\\n') ? rawKey.replace(/\\n/g, '\n') : rawKey;
+    const mgmtAddr = process.env.OCP_MGMT_HOST || '';
+    if (!mgmtAddr || !mgmtKey) return res.json({ suggestedIp: '10.7.224.30' });
+
+    const conn = await sshConnect(mgmtAddr, 'root', mgmtKey);
+    let usedIps = new Set();
+    try {
+      const r = await sshRunScript(conn, `oc get nodes -o wide --no-headers 2>/dev/null | awk '{print $6}'`);
+      r.stdout.trim().split('\n').map(s => s.trim()).filter(Boolean).forEach(ip => usedIps.add(ip));
+    } finally {
+      conn.end();
+    }
+
+    let suggestedIp = '';
+    for (let i = 30; i <= 254 && !suggestedIp; i++) {
+      const candidate = `10.7.224.${i}`;
+      if (!usedIps.has(candidate)) suggestedIp = candidate;
+    }
+    res.json({ suggestedIp: suggestedIp || '10.7.224.30', usedIps: [...usedIps].sort() });
+  } catch (e) {
+    res.json({ suggestedIp: '10.7.224.30', error: e.message });
+  }
 });
 
 app.post('/api/connect', async (req, res) => {
