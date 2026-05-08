@@ -941,7 +941,7 @@ chmod 600 ${lsScript}`);
             // Static-IP approach: secondary-VDC workers get an IP from the primary VDC
             // subnet so they are directly reachable via PCC — no routing tricks needed.
             if (!frankfurtStaticIp) throw new Error('Worker static IP is required for Frankfurt diversity. Enter an unused IP from the primary VDC subnet (e.g. 10.7.224.30).');
-            const fraStaticIp      = frankfurtStaticIp.trim();
+            const fraStaticIp      = frankfurtStaticIp.trim().split('/')[0];
             const safeIp           = fraStaticIp.replace(/\./g, '-');
             const ignitionHost     = frankfurtIgnitionIp || mgmtAddr;
             const ignitionUrl      = `http://${ignitionHost}:8080/worker-fra-${safeIp}.ign`;
@@ -1148,7 +1148,7 @@ rm -f "${patchedFile}"`, chunk => { log(chunk); });
           const mgmtAddrAlt = process.env.OCP_MGMT_HOST || '';
           if (!mgmtAddrAlt || !mgmtKeyAlt) throw new Error('OCP_MGMT_HOST and OCP_MGMT_HOST_SSH_KEY are required for Frankfurt diversity static IP.');
 
-          const fraStaticIpAlt  = frankfurtStaticIp.trim();
+          const fraStaticIpAlt  = frankfurtStaticIp.trim().split('/')[0];
           const safeIpAlt       = fraStaticIpAlt.replace(/\./g, '-');
           const ignitionHostAlt = frankfurtIgnitionIp || mgmtAddrAlt;
           const ignFileAlt      = `/root/ignition-serve/worker-fra-${safeIpAlt}.ign`;
@@ -1261,7 +1261,7 @@ echo "ALT_WRITE_OK"
         },
         nics: [
           frankfurtStaticIp
-            ? { lan: lanId, dhcp: false, ips: [frankfurtStaticIp.trim()], firewallActive: false, name: `${targetMsName}-nic0` }
+            ? { lan: lanId, dhcp: false, ips: [frankfurtStaticIp.trim().split('/')[0]], firewallActive: false, name: `${targetMsName}-nic0` }
             : { lan: lanId, dhcp: true,                                   firewallActive: false, name: `${targetMsName}-nic0` }
         ],
         credentialsSecret: { name: 'ionoscloud-credentials', namespace: 'openshift-machine-api' },
