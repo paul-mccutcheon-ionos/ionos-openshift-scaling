@@ -1316,13 +1316,20 @@ echo "ALT_WRITE_OK"
       };
 
       const msLabelKey = 'machine.openshift.io/cluster-api-machineset';
+      const fraAnnotations = (frankfurtDiversity && frankfurtStaticIp) ? {
+        'machine.openshift.io/vCPU':     String(cores),
+        'machine.openshift.io/memoryMb': String(ramMB),
+        'machine.openshift.io/GPU':      '0',
+        'machine.openshift.io/maxPods':  '250',
+      } : {};
       const ionosMs = {
         apiVersion: 'machine.openshift.io/v1beta1',
         kind:       'MachineSet',
         metadata: {
-          name:      targetMsName,
-          namespace: 'openshift-machine-api',
-          labels:    { [msLabelKey]: targetMsName }
+          name:        targetMsName,
+          namespace:   'openshift-machine-api',
+          labels:      { [msLabelKey]: targetMsName },
+          annotations: fraAnnotations
         },
         spec: {
           replicas: parseInt(msInitReplicas, 10) || 1,
@@ -1336,6 +1343,7 @@ echo "ALT_WRITE_OK"
               }
             },
             spec: {
+              metadata: { labels: frankfurtDiversity ? { 'ionos-site': 'fra1' } : {} },
               providerSpec: { value: providerSpec },
               taints: []
             }
@@ -1491,6 +1499,31 @@ echo "ALT_WRITE_OK"
     await ocpApply(maApiBase, targetMsName, maSpec);
     log(`MachineAutoscaler "${targetMsName}" — min=${minReplicas}, max=${maxReplicas}\n`);
     step('MachineAutoscaler applied', 'ok');
+
+    // ── Frankfurt diversity: kick off IP pool provisioning in background ──────
+    if (frankfurtDiversity && frankfurtStaticIp) {
+      step('Provisioning FRA1 IP pool 10.7.224.2–9 in background…', 'working');
+      log('\nFRA1 pool: creating MachineSets for all free IPs in 10.7.224.2–9.\n');
+      log('Each image upload takes ~30 min. Monitor: ssh root@mgmt "tail -f /root/provision-fra1-pool.log"\n');
+      try {
+        const poolRawKey = (process.env.OCP_MGMT_HOST_SSH_KEY || '').trim();
+        const poolKey    = poolRawKey.includes('\\n') ? poolRawKey.replace(/\\n/g, '\n') : poolRawKey;
+        const poolHost   = process.env.OCP_MGMT_HOST || '';
+        const poolConn   = await sshConnect(poolHost, 'root', poolKey);
+        try {
+          const pidRes = await sshRunScript(poolConn,
+            'nohup /root/provision-fra1-pool.sh > /root/provision-fra1-pool.log 2>&1 </dev/null &\necho $!');
+          log(`  Pool provisioning started (PID ${pidRes.stdout.trim()}).\n`);
+        } finally {
+          poolConn.end();
+        }
+        step('FRA1 pool provisioning running in background', 'ok');
+      } catch (poolErr) {
+        log(`  Warning: could not start pool provisioning — ${poolErr.message}\n`);
+        log('  Run manually on mgmt host: nohup /root/provision-fra1-pool.sh > /root/provision-fra1-pool.log 2>&1 &\n');
+        step('FRA1 pool provisioning (start manually on mgmt host)', 'warn');
+      }
+    }
 
     done(
       `Autoscaling configured on MachineSet "${targetMsName}" — ` +
