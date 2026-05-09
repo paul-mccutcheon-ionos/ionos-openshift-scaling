@@ -946,27 +946,25 @@ chmod 600 ${lsScript}`);
             );
             log(`  FTP hdd-images/ contains: ${[...existingFtpFiles].join(', ') || '(empty)'}\n`);
 
-            // Choose an upload name that doesn't conflict with an existing FTP file.
-            const locSuffix = otherLocation === 'de/fra' ? 'fra' : 'fra2';
-            let uploadName  = imgName;
-            if (existingFtpFiles.has(imgName)) {
-              const base = imgName.replace(/\.raw$/, '');
-              const candidates = [
-                `${base}-${locSuffix}.raw`,
-                ...Array.from({ length: 8 }, (_, i) => `${base}-${locSuffix}${i + 2}.raw`)
-              ];
-              const free = candidates.find(c => !existingFtpFiles.has(c));
-              if (!free) {
-                const err = new Error(
-                  `No free FTP slot for "${imgName}" in ${otherLocation} — all alternate names are taken. ` +
-                  `Delete old images from IONOS DCD → Images (${otherLocation}) to free up FTP quota.`
-                );
-                err.status = 409;
-                throw err;
-              }
-              uploadName = free;
-              log(`  "${imgName}" already in FTP — uploading as "${uploadName}"\n`);
+            // Choose an upload name following the convention:
+            //   rhcos-<ver>-qemu-<site>-v<n>.raw
+            // where <site> is derived from the target location (de/fra → fra,
+            // de/fra/2 → fra2, de/txl → txl, etc.) and <n> increments until
+            // a slot is free in the FTP listing.
+            const locTag   = otherLocation.split('/').slice(1).join(''); // fra, fra2, txl …
+            const stem     = imgName.replace(/\.raw$/i, '').replace(/-v\d+$/i, '');
+            const siteBase = `${stem}-${locTag}`;
+            const uploadName = Array.from({ length: 20 }, (_, i) => `${siteBase}-v${i + 1}.raw`)
+              .find(c => !existingFtpFiles.has(c));
+            if (!uploadName) {
+              const err = new Error(
+                `No free FTP slot in ${otherLocation} — ${siteBase}-v1 through v20 are all taken. ` +
+                `Delete old images from IONOS DCD → Images (${otherLocation}) to free up FTP quota.`
+              );
+              err.status = 409;
+              throw err;
             }
+            log(`  Uploading to ${otherLocation} as "${uploadName}"\n`);
 
             // Static-IP approach: secondary-VDC workers get an IP from the primary VDC
             // subnet so they are directly reachable via PCC — no routing tricks needed.
