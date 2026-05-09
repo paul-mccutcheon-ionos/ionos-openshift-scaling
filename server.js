@@ -1011,12 +1011,20 @@ chmod 600 ${lsScript}`);
             }
             if (!ignConfig.storage) ignConfig.storage = {};
             if (!ignConfig.storage.files) ignConfig.storage.files = [];
-            ignConfig.storage.files = ignConfig.storage.files.filter(f => !((f.path || '').includes('worker-fra')));
+            ignConfig.storage.files = ignConfig.storage.files.filter(f => !((f.path || '').includes('worker-fra')) && f.path !== '/etc/hostname');
+            const ipParts = fraStaticIp.split('.');
+            const fraHostname = `${targetMsName}-${ipParts[2]}-${ipParts[3]}`;
             ignConfig.storage.files.push({
               path: '/etc/NetworkManager/system-connections/worker-fra-static.nmconnection',
               mode: 384,
               overwrite: true,
               contents: { source: `data:text/plain;charset=utf-8;base64,${Buffer.from(nmKeyfile).toString('base64')}` }
+            });
+            ignConfig.storage.files.push({
+              path: '/etc/hostname',
+              mode: 420,
+              overwrite: true,
+              contents: { source: `data:text/plain;charset=utf-8;base64,${Buffer.from(fraHostname + '\n').toString('base64')}` }
             });
             const ignB64Lines = Buffer.from(JSON.stringify(ignConfig)).toString('base64').match(/.{1,76}/g).join('\n');
             const writeIgnResult = await sshRunScript(ftpConn, `
@@ -1203,11 +1211,18 @@ rm -f "${patchedFile}"`, chunk => { log(chunk); });
             catch (e) { throw new Error(`Cannot parse /root/ignition-serve/worker.ign: ${e.message}`); }
             if (!ignCfgAlt.storage) ignCfgAlt.storage = {};
             if (!ignCfgAlt.storage.files) ignCfgAlt.storage.files = [];
-            ignCfgAlt.storage.files = ignCfgAlt.storage.files.filter(f => !((f.path || '').includes('worker-fra-static')));
+            ignCfgAlt.storage.files = ignCfgAlt.storage.files.filter(f => !((f.path || '').includes('worker-fra-static')) && f.path !== '/etc/hostname');
+            const ipPartsAlt = fraStaticIpAlt.split('.');
+            const fraHostnameAlt = `${targetMsName}-${ipPartsAlt[2]}-${ipPartsAlt[3]}`;
             ignCfgAlt.storage.files.push({
               path: '/etc/NetworkManager/system-connections/worker-fra-static.nmconnection',
               mode: 384, overwrite: true,
               contents: { source: `data:text/plain;charset=utf-8;base64,${Buffer.from(nmKeyfileAlt).toString('base64')}` }
+            });
+            ignCfgAlt.storage.files.push({
+              path: '/etc/hostname',
+              mode: 420, overwrite: true,
+              contents: { source: `data:text/plain;charset=utf-8;base64,${Buffer.from(fraHostnameAlt + '\n').toString('base64')}` }
             });
             const ignB64Alt = Buffer.from(JSON.stringify(ignCfgAlt)).toString('base64').match(/.{1,76}/g).join('\n');
             const wRes = await sshRunScript(altConn, `
