@@ -728,7 +728,9 @@ app.post('/api/setup-autoscaler', async (req, res) => {
 
       if (frankfurtDiversity) {
         const otherLocation = region === 'de/fra' ? 'de/fra/2' : 'de/fra';
-        effectiveRegion = otherLocation;
+        // Convert IONOS location format to Machine API region format (de/fra → de-fra-1, de/fra/2 → de-fra-2)
+        const locationRegionMap = { 'de/fra': 'de-fra-1', 'de/fra/2': 'de-fra-2' };
+        effectiveRegion = locationRegionMap[otherLocation] || otherLocation.replace(/\//g, '-');
 
         // Pre-flight: ensure selected image is available in the secondary location.
         // If it's only in the primary location, auto-copy via FTP from the management host.
