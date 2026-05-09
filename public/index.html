@@ -835,8 +835,8 @@
           <div class="form-grid" style="margin-top:0.75rem;padding-top:0.75rem;border-top:1px solid #1e293b">
             <div class="form-group">
               <label for="frankfurt-static-ip">Worker node static IP</label>
-              <input type="text" id="frankfurt-static-ip" placeholder="e.g. 10.7.224.30" style="width:100%" />
-              <div class="field-note">An unused IP from the primary VDC subnet (10.7.224.0/24). Assigned as the worker's permanent IP via Ignition — directly reachable from the cluster via PCC, no routing tricks needed.</div>
+              <input type="text" id="frankfurt-static-ip" placeholder="e.g. 10.7.224.3" style="width:100%" />
+              <div class="field-note">Auto-selected from the reserved pool 10.7.224.2–9 (below DHCP range). Assigned permanently via BLS kernel args + Ignition NM keyfile — directly reachable from the cluster via PCC.</div>
             </div>
             <div class="form-group">
               <label for="frankfurt-ignition-ip">Management host primary VDC IP</label>
@@ -2685,11 +2685,19 @@
     if (ipEl && !ipEl.value) {
       ipEl.placeholder = 'Checking available IPs…';
       try {
-        const r = await fetch('/api/frankfurt/suggest-ip');
+        const params = new URLSearchParams();
+        if (clusterApiUrl) params.set('apiUrl', clusterApiUrl);
+        if (ocpToken)      params.set('ocpToken', ocpToken);
+        if (ionosToken)    params.set('ionosToken', ionosToken);
+        const r = await fetch('/api/frankfurt/suggest-ip?' + params.toString());
         const d = await r.json();
-        if (d.suggestedIp) { ipEl.value = d.suggestedIp; ipEl.placeholder = 'e.g. 10.7.224.30'; }
+        if (d.suggestedIp) {
+          ipEl.value = d.suggestedIp;
+          ipEl.title = d.usedIps?.length ? `In use: ${d.usedIps.join(', ')}` : '';
+        }
+        ipEl.placeholder = 'e.g. 10.7.224.3';
       } catch (_) {
-        ipEl.placeholder = 'e.g. 10.7.224.30';
+        ipEl.placeholder = 'e.g. 10.7.224.3';
       }
     }
   });

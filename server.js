@@ -379,29 +379,51 @@ app.get('/api/env-prefill', async (req, res) => {
 // Return the next free IP in the primary VDC subnet for a Frankfurt diversity worker.
 // SSHs to the management host to get current node IPs, then scans from .30 upwards.
 app.get('/api/frankfurt/suggest-ip', async (req, res) => {
+  // Returns the first free IP in the reserved FRA1 pool 10.7.224.2-9.
+  // Checks OCP MachineSet providerSpec NICs and IONOS server NICs in the secondary FRA VDC.
+  const POOL = [2,3,4,5,6,7,8,9].map(n => `10.7.224.${n}`);
+  const FRA_SECONDARY_DC = '08ca9410-fe32-4c4d-8891-f65d93c4ed71';
+  const usedIps = new Set();
+
   try {
-    const rawKey  = (process.env.OCP_MGMT_HOST_SSH_KEY || '').trim();
-    const mgmtKey = rawKey.includes('\\n') ? rawKey.replace(/\\n/g, '\n') : rawKey;
-    const mgmtAddr = process.env.OCP_MGMT_HOST || '';
-    if (!mgmtAddr || !mgmtKey) return res.json({ suggestedIp: '10.7.224.30' });
-
-    const conn = await sshConnect(mgmtAddr, 'root', mgmtKey);
-    let usedIps = new Set();
-    try {
-      const r = await sshRunScript(conn, `oc get nodes -o wide --no-headers 2>/dev/null | awk '{print $6}'`);
-      r.stdout.trim().split('\n').map(s => s.trim()).filter(Boolean).forEach(ip => usedIps.add(ip));
-    } finally {
-      conn.end();
+    // 1. Check OCP MachineSets for NIC IPs in pool range
+    const apiUrl   = req.query.apiUrl  || process.env.OCP_CLUSTER_API_URL || '';
+    const ocpToken = req.query.ocpToken || process.env.OCP_BEARER_TOKEN   || '';
+    if (apiUrl && ocpToken) {
+      try {
+        const msBase = `${apiUrl}/apis/machine.openshift.io/v1beta1/namespaces/openshift-machine-api/machinesets`;
+        const r = await ocpReq('GET', msBase, ocpToken);
+        for (const ms of (r.data?.items || [])) {
+          const nics = ms.spec?.template?.spec?.providerSpec?.value?.nics || [];
+          for (const nic of nics) {
+            for (const ip of (nic.ips || [])) {
+              if (POOL.includes(ip)) usedIps.add(ip);
+            }
+          }
+        }
+      } catch (_) { /* non-fatal */ }
     }
 
-    let suggestedIp = '';
-    for (let i = 30; i <= 254 && !suggestedIp; i++) {
-      const candidate = `10.7.224.${i}`;
-      if (!usedIps.has(candidate)) suggestedIp = candidate;
+    // 2. Check IONOS NICs in secondary FRA VDC
+    const ionosToken = req.query.ionosToken || process.env.IONOS_API_TOKEN || '';
+    if (ionosToken) {
+      try {
+        const servers = await ionosGet(
+          `/datacenters/${FRA_SECONDARY_DC}/servers?depth=3`, ionosToken);
+        for (const srv of (servers?.items || [])) {
+          for (const nic of (srv.entities?.nics?.items || [])) {
+            for (const ip of (nic.properties?.ips || [])) {
+              if (POOL.includes(ip)) usedIps.add(ip);
+            }
+          }
+        }
+      } catch (_) { /* non-fatal */ }
     }
-    res.json({ suggestedIp: suggestedIp || '10.7.224.30', usedIps: [...usedIps].sort() });
+
+    const suggestedIp = POOL.find(ip => !usedIps.has(ip)) || '';
+    res.json({ suggestedIp, usedIps: [...usedIps].sort(), pool: POOL });
   } catch (e) {
-    res.json({ suggestedIp: '10.7.224.30', error: e.message });
+    res.json({ suggestedIp: POOL[0], error: e.message });
   }
 });
 
