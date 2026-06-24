@@ -484,6 +484,50 @@ oc whoami -t
   }
 });
 
+// Check whether the ionos-machine-api-provider Deployment exists and is healthy.
+app.get('/api/provider-status', async (req, res) => {
+  const { apiUrl, ocpToken } = req.query;
+  if (!apiUrl || !ocpToken) return res.status(400).json({ error: 'apiUrl and ocpToken are required' });
+
+  const ns      = 'openshift-machine-api';
+  const depName = 'ionos-machine-api-provider';
+
+  try {
+    let deployment = null;
+    try {
+      deployment = await ocpGet(apiUrl, `/apis/apps/v1/namespaces/${ns}/deployments/${depName}`, ocpToken);
+    } catch (e) {
+      if (e.status !== 404) throw e;
+      // 404 → not installed
+    }
+
+    if (!deployment) return res.json({ found: false });
+
+    const pods = await ocpGet(
+      apiUrl,
+      `/api/v1/namespaces/${ns}/pods?labelSelector=app%3D${encodeURIComponent(depName)}`,
+      ocpToken
+    );
+
+    const desired   = deployment.spec?.replicas ?? 1;
+    const ready     = deployment.status?.readyReplicas     || 0;
+    const available = deployment.status?.availableReplicas || 0;
+    const image     = deployment.spec?.template?.spec?.containers?.[0]?.image || '';
+
+    const podList = (pods.items || []).map(p => ({
+      name:     p.metadata.name,
+      phase:    p.status?.phase || 'Unknown',
+      ready:    (p.status?.conditions || []).some(c => c.type === 'Ready' && c.status === 'True'),
+      image:    p.spec?.containers?.[0]?.image || '',
+      restarts: p.status?.containerStatuses?.[0]?.restartCount || 0,
+    }));
+
+    res.json({ found: true, desired, ready, available, image, pods: podList });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
 app.post('/api/scale', async (req, res) => {
   if (!requireFields(res, req.body, ['apiUrl', 'ocpToken', 'machineSetName', 'desiredReplicas'])) return;
   const { apiUrl, ocpToken, machineSetName, desiredReplicas } = req.body;
