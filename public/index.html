@@ -575,9 +575,26 @@
         </div>
         <div class="form-group full-width">
           <label for="ocp-token">OpenShift Bearer Token</label>
-          <input type="password" id="ocp-token" placeholder="Paste token from: oc whoami -t" autocomplete="off" />
-          <div class="field-note">Obtain with <code style="color:#38bdf8">oc login</code> then <code style="color:#38bdf8">oc whoami -t</code></div>
+          <div style="display:flex;gap:0.5rem;align-items:center">
+            <input type="password" id="ocp-token" placeholder="Paste token, or use Get Token below" autocomplete="off" style="flex:1" />
+            <button type="button" class="btn btn-sm" id="get-token-btn" style="white-space:nowrap;height:2.5rem">
+              <span id="get-token-label">&#128273; Get Token</span>
+              <span class="spinner hidden" id="get-token-spinner"></span>
+            </button>
+          </div>
+          <div class="field-note">Paste manually, or fill in admin credentials below and click <strong>Get Token</strong> to fetch automatically via the management host</div>
         </div>
+        <div class="form-group">
+          <label for="ocp-admin-username">Cluster Admin Username</label>
+          <input type="text" id="ocp-admin-username" placeholder="e.g. kubeadmin" autocomplete="off" style="width:100%" />
+          <div class="field-note">Used only to run <code style="color:#38bdf8">oc login</code> on the management host — not stored</div>
+        </div>
+        <div class="form-group">
+          <label for="ocp-admin-password">Cluster Admin Password</label>
+          <input type="password" id="ocp-admin-password" placeholder="Cluster admin password" autocomplete="off" style="width:100%" />
+          <div class="field-note">Transmitted only to your management host over SSH; never logged or stored by this tool</div>
+        </div>
+        <div class="error-box" id="get-token-error"></div>
       </div>
 
       <div class="card-section-title">OpenShift Management Host <span style="color:#4b5563;font-weight:400;font-size:0.78rem;text-transform:none;letter-spacing:0">(optional — enables automated ISO generation in step 2)</span></div>
@@ -1661,6 +1678,8 @@
     if (env.registryUsername) { const el = document.getElementById('as-registry-username'); if (el) el.value = env.registryUsername; }
     if (env.registryPassword) { const el = document.getElementById('as-registry-password'); if (el) el.value = env.registryPassword; }
     if (env.mgmtInternalIp)   { const el = document.getElementById('frankfurt-ignition-ip'); if (el && !el.value) el.value = env.mgmtInternalIp; }
+    if (env.ocpAdminUsername) { const el = document.getElementById('ocp-admin-username'); if (el && !el.value) el.value = env.ocpAdminUsername; }
+    if (env.ocpAdminPassword) { const el = document.getElementById('ocp-admin-password'); if (el && !el.value) el.value = env.ocpAdminPassword; }
   }
 
   (async () => {
@@ -1713,6 +1732,42 @@
     URL.revokeObjectURL(url);
   });
 
+  // ── Get fresh OCP bearer token via management host ─────────────────────────
+  document.getElementById('get-token-btn').addEventListener('click', async () => {
+    const apiUrl        = document.getElementById('api-url').value.trim();
+    const mgmtHostVal   = document.getElementById('mgmt-host').value.trim();
+    const sshUserVal    = document.getElementById('ssh-user').value.trim() || 'root';
+    const sshKeyVal     = document.getElementById('ssh-key').value.trim();
+    const sshPassVal    = document.getElementById('ssh-passphrase').value;
+    const adminUser     = document.getElementById('ocp-admin-username').value.trim();
+    const adminPass     = document.getElementById('ocp-admin-password').value;
+    const errBox        = document.getElementById('get-token-error');
+
+    errBox.style.display = 'none';
+
+    if (!apiUrl)      { errBox.textContent = 'Cluster API URL is required.';        errBox.style.display = 'block'; return; }
+    if (!mgmtHostVal) { errBox.textContent = 'Management Host is required.';        errBox.style.display = 'block'; return; }
+    if (!sshKeyVal)   { errBox.textContent = 'SSH Private Key is required.';        errBox.style.display = 'block'; return; }
+    if (!adminUser)   { errBox.textContent = 'Cluster Admin Username is required.'; errBox.style.display = 'block'; return; }
+    if (!adminPass)   { errBox.textContent = 'Cluster Admin Password is required.'; errBox.style.display = 'block'; return; }
+
+    setLoading('get-token-label', 'get-token-spinner', 'get-token-btn', true, 'Getting token…');
+    try {
+      const data = await apiPost('/api/get-token', {
+        apiUrl, mgmtHost: mgmtHostVal, sshUser: sshUserVal, sshKey: sshKeyVal,
+        sshPassphrase: sshPassVal || undefined, adminUsername: adminUser, adminPassword: adminPass
+      });
+      document.getElementById('ocp-token').value = data.token;
+      document.getElementById('ocp-token').style.borderColor = '#6ee7b7';
+      setTimeout(() => { document.getElementById('ocp-token').style.borderColor = ''; }, 2000);
+    } catch (err) {
+      errBox.textContent = err.message;
+      errBox.style.display = 'block';
+    } finally {
+      setLoading('get-token-label', 'get-token-spinner', 'get-token-btn', false, '&#128273; Get Token');
+    }
+  });
+
   // ── Client-side .env file upload — parsed entirely in browser, never sent to server ──
   document.getElementById('env-file-upload').addEventListener('change', function () {
     const file = this.files[0];
@@ -1747,6 +1802,8 @@
           case 'REGISTRY_IMAGE':    { const el = document.getElementById('as-registry-image');    if (el) el.value = val; break; }
           case 'REGISTRY_USERNAME': { const el = document.getElementById('as-registry-username'); if (el) el.value = val; break; }
           case 'REGISTRY_PASSWORD': { const el = document.getElementById('as-registry-password'); if (el) el.value = val; break; }
+          case 'OCP_ADMIN_USERNAME': { const el = document.getElementById('ocp-admin-username'); if (el) el.value = val; break; }
+          case 'OCP_ADMIN_PASSWORD': { const el = document.getElementById('ocp-admin-password'); if (el) el.value = val; break; }
         }
       }
       document.getElementById('env-file-banner').style.display = '';

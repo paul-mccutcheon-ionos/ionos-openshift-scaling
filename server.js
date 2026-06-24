@@ -373,6 +373,8 @@ app.get('/api/env-prefill', async (req, res) => {
     registryUsername:  str('REGISTRY_USERNAME'),
     registryPassword:  str('REGISTRY_PASSWORD'),
     mgmtInternalIp:    str('OCP_MGMT_INTERNAL_IP'),
+    ocpAdminUsername:  str('OCP_ADMIN_USERNAME'),
+    ocpAdminPassword:  str('OCP_ADMIN_PASSWORD'),
   });
 });
 
@@ -446,6 +448,39 @@ app.post('/api/refresh', async (req, res) => {
     res.json(await fetchClusterState(apiUrl, ocpToken));
   } catch (err) {
     res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
+// ── Get fresh OCP bearer token via management host ─────────────────────────
+// SSHes into the management host, runs `oc login`, then `oc whoami -t`.
+// Credentials are never stored — they travel only from browser → this server
+// → the user's own management host over SSH.
+app.post('/api/get-token', async (req, res) => {
+  if (!requireFields(res, req.body, ['mgmtHost', 'sshKey', 'adminUsername', 'adminPassword', 'apiUrl'])) return;
+  const { mgmtHost, sshUser = 'root', sshKey, sshPassphrase, adminUsername, adminPassword, apiUrl } = req.body;
+
+  let conn;
+  try {
+    conn = await sshConnect(mgmtHost, sshUser, sshKey, sshPassphrase || undefined);
+
+    // Escape the password for shell use — wrap in single quotes, escaping any ' in the value
+    const escapedPass = adminPassword.replace(/'/g, "'\\''");
+    const escapedUser = adminUsername.replace(/'/g, "'\\''");
+    const escapedUrl  = apiUrl.replace(/'/g, "'\\''");
+
+    const { stdout } = await sshRunScript(conn, `
+set -e
+export KUBECONFIG=${process.env.OCP_KUBECONFIG_PATH || '/root/.kube/config'}
+oc login '${escapedUrl}' -u '${escapedUser}' -p '${escapedPass}' --insecure-skip-tls-verify=true >/dev/null 2>&1
+oc whoami -t
+`);
+    const token = stdout.trim();
+    if (!token) throw new Error('oc whoami -t returned an empty token');
+    res.json({ token });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  } finally {
+    if (conn) conn.end();
   }
 });
 
