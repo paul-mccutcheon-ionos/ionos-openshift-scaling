@@ -861,6 +861,51 @@
       This provider is required for the autoscaler to create IONOS Cloud VMs automatically.
     </p>
     <div id="provider-status-result" style="font-size:0.85rem"></div>
+
+    <!-- Provider deployment toggle -->
+    <div id="as-provider-deploy-group" style="margin-top:1rem;border:1px solid #1e3a5f;border-radius:8px;overflow:hidden">
+      <div style="padding:0.7rem 0.9rem;background:#0f2035">
+        <label style="display:flex;align-items:center;gap:0.6rem;cursor:pointer;font-size:0.88rem;color:#93c5fd;font-weight:600">
+          <input type="checkbox" id="as-deploy-provider" style="accent-color:#3b82f6;width:15px;height:15px" />
+          Deploy IONOS Machine API provider to this cluster (first-time setup)
+        </label>
+        <p style="font-size:0.78rem;color:#4b7aab;margin:0.45rem 0 0 1.6rem">
+          Applies the ServiceAccount, ClusterRole, ClusterRoleBinding and Deployment into the
+          <code style="color:#60a5fa">openshift-machine-api</code> namespace. Skip this if the provider is already running.
+        </p>
+      </div>
+
+      <!-- Registry config — shown when deploy-provider is checked -->
+      <div id="as-registry-fields" style="display:none;padding:0.85rem 0.9rem;background:#0a1929;border-top:1px solid #1e3a5f">
+        <div style="font-size:0.82rem;color:#93c5fd;font-weight:600;margin-bottom:0.65rem">Container Registry</div>
+
+        <div class="form-grid" style="grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:0.7rem">
+          <div class="form-group">
+            <label for="as-registry-type">Registry</label>
+            <select id="as-registry-type" style="width:100%">
+              <option value="dockerhub">Docker Hub</option>
+              <option value="ghcr">GitHub Container Registry (ghcr.io)</option>
+              <option value="ionos">IONOS Container Registry</option>
+              <option value="custom">Custom / Other</option>
+            </select>
+          </div>
+          <div class="form-group" style="grid-column:span 2">
+            <label for="as-registry-image">Image</label>
+            <input type="text" id="as-registry-image" placeholder="e.g. paulmcc50/myrepo:ionos-machine-api-provider" style="width:100%" />
+            <div class="field-note" id="as-registry-image-hint">Docker Hub: <code>username/repo:tag</code></div>
+          </div>
+          <div class="form-group">
+            <label for="as-registry-username" id="as-registry-username-label">Username</label>
+            <input type="text" id="as-registry-username" autocomplete="off" style="width:100%" />
+          </div>
+          <div class="form-group">
+            <label for="as-registry-password" id="as-registry-password-label">Password / Token</label>
+            <input type="password" id="as-registry-password" autocomplete="new-password" style="width:100%" />
+            <div class="field-note" id="as-registry-password-hint">Leave blank if the image is public</div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- ── Card 5c: Auto-Scaling wizard ─────────────────────────────────── -->
@@ -1174,51 +1219,6 @@
         </div>
       </div>
 
-    </div>
-
-    <!-- Provider deployment toggle (IONOS mode only) -->
-    <div id="as-provider-deploy-group" style="display:none;margin-top:1rem;border:1px solid #1e3a5f;border-radius:8px;overflow:hidden">
-      <div style="padding:0.7rem 0.9rem;background:#0f2035">
-        <label style="display:flex;align-items:center;gap:0.6rem;cursor:pointer;font-size:0.88rem;color:#93c5fd;font-weight:600">
-          <input type="checkbox" id="as-deploy-provider" style="accent-color:#3b82f6;width:15px;height:15px" />
-          Deploy IONOS Machine API provider to this cluster (first-time setup)
-        </label>
-        <p style="font-size:0.78rem;color:#4b7aab;margin:0.45rem 0 0 1.6rem">
-          Applies the ServiceAccount, ClusterRole, ClusterRoleBinding and Deployment into the
-          <code style="color:#60a5fa">openshift-machine-api</code> namespace. Skip this if the provider is already running.
-        </p>
-      </div>
-
-      <!-- Registry config — shown when deploy-provider is checked -->
-      <div id="as-registry-fields" style="display:none;padding:0.85rem 0.9rem;background:#0a1929;border-top:1px solid #1e3a5f">
-        <div style="font-size:0.82rem;color:#93c5fd;font-weight:600;margin-bottom:0.65rem">Container Registry</div>
-
-        <div class="form-grid" style="grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:0.7rem">
-          <div class="form-group">
-            <label for="as-registry-type">Registry</label>
-            <select id="as-registry-type" style="width:100%">
-              <option value="dockerhub">Docker Hub</option>
-              <option value="ghcr">GitHub Container Registry (ghcr.io)</option>
-              <option value="ionos">IONOS Container Registry</option>
-              <option value="custom">Custom / Other</option>
-            </select>
-          </div>
-          <div class="form-group" style="grid-column:span 2">
-            <label for="as-registry-image">Image</label>
-            <input type="text" id="as-registry-image" placeholder="e.g. paulmcc50/myrepo:ionos-machine-api-provider" style="width:100%" />
-            <div class="field-note" id="as-registry-image-hint">Docker Hub: <code>username/repo:tag</code></div>
-          </div>
-          <div class="form-group">
-            <label for="as-registry-username" id="as-registry-username-label">Username</label>
-            <input type="text" id="as-registry-username" autocomplete="off" style="width:100%" />
-          </div>
-          <div class="form-group">
-            <label for="as-registry-password" id="as-registry-password-label">Password / Token</label>
-            <input type="password" id="as-registry-password" autocomplete="new-password" style="width:100%" />
-            <div class="field-note" id="as-registry-password-hint">Leave blank if the image is public</div>
-          </div>
-        </div>
-      </div>
     </div>
 
     <!-- Section 2: MachineAutoscaler bounds -->
@@ -1808,7 +1808,7 @@
             <div>
               <div style="color:#fca5a5;font-weight:600;margin-bottom:0.25rem">Not installed</div>
               <div style="color:#64748b;font-size:0.8rem">The <code style="color:#38bdf8">ionos-machine-api-provider</code> Deployment was not found in <code style="color:#38bdf8">openshift-machine-api</code>.<br>
-              Use the autoscaler wizard below with <strong>Deploy IONOS Machine API provider</strong> checked to install it.</div>
+              Check <strong>Deploy IONOS Machine API provider</strong> below and run the autoscaler wizard to install it.</div>
             </div>
           </div>`;
         return;
@@ -2972,8 +2972,7 @@
     document.getElementById('as-clone-replicas-group').style.display = isClone ? '' : 'none';
     // IONOS group
     document.getElementById('as-ionos-group').style.display              = isIonos ? '' : 'none';
-    document.getElementById('as-provider-deploy-group').style.display    = isIonos ? '' : 'none';
-    document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? 'block' : 'none';
+document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? 'block' : 'none';
     if (isIonos) detectFrankfurt();
     // Step visibility
     document.getElementById('as-s1').classList.toggle('hidden', !isClone);
