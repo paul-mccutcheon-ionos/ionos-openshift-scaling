@@ -1110,7 +1110,7 @@
               <div class="form-grid">
                 <div class="form-group">
                   <label for="rhcos-ocp-version">OCP Version</label>
-                  <input type="text" id="rhcos-ocp-version" value="4.18" placeholder="e.g. 4.18" style="width:120px" />
+                  <input type="text" id="rhcos-ocp-version" value="4.19" placeholder="e.g. 4.19" style="width:120px" />
                   <div class="field-note">Major.minor — selects the RHCOS qemu qcow2 from Red Hat's mirror</div>
                 </div>
                 <div class="form-group">
@@ -2217,15 +2217,24 @@
 
   // ── Render ─────────────────────────────────────────────────────────────────
   function renderOverview(state) {
-    document.getElementById('version-pill').textContent = state.version;
+    const pillEl = document.getElementById('version-pill');
+    if (state.ocpVersion) {
+      pillEl.textContent = `OCP ${state.ocpVersion}`;
+    } else {
+      pillEl.textContent = state.version;
+    }
     const masters  = state.nodes.filter(n => n.role === 'master').length;
     const workers  = state.nodes.filter(n => n.role === 'worker').length;
     const notReady = state.nodes.filter(n => !n.ready).length;
+    const k8sMini  = state.ocpVersion
+      ? `<div class="stat-mini"><div class="sm-label">Kubernetes</div><div class="sm-value sm-neutral" style="font-size:0.85rem">${escHtml(state.version)}</div></div>`
+      : '';
     document.getElementById('stat-row').innerHTML = `
       <div class="stat-mini"><div class="sm-label">Control Plane</div><div class="sm-value sm-masters">${masters}</div></div>
       <div class="stat-mini"><div class="sm-label">Workers</div><div class="sm-value sm-workers">${workers}</div></div>
       <div class="stat-mini"><div class="sm-label">Not Ready</div><div class="sm-value ${notReady > 0 ? 'sm-notready' : 'sm-neutral'}">${notReady}</div></div>
       <div class="stat-mini"><div class="sm-label">Total Nodes</div><div class="sm-value sm-neutral">${state.nodes.length}</div></div>
+      ${k8sMini}
     `;
     document.getElementById('refresh-ts').textContent = 'Last refreshed: ' + new Date().toLocaleTimeString();
   }

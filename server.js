@@ -226,6 +226,17 @@ async function fetchClusterState(apiUrl, ocpToken) {
     csrData = await ocpGet(apiUrl, '/apis/certificates.k8s.io/v1/certificatesigningrequests', ocpToken);
   } catch (_) {}
 
+  // OCP version — degrade gracefully if token lacks permission
+  let ocpVersion = null;
+  try {
+    const cvData = await ocpGet(apiUrl, '/apis/config.openshift.io/v1/clusterversions/version', ocpToken);
+    ocpVersion = cvData?.status?.desired?.version
+              || cvData?.status?.history?.[0]?.version
+              || null;
+  } catch (err) {
+    console.warn('[fetchClusterState] ClusterVersion fetch failed:', err.message);
+  }
+
   // Recent node/CSR events — useful for tracking bootstrap progress
   let recentEvents = [];
   try {
@@ -305,6 +316,7 @@ async function fetchClusterState(apiUrl, ocpToken) {
 
   return {
     version:     versionData.gitVersion || `${versionData.major}.${versionData.minor}`,
+    ocpVersion,
     nodes,
     machineSets,
     pendingCsrs,
@@ -2207,7 +2219,7 @@ app.post('/api/execute-node-iso', async (req, res) => {
   const bootstrapGateway = process.env.OCP_BOOTSTRAP_GATEWAY || '10.7.224.1';
   const bootstrapDns     = process.env.OCP_BOOTSTRAP_DNS     || '212.227.123.16;212.227.123.17;';
 
-  // Use the nodes-config.yaml approach (works in OCP 4.17-4.19).
+  // Use the nodes-config.yaml approach (works in OCP 4.17-4.20+).
   // --network-config-path (single-node flag) is broken in the oc 4.19.6 client with
   // "readfile: invalid argument" regardless of NMState content — skip it entirely.
   // Instead: write nodes-config.yaml to --dir; omit --mac-address so oc reads the file.
