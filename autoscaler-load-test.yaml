@@ -1,8 +1,8 @@
 ---
-# Autoscaler load test
-# Deploys 8 pods each requesting 1 CPU / 1 GiB RAM.
-# With 2 worker nodes (~3 allocatable CPU each) only ~6 pods can schedule;
-# the remaining 2 stay Pending and trigger the Cluster Autoscaler to add a node.
+# Autoscaler load test — Frankfurt (de/fra) diversity site
+# Targets nodes with label ionos-site=fra1 specifically.
+# Each FRA1 node has ~3.5 allocatable CPU; 5 pods fill one node and
+# leave 1 Pending, which triggers the autoscaler to provision vcpu-fra1-224-31.
 #
 # Cleanup:  kubectl delete -f autoscaler-load-test.yaml
 apiVersion: v1
@@ -23,7 +23,7 @@ metadata:
   labels:
     app: load-test
 spec:
-  replicas: 8
+  replicas: 6
   selector:
     matchLabels:
       app: load-test
@@ -32,7 +32,17 @@ spec:
       labels:
         app: load-test
     spec:
-      # Spread pods across nodes so each node reaches capacity independently
+      # Pin to FRA1 diversity nodes only
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: ionos-site
+                    operator: In
+                    values:
+                      - fra1
+      # Spread pods across FRA1 nodes so each fills independently
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
@@ -42,8 +52,6 @@ spec:
               app: load-test
       containers:
         - name: pause
-          # busybox: tiny image, no real work — resource *requests* are what
-          # the scheduler and autoscaler act on, not actual usage.
           image: busybox:latest
           command: ["sh", "-c", "while true; do sleep 3600; done"]
           resources:
@@ -57,5 +65,3 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
-            # runAsUser is intentionally omitted — OpenShift's restricted-v2 SCC
-            # injects a UID from the namespace's allocated range automatically.

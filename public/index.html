@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.8em;font-weight:400;color:#7dd3fc">v1.1.9</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.1.11</span>
   </div>
 
   <div class="banner-actions">
@@ -684,7 +684,10 @@
   <!-- ── Card 2: Cluster Overview ──────────────────────────────────────── -->
   <div class="card hidden" id="overview-card">
     <h2>&#128202; Cluster Overview</h2>
-    <div class="version-pill" id="version-pill"></div>
+    <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;margin-bottom:1rem">
+      <div class="version-pill" id="version-pill" style="margin-bottom:0"></div>
+      <div class="version-pill" id="k8s-pill" style="display:none;margin-bottom:0;background:#0f2d1f;color:#34d399;font-size:0.85rem;font-weight:600"></div>
+    </div>
     <div class="stat-row" id="stat-row"></div>
     <div class="refresh-ts" id="refresh-ts"></div>
   </div>
@@ -2217,24 +2220,24 @@
 
   // ── Render ─────────────────────────────────────────────────────────────────
   function renderOverview(state) {
-    const pillEl = document.getElementById('version-pill');
+    const pillEl   = document.getElementById('version-pill');
+    const k8sPill  = document.getElementById('k8s-pill');
     if (state.ocpVersion) {
-      pillEl.textContent = `OCP ${state.ocpVersion}`;
+      pillEl.textContent  = `OCP v${state.ocpVersion}`;
+      k8sPill.textContent = `k8s ${state.version}`;
+      k8sPill.style.display = '';
     } else {
-      pillEl.textContent = state.version;
+      pillEl.textContent    = state.version;
+      k8sPill.style.display = 'none';
     }
     const masters  = state.nodes.filter(n => n.role === 'master').length;
     const workers  = state.nodes.filter(n => n.role === 'worker').length;
     const notReady = state.nodes.filter(n => !n.ready).length;
-    const k8sMini  = state.ocpVersion
-      ? `<div class="stat-mini"><div class="sm-label">Kubernetes</div><div class="sm-value sm-neutral" style="font-size:0.85rem">${escHtml(state.version)}</div></div>`
-      : '';
     document.getElementById('stat-row').innerHTML = `
       <div class="stat-mini"><div class="sm-label">Control Plane</div><div class="sm-value sm-masters">${masters}</div></div>
       <div class="stat-mini"><div class="sm-label">Workers</div><div class="sm-value sm-workers">${workers}</div></div>
       <div class="stat-mini"><div class="sm-label">Not Ready</div><div class="sm-value ${notReady > 0 ? 'sm-notready' : 'sm-neutral'}">${notReady}</div></div>
       <div class="stat-mini"><div class="sm-label">Total Nodes</div><div class="sm-value sm-neutral">${state.nodes.length}</div></div>
-      ${k8sMini}
     `;
     document.getElementById('refresh-ts').textContent = 'Last refreshed: ' + new Date().toLocaleTimeString();
   }
