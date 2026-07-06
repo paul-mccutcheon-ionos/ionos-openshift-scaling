@@ -1322,7 +1322,9 @@
             objects, so every new worker lands as
             <em style="color:#93c5fd">Discovered · Approval required</em> and waits for manual CSR
             approval before joining the cluster. When checked, this tool polls every 30 s and
-            approves any pending CSRs automatically.
+            approves any pending CSRs automatically. Once a node has joined and its
+            <code style="color:#93c5fd">Node</code> object is registered, OpenShift handles
+            all future certificate renewals automatically — no further intervention needed.
           </span>
         </span>
       </label>
