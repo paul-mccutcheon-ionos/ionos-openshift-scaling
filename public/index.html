@@ -1309,6 +1309,26 @@
     <div id="as-done" class="hidden" style="background:#2e1065;border:1px solid #7c3aed;border-radius:8px;padding:0.85rem 1rem;font-size:0.85rem;color:#c4b5fd;margin-bottom:0.85rem"></div>
     <div class="error-box" id="as-error"></div>
 
+    <!-- ── Discovered Node Auto Approval ─────────────────────────────────── -->
+    <div style="background:#0f172a;border:1px solid #1e3a5f;border-radius:8px;padding:0.9rem 1rem;margin-bottom:1rem">
+      <label style="display:flex;gap:0.75rem;align-items:flex-start;cursor:pointer">
+        <input type="checkbox" id="auto-approve-csrs" checked style="margin-top:0.15rem;width:1rem;height:1rem;accent-color:#7c3aed;cursor:pointer;flex-shrink:0">
+        <span>
+          <strong style="color:#e2e8f0;font-size:0.9rem">Discovered Node Auto Approval</strong>
+          <span style="display:block;font-size:0.78rem;color:#64748b;margin-top:0.25rem;line-height:1.5">
+            OpenShift's built-in <code style="color:#93c5fd">cluster-machine-approver</code> only
+            auto-approves CSRs for first-party providers (AWS, Azure, GCP). On IONOS
+            (User-Provisioned Infrastructure) it cannot cross-reference new nodes against Machine
+            objects, so every new worker lands as
+            <em style="color:#93c5fd">Discovered · Approval required</em> and waits for manual CSR
+            approval before joining the cluster. When checked, this tool polls every 30 s and
+            approves any pending CSRs automatically.
+          </span>
+        </span>
+      </label>
+      <div id="auto-approve-status" style="margin-top:0.55rem;font-size:0.78rem;padding-left:1.75rem;display:none"></div>
+    </div>
+
     <div style="margin-top:1rem">
       <button class="btn" id="as-apply-btn" style="background:#4c1d95;color:#c4b5fd;font-weight:600;padding:0.7rem 1.5rem">
         <span id="as-apply-label">&#9889; Apply Autoscaling Configuration</span>
@@ -1933,9 +1953,12 @@
   let workerServerName = null;
   let workerMainVolId  = null;  // the permanent 120 GB boot SSD (not the ISO volume)
 
-  let pollInterval   = null;
-  let pollCount      = 0;
-  const POLL_MAX     = 12;
+  let pollInterval        = null;
+  let pollCount           = 0;
+  const POLL_MAX          = 12;
+
+  let autoApproveTimer      = null;
+  let autoApproveCumulative = 0;
 
   // ── Utilities ──────────────────────────────────────────────────────────────
   function escHtml(str) {
@@ -2152,6 +2175,8 @@
       switchNav(currentNav);
       // Auto-check provider status in the background
       checkProviderStatus();
+      // Start auto CSR approver if enabled
+      if (document.getElementById('auto-approve-csrs').checked) startAutoApprove();
       // Show the correct action card based on current radio selection
       applyScalingActionChoice();
       document.getElementById('add-node-card').classList.remove('hidden');
@@ -2165,6 +2190,7 @@
   // ── Disconnect ─────────────────────────────────────────────────────────────
   document.getElementById('disconnect-btn').addEventListener('click', () => {
     stopPolling();
+    stopAutoApprove();
     clusterApiUrl = ''; ocpToken = ''; ionosToken = ''; datacenterId = '';
     mgmtHost = ''; sshUser = 'root'; sshKey = ''; sshPassphrase = '';
     mgmtServerId = ''; workerServerId = null;
@@ -2468,6 +2494,51 @@
       const state = await apiPost('/api/refresh', { apiUrl: clusterApiUrl, ocpToken });
       renderAll(state);
     } catch (_) {}
+  }
+
+  // ── Auto CSR Approver ──────────────────────────────────────────────────────
+  async function autoApproveOnce() {
+    if (!clusterApiUrl || !ocpToken) return;
+    const statusEl = document.getElementById('auto-approve-status');
+    try {
+      const state   = await apiPost('/api/refresh', { apiUrl: clusterApiUrl, ocpToken });
+      const pending = state.pendingCsrs || [];
+      if (pending.length) {
+        const names = pending.map(c => c.name);
+        const data  = await apiPost('/api/approve-csrs', { apiUrl: clusterApiUrl, ocpToken, csrNames: names });
+        autoApproveCumulative += data.approved.length;
+        if (statusEl) {
+          statusEl.innerHTML = `&#10003; Approved ${data.approved.length} CSR(s) — ${autoApproveCumulative} total · ${new Date().toLocaleTimeString()}`;
+          statusEl.style.color = '#6ee7b7';
+        }
+        renderAll(state);
+      } else {
+        if (statusEl) {
+          statusEl.innerHTML = `&#8635; Watching — no pending CSRs · ${new Date().toLocaleTimeString()}`;
+          statusEl.style.color = '#64748b';
+        }
+      }
+    } catch (err) {
+      if (statusEl) {
+        statusEl.innerHTML = `&#9888; Error: ${escHtml(err.message)}`;
+        statusEl.style.color = '#fca5a5';
+      }
+    }
+  }
+
+  function startAutoApprove() {
+    stopAutoApprove();
+    autoApproveCumulative = 0;
+    const statusEl = document.getElementById('auto-approve-status');
+    if (statusEl) statusEl.style.display = '';
+    autoApproveOnce();
+    autoApproveTimer = setInterval(autoApproveOnce, 30000);
+  }
+
+  function stopAutoApprove() {
+    if (autoApproveTimer) { clearInterval(autoApproveTimer); autoApproveTimer = null; }
+    const statusEl = document.getElementById('auto-approve-status');
+    if (statusEl) { statusEl.style.display = 'none'; statusEl.textContent = ''; }
   }
 
   // ── CSR approval ───────────────────────────────────────────────────────────
@@ -3117,6 +3188,11 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
   // Show/hide registry fields when deploy-provider checkbox changes
   document.getElementById('as-deploy-provider').addEventListener('change', function () {
     document.getElementById('as-registry-fields').style.display = this.checked ? '' : 'none';
+  });
+
+  document.getElementById('auto-approve-csrs').addEventListener('change', function () {
+    if (this.checked && clusterApiUrl) startAutoApprove();
+    else stopAutoApprove();
   });
 
   // Update registry field labels/hints when registry type changes
