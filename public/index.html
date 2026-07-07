@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.1.16</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.1.17</span>
   </div>
 
   <div class="banner-actions">
@@ -3341,11 +3341,12 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
       if (!res.ok) { list.textContent = data.error || 'Error fetching images'; return; }
       if (!data.images || !data.images.length) { list.textContent = 'No RHCOS images found — use Upload RHCOS Image to add one.'; return; }
       list.innerHTML = data.images.map(img => `
-        <div style="padding:0.45rem 0.7rem;border-bottom:1px solid #1e2333;cursor:pointer;display:flex;justify-content:space-between;align-items:center"
+        <div style="padding:0.45rem 0.7rem;border-bottom:1px solid #1e2333;cursor:pointer;display:flex;align-items:center;gap:0.6rem"
              onclick="document.getElementById('as-ionos-image-id').value='${escHtml(img.id)}';
                       document.getElementById('as-ionos-images-panel').style.display='none'">
-          <span style="color:#e2e8f0">${escHtml(img.name)}</span>
-          <span style="color:#64748b;font-family:monospace;font-size:0.72rem">${escHtml(img.id)}</span>
+          <span style="color:#e2e8f0;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(img.name)}</span>
+          <span style="color:#60a5fa;background:#0f2035;border:1px solid #1e3a5f;border-radius:4px;padding:0.05rem 0.4rem;font-size:0.72rem;white-space:nowrap;flex-shrink:0">${escHtml(img.location)}</span>
+          <span style="color:#64748b;font-family:monospace;font-size:0.72rem;white-space:nowrap;flex-shrink:0">${escHtml(img.id)}</span>
         </div>`).join('');
     } catch (e) {
       list.textContent = 'Error: ' + e.message;
