@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.1.17</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.1.18</span>
   </div>
 
   <div class="banner-actions">
@@ -2008,9 +2008,44 @@
           </div>`;
       };
 
-      result.innerHTML =
+      let html =
         renderDeployment('ionos-machine-api-provider',  data.provider    || (data.found ? data : { found: false })) +
         renderDeployment('ionos-machine-auto-approver', data.autoApprover || { found: false });
+
+      // Surface any Machines not in Running phase (failed provisioning, stuck, etc.)
+      const failed = data.failedMachines || [];
+      if (failed.length > 0) {
+        const phaseColour = p => p === 'Failed' ? '#f87171' : p === 'Provisioning' ? '#fcd34d' : '#94a3b8';
+        const rows = failed.map(m => {
+          const errMsg = m.errorMessage
+            ? `<div style="color:#fca5a5;font-size:0.75rem;margin-top:0.25rem;font-family:monospace;word-break:break-word">${escHtml(m.errorMessage)}</div>`
+            : '';
+          const errReason = m.errorReason
+            ? `<span style="color:#f87171;font-size:0.72rem;margin-left:0.4rem">[${escHtml(m.errorReason)}]</span>`
+            : '';
+          const msLabel = m.machineSet
+            ? `<span style="color:#475569;font-size:0.72rem;margin-left:0.4rem">MachineSet: ${escHtml(m.machineSet)}</span>`
+            : '';
+          return `<div style="padding:0.5rem 0.75rem;border-bottom:1px solid #2d1a1a">
+            <div style="display:flex;align-items:center;gap:0.4rem;flex-wrap:wrap">
+              <code style="color:#e2e8f0;font-size:0.8rem">${escHtml(m.name)}</code>
+              <span style="color:${phaseColour(m.phase)};font-size:0.78rem;font-weight:600">${escHtml(m.phase)}</span>
+              ${errReason}${msLabel}
+            </div>
+            ${errMsg}
+          </div>`;
+        }).join('');
+        html += `
+          <div style="margin-top:0.6rem;border:1px solid #7f1d1d;border-radius:8px;overflow:hidden;background:#160808">
+            <div style="padding:0.45rem 0.75rem;background:#2d1a1a;display:flex;align-items:center;gap:0.5rem">
+              <span style="color:#f87171;font-weight:600;font-size:0.82rem">&#9888; Machine Provisioning Failures (${failed.length})</span>
+              <span style="color:#7f1d1d;font-size:0.75rem">— scale the MachineSet to 0 to stop retrying</span>
+            </div>
+            ${rows}
+          </div>`;
+      }
+
+      result.innerHTML = html;
 
     } catch (err) {
       result.innerHTML = `<div style="color:#f87171;font-size:0.82rem">Error: ${escHtml(err.message)}</div>`;

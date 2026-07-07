@@ -534,10 +534,26 @@ app.get('/api/provider-status', async (req, res) => {
   };
 
   try {
-    const [provider, autoApprover] = await Promise.all([
+    const [provider, autoApprover, machinesRaw] = await Promise.all([
       fetchDeployment('ionos-machine-api-provider'),
       fetchDeployment('ionos-machine-auto-approver'),
+      ocpGet(apiUrl, `/apis/machine.openshift.io/v1beta1/namespaces/${ns}/machines`, ocpToken).catch(() => null),
     ]);
+
+    // Machines that are NOT in Running phase — includes Failed, Provisioning-stuck, Deleting, etc.
+    const failedMachines = (machinesRaw?.items || [])
+      .filter(m => {
+        const phase = m.status?.phase;
+        return phase && phase !== 'Running';
+      })
+      .map(m => ({
+        name:         m.metadata.name,
+        phase:        m.status?.phase || 'Unknown',
+        errorReason:  m.status?.errorReason  || null,
+        errorMessage: m.status?.errorMessage || null,
+        machineSet:   (m.metadata.ownerReferences || []).find(r => r.kind === 'MachineSet')?.name || null,
+        creationTimestamp: m.metadata.creationTimestamp || null,
+      }));
 
     // Preserve backward-compat: top-level fields still reflect the provider
     const base = provider.found
@@ -545,7 +561,7 @@ app.get('/api/provider-status', async (req, res) => {
           available: provider.available, image: provider.image, pods: provider.pods }
       : { found: false };
 
-    res.json({ ...base, provider, autoApprover });
+    res.json({ ...base, provider, autoApprover, failedMachines });
   } catch (err) {
     res.status(502).json({ error: err.message });
   }
