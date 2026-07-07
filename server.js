@@ -552,6 +552,50 @@ app.get('/api/provider-status', async (req, res) => {
 });
 
 // ── Standalone install: deploy provider + auto-approver without full autoscaler setup
+// ── RBAC check for ionos-machine-api-provider ServiceAccount ─────────────────
+app.post('/api/check-provider-rbac', async (req, res) => {
+  const { clusterApiUrl, ocpToken } = req.body;
+  if (!clusterApiUrl || !ocpToken)
+    return res.status(400).json({ error: 'clusterApiUrl and ocpToken are required.' });
+
+  const hdrs = { 'Authorization': `Bearer ${ocpToken}`, 'Content-Type': 'application/json', 'Accept': 'application/json' };
+  const sarUrl = `${clusterApiUrl}/apis/authorization.k8s.io/v1/subjectaccessreviews`;
+
+  const check = async (verb, resource, group, subresource) => {
+    const rs = subresource ? `${resource}/${subresource}` : resource;
+    const body = {
+      apiVersion: 'authorization.k8s.io/v1', kind: 'SubjectAccessReview',
+      spec: {
+        user: 'system:serviceaccount:openshift-machine-api:ionos-machine-api-provider',
+        resourceAttributes: {
+          verb, namespace: 'openshift-machine-api',
+          group, resource, subresource: subresource || ''
+        }
+      }
+    };
+    const r = await fetch(sarUrl, { method: 'POST', headers: hdrs, body: JSON.stringify(body), agent: INSECURE_AGENT });
+    const d = await r.json();
+    return { allowed: d?.status?.allowed === true, verb, resource: rs, group };
+  };
+
+  try {
+    const checks = await Promise.all([
+      check('create',  'machines',              'machine.openshift.io'),
+      check('delete',  'machines',              'machine.openshift.io'),
+      check('patch',   'machines',              'machine.openshift.io'),
+      check('update',  'machinesets',           'machine.openshift.io'),
+      check('patch',   'machinesets', 'machine.openshift.io', 'status'),
+      check('patch',   'machinesets', 'machine.openshift.io', 'finalizers'),
+      check('get',     'secrets',               ''),
+      check('get',     'nodes',                 ''),
+    ]);
+    const missing = checks.filter(c => !c.allowed);
+    res.json({ ok: missing.length === 0, checks, missing });
+  } catch (err) {
+    res.json({ ok: false, error: err.message, checks: [], missing: [] });
+  }
+});
+
 app.post('/api/deploy-provider', async (req, res) => {
   const { clusterApiUrl, ocpToken,
           registryType, registryImage, registryUsername, registryPassword } = req.body;
@@ -584,9 +628,26 @@ app.post('/api/deploy-provider', async (req, res) => {
     return r.data;
   };
 
+  // Check if a deployment is already running (has ≥1 ready replica)
+  const isRunning = async (name) => {
+    const r = await ocpReq('GET', `${depBase}/${encodeURIComponent(name)}`, undefined);
+    if (!r.ok || r.status === 404) return false;
+    return (r.data?.status?.readyReplicas || 0) >= 1;
+  };
+
   const log = [];
   try {
+    const providerRunning  = await isRunning('ionos-machine-api-provider');
+    const approverRunning  = await isRunning('ionos-machine-auto-approver');
+
+    if (providerRunning && approverRunning) {
+      return res.json({ ok: true, log: ['Both components are already running — nothing to install.'] });
+    }
+
     // ── ionos-machine-api-provider ──────────────────────────────────────────
+    if (providerRunning) {
+      log.push('ionos-machine-api-provider is already running — skipping.');
+    } else {
     await ocpApply(saBase, 'ionos-machine-api-provider', {
       apiVersion: 'v1', kind: 'ServiceAccount',
       metadata: { name: 'ionos-machine-api-provider', namespace: ns }
@@ -597,14 +658,16 @@ app.post('/api/deploy-provider', async (req, res) => {
       apiVersion: 'rbac.authorization.k8s.io/v1', kind: 'ClusterRole',
       metadata: { name: 'ionos-machine-api-provider' },
       rules: [
-        { apiGroups: ['machine.openshift.io'], resources: ['machines'],            verbs: ['get','list','watch','patch','update'] },
-        { apiGroups: ['machine.openshift.io'], resources: ['machines/status'],     verbs: ['get','patch','update'] },
-        { apiGroups: ['machine.openshift.io'], resources: ['machines/finalizers'], verbs: ['patch','update'] },
-        { apiGroups: ['machine.openshift.io'], resources: ['machinesets'],         verbs: ['get','list','watch'] },
-        { apiGroups: [''],                     resources: ['secrets'],             verbs: ['get','list','watch'] },
-        { apiGroups: [''],                     resources: ['nodes'],               verbs: ['get','list','watch'] },
-        { apiGroups: ['coordination.k8s.io'],  resources: ['leases'],             verbs: ['get','list','watch','create','update','patch','delete'] },
-        { apiGroups: [''],                     resources: ['events'],              verbs: ['create','patch'] }
+        { apiGroups: ['machine.openshift.io'], resources: ['machines'],              verbs: ['get','list','watch','create','update','patch','delete'] },
+        { apiGroups: ['machine.openshift.io'], resources: ['machines/status'],       verbs: ['get','patch','update'] },
+        { apiGroups: ['machine.openshift.io'], resources: ['machines/finalizers'],   verbs: ['patch','update'] },
+        { apiGroups: ['machine.openshift.io'], resources: ['machinesets'],           verbs: ['get','list','watch','patch','update'] },
+        { apiGroups: ['machine.openshift.io'], resources: ['machinesets/status'],    verbs: ['get','patch','update'] },
+        { apiGroups: ['machine.openshift.io'], resources: ['machinesets/finalizers'],verbs: ['patch','update'] },
+        { apiGroups: [''],                     resources: ['secrets'],               verbs: ['get','list','watch'] },
+        { apiGroups: [''],                     resources: ['nodes'],                 verbs: ['get','list','watch'] },
+        { apiGroups: ['coordination.k8s.io'],  resources: ['leases'],               verbs: ['get','list','watch','create','update','patch','delete'] },
+        { apiGroups: [''],                     resources: ['events'],                verbs: ['create','patch'] }
       ]
     });
     log.push('ClusterRole "ionos-machine-api-provider" created/updated');
@@ -672,8 +735,12 @@ app.post('/api/deploy-provider', async (req, res) => {
               template: { metadata: { labels: { app: 'ionos-machine-api-provider' } }, spec: podSpec } }
     });
     log.push(`Deployment "ionos-machine-api-provider" created/updated (image: ${providerImage})`);
+    } // end else (providerRunning)
 
     // ── ionos-machine-auto-approver ─────────────────────────────────────────
+    if (approverRunning) {
+      log.push('ionos-machine-auto-approver is already running — skipping.');
+    } else {
     await ocpApply(saBase, 'ionos-machine-auto-approver', {
       apiVersion: 'v1', kind: 'ServiceAccount',
       metadata: { name: 'ionos-machine-auto-approver', namespace: ns }
@@ -742,6 +809,7 @@ app.post('/api/deploy-provider', async (req, res) => {
       }
     });
     log.push('Deployment "ionos-machine-auto-approver" created/updated (image: bitnami/kubectl:latest)');
+    } // end else (approverRunning)
 
     res.json({ ok: true, log });
   } catch (err) {
@@ -920,14 +988,16 @@ app.post('/api/setup-autoscaler', async (req, res) => {
         apiVersion: 'rbac.authorization.k8s.io/v1', kind: 'ClusterRole',
         metadata: { name: 'ionos-machine-api-provider' },
         rules: [
-          { apiGroups: ['machine.openshift.io'], resources: ['machines'],           verbs: ['get','list','watch','patch','update'] },
-          { apiGroups: ['machine.openshift.io'], resources: ['machines/status'],    verbs: ['get','patch','update'] },
-          { apiGroups: ['machine.openshift.io'], resources: ['machines/finalizers'],verbs: ['patch','update'] },
-          { apiGroups: ['machine.openshift.io'], resources: ['machinesets'],        verbs: ['get','list','watch'] },
-          { apiGroups: [''],                     resources: ['secrets'],            verbs: ['get','list','watch'] },
-          { apiGroups: [''],                     resources: ['nodes'],              verbs: ['get','list','watch'] },
-          { apiGroups: ['coordination.k8s.io'],  resources: ['leases'],            verbs: ['get','list','watch','create','update','patch','delete'] },
-          { apiGroups: [''],                     resources: ['events'],             verbs: ['create','patch'] }
+          { apiGroups: ['machine.openshift.io'], resources: ['machines'],               verbs: ['get','list','watch','create','update','patch','delete'] },
+          { apiGroups: ['machine.openshift.io'], resources: ['machines/status'],       verbs: ['get','patch','update'] },
+          { apiGroups: ['machine.openshift.io'], resources: ['machines/finalizers'],   verbs: ['patch','update'] },
+          { apiGroups: ['machine.openshift.io'], resources: ['machinesets'],           verbs: ['get','list','watch','patch','update'] },
+          { apiGroups: ['machine.openshift.io'], resources: ['machinesets/status'],    verbs: ['get','patch','update'] },
+          { apiGroups: ['machine.openshift.io'], resources: ['machinesets/finalizers'],verbs: ['patch','update'] },
+          { apiGroups: [''],                     resources: ['secrets'],               verbs: ['get','list','watch'] },
+          { apiGroups: [''],                     resources: ['nodes'],                 verbs: ['get','list','watch'] },
+          { apiGroups: ['coordination.k8s.io'],  resources: ['leases'],               verbs: ['get','list','watch','create','update','patch','delete'] },
+          { apiGroups: [''],                     resources: ['events'],                verbs: ['create','patch'] }
         ]
       };
       await ocpApply(crBase, 'ionos-machine-api-provider', cr);

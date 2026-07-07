@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.1.15</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.1.16</span>
   </div>
 
   <div class="banner-actions">
@@ -857,10 +857,17 @@
   <div class="card hidden" id="machine-api-status-card">
     <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.5rem;margin-bottom:0.75rem">
       <h2 style="margin:0">&#128268; Machine API Provider</h2>
-      <button id="check-provider-btn" onclick="checkProviderStatus()"
-        style="background:#1e3a5f;color:#93c5fd;border:1px solid #2563eb;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;cursor:pointer;display:flex;align-items:center;gap:0.4rem">
-        &#8635; Check
-      </button>
+      <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+        <button id="check-provider-rbac-btn" onclick="checkProviderRbac()"
+          style="background:#1a2a1a;color:#6ee7b7;border:1px solid #065f46;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;cursor:pointer;display:flex;align-items:center;gap:0.4rem">
+          <span id="check-provider-rbac-label">&#10003; RBAC Check</span>
+          <span class="spinner hidden" id="check-provider-rbac-spinner" style="border-top-color:#6ee7b7"></span>
+        </button>
+        <button id="check-provider-btn" onclick="checkProviderStatus()"
+          style="background:#1e3a5f;color:#93c5fd;border:1px solid #2563eb;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;cursor:pointer;display:flex;align-items:center;gap:0.4rem">
+          &#8635; Check
+        </button>
+      </div>
     </div>
     <p style="font-size:0.82rem;color:#64748b;margin:0 0 1rem">
       Verifies the <code style="color:#38bdf8">ionos-machine-api-provider</code> and
@@ -870,6 +877,7 @@
       automatically so new nodes join without manual intervention.
     </p>
     <div id="provider-status-result" style="font-size:0.85rem"></div>
+    <div id="provider-rbac-result" class="hidden" style="font-size:0.82rem;margin-top:0.75rem;border-radius:8px;padding:0.65rem 0.85rem"></div>
 
     <!-- Provider deployment toggle -->
     <div id="as-provider-deploy-group" style="margin-top:1rem;border:1px solid #1e3a5f;border-radius:8px;overflow:hidden">
@@ -1813,14 +1821,12 @@
     const spinner = document.getElementById('provider-install-spinner');
     const result  = document.getElementById('provider-install-result');
 
-    const clusterUrl = document.getElementById('as-cluster-url')?.value?.trim() || '';
-    const token      = document.getElementById('as-token')?.value?.trim() || '';
-    if (!clusterUrl || !token) {
+    if (!clusterApiUrl || !ocpToken) {
       result.className = 'visible';
       result.style.background = '#2d1a1a';
       result.style.color = '#f87171';
       result.style.border = '1px solid #7f1d1d';
-      result.textContent = 'Cluster API URL and token are required.';
+      result.textContent = 'Connect to a cluster first (Cluster Connection tab).';
       return;
     }
 
@@ -1832,8 +1838,8 @@
 
     try {
       const body = {
-        clusterApiUrl:    clusterUrl,
-        ocpToken:         token,
+        clusterApiUrl:    clusterApiUrl,
+        ocpToken:         ocpToken,
         registryType:     document.getElementById('as-registry-type')?.value || 'dockerhub',
         registryImage:    document.getElementById('as-registry-image')?.value?.trim() || '',
         registryUsername: document.getElementById('as-registry-user')?.value?.trim() || '',
@@ -1871,6 +1877,69 @@
     } finally {
       btn.disabled = false;
       label.textContent = '↙ Install';
+      spinner.classList.add('hidden');
+    }
+  }
+
+  // ── Machine API Provider RBAC check ────────────────────────────────────────
+  async function checkProviderRbac() {
+    const btn     = document.getElementById('check-provider-rbac-btn');
+    const label   = document.getElementById('check-provider-rbac-label');
+    const spinner = document.getElementById('check-provider-rbac-spinner');
+    const result  = document.getElementById('provider-rbac-result');
+
+    if (!clusterApiUrl || !ocpToken) {
+      result.className = 'visible';
+      result.style.background = '#2d1a1a';
+      result.style.color = '#f87171';
+      result.style.border = '1px solid #7f1d1d';
+      result.textContent = 'Connect to a cluster first (Cluster Connection tab).';
+      return;
+    }
+
+    btn.disabled = true;
+    label.textContent = 'Checking…';
+    spinner.classList.remove('hidden');
+    result.className = 'hidden';
+
+    try {
+      const data = await apiPost('/api/check-provider-rbac', { clusterApiUrl, ocpToken });
+
+      const rows = (data.checks || []).map(c => {
+        const ok = c.allowed;
+        const icon = ok ? '&#10003;' : '&#10007;';
+        const color = ok ? '#6ee7b7' : '#f87171';
+        return `<div style="display:flex;gap:0.5rem;align-items:baseline;margin:0.15rem 0">
+          <span style="color:${color};font-weight:700;width:1rem;flex-shrink:0">${icon}</span>
+          <span style="color:#94a3b8">${c.verb} <code style="color:#60a5fa">${c.resource}</code>${c.group ? ` <span style="color:#475569">(${c.group})</span>` : ''}</span>
+        </div>`;
+      }).join('');
+
+      if (data.ok) {
+        result.className = 'visible';
+        result.style.background = '#0d2a1a';
+        result.style.border = '1px solid #065f46';
+        result.innerHTML = `<div style="color:#6ee7b7;font-weight:600;margin-bottom:0.5rem">&#10003; All RBAC permissions OK</div>${rows}`;
+      } else if (data.error) {
+        result.className = 'visible';
+        result.style.background = '#2d1a1a';
+        result.style.border = '1px solid #7f1d1d';
+        result.innerHTML = `<div style="color:#f87171;font-weight:600">RBAC check failed: ${data.error}</div>`;
+      } else {
+        const missing = (data.missing || []).map(c => `${c.verb} ${c.resource}`).join(', ');
+        result.className = 'visible';
+        result.style.background = '#2d1500';
+        result.style.border = '1px solid #92400e';
+        result.innerHTML = `<div style="color:#fbbf24;font-weight:600;margin-bottom:0.5rem">&#9888; Missing permissions: ${missing}</div>${rows}`;
+      }
+    } catch (err) {
+      result.className = 'visible';
+      result.style.background = '#2d1a1a';
+      result.style.border = '1px solid #7f1d1d';
+      result.textContent = 'Request failed: ' + err.message;
+    } finally {
+      btn.disabled = false;
+      label.textContent = '✓ RBAC Check';
       spinner.classList.add('hidden');
     }
   }
