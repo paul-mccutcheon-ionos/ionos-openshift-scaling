@@ -551,6 +551,204 @@ app.get('/api/provider-status', async (req, res) => {
   }
 });
 
+// ── Standalone install: deploy provider + auto-approver without full autoscaler setup
+app.post('/api/deploy-provider', async (req, res) => {
+  const { clusterApiUrl, ocpToken,
+          registryType, registryImage, registryUsername, registryPassword } = req.body;
+  if (!clusterApiUrl || !ocpToken)
+    return res.status(400).json({ error: 'clusterApiUrl and ocpToken are required.' });
+
+  const ns      = 'openshift-machine-api';
+  const saBase  = `${clusterApiUrl}/api/v1/namespaces/${ns}/serviceaccounts`;
+  const crBase  = `${clusterApiUrl}/apis/rbac.authorization.k8s.io/v1/clusterroles`;
+  const crbBase = `${clusterApiUrl}/apis/rbac.authorization.k8s.io/v1/clusterrolebindings`;
+  const depBase = `${clusterApiUrl}/apis/apps/v1/namespaces/${ns}/deployments`;
+  const secBase = `${clusterApiUrl}/api/v1/namespaces/${ns}/secrets`;
+
+  const hdrs = { 'Authorization': `Bearer ${ocpToken}`, 'Content-Type': 'application/json', 'Accept': 'application/json' };
+  const ocpReq = async (method, url, body) => {
+    const opts = { method, headers: hdrs, agent: INSECURE_AGENT };
+    if (body !== undefined) opts.body = JSON.stringify(body);
+    const r = await fetch(url, opts);
+    let data; try { data = await r.json(); } catch (_) { data = {}; }
+    return { status: r.status, ok: r.ok, data };
+  };
+  const ocpApply = async (base, name, body) => {
+    let r = await ocpReq('POST', base, body);
+    if (r.status === 409) {
+      const ex = await ocpReq('GET', `${base}/${encodeURIComponent(name)}`, undefined);
+      body.metadata.resourceVersion = ex.data?.metadata?.resourceVersion;
+      r = await ocpReq('PUT', `${base}/${encodeURIComponent(name)}`, body);
+    }
+    if (!r.ok) throw new Error(`HTTP ${r.status}: ${r.data?.message || JSON.stringify(r.data)}`);
+    return r.data;
+  };
+
+  const log = [];
+  try {
+    // ── ionos-machine-api-provider ──────────────────────────────────────────
+    await ocpApply(saBase, 'ionos-machine-api-provider', {
+      apiVersion: 'v1', kind: 'ServiceAccount',
+      metadata: { name: 'ionos-machine-api-provider', namespace: ns }
+    });
+    log.push('ServiceAccount "ionos-machine-api-provider" created/updated');
+
+    await ocpApply(crBase, 'ionos-machine-api-provider', {
+      apiVersion: 'rbac.authorization.k8s.io/v1', kind: 'ClusterRole',
+      metadata: { name: 'ionos-machine-api-provider' },
+      rules: [
+        { apiGroups: ['machine.openshift.io'], resources: ['machines'],            verbs: ['get','list','watch','patch','update'] },
+        { apiGroups: ['machine.openshift.io'], resources: ['machines/status'],     verbs: ['get','patch','update'] },
+        { apiGroups: ['machine.openshift.io'], resources: ['machines/finalizers'], verbs: ['patch','update'] },
+        { apiGroups: ['machine.openshift.io'], resources: ['machinesets'],         verbs: ['get','list','watch'] },
+        { apiGroups: [''],                     resources: ['secrets'],             verbs: ['get','list','watch'] },
+        { apiGroups: [''],                     resources: ['nodes'],               verbs: ['get','list','watch'] },
+        { apiGroups: ['coordination.k8s.io'],  resources: ['leases'],             verbs: ['get','list','watch','create','update','patch','delete'] },
+        { apiGroups: [''],                     resources: ['events'],              verbs: ['create','patch'] }
+      ]
+    });
+    log.push('ClusterRole "ionos-machine-api-provider" created/updated');
+
+    await ocpApply(crbBase, 'ionos-machine-api-provider', {
+      apiVersion: 'rbac.authorization.k8s.io/v1', kind: 'ClusterRoleBinding',
+      metadata: { name: 'ionos-machine-api-provider' },
+      roleRef:  { apiGroup: 'rbac.authorization.k8s.io', kind: 'ClusterRole', name: 'ionos-machine-api-provider' },
+      subjects: [{ kind: 'ServiceAccount', name: 'ionos-machine-api-provider', namespace: ns }]
+    });
+    log.push('ClusterRoleBinding "ionos-machine-api-provider" created/updated');
+
+    const providerImage   = (registryImage && registryImage.trim()) || 'paulmcc50/myrepo:ionos-machine-api-provider';
+    const pullSecretName  = 'ionos-machine-api-provider-pullsecret';
+    let   hasPullSecret   = false;
+    if (registryUsername && registryPassword) {
+      const resolveHost = (type, img) => {
+        if (type === 'dockerhub') return 'https://index.docker.io/v1/';
+        if (type === 'ghcr')     return 'ghcr.io';
+        if (img) { const p = img.split('/'); if (p.length > 1 && p[0].includes('.')) return p[0]; }
+        return null;
+      };
+      const host = resolveHost(registryType, providerImage);
+      if (host) {
+        const auth = Buffer.from(`${registryUsername}:${registryPassword}`).toString('base64');
+        const cfg  = JSON.stringify({ auths: { [host]: { username: registryUsername, password: registryPassword, auth } } });
+        await ocpApply(secBase, pullSecretName, {
+          apiVersion: 'v1', kind: 'Secret',
+          metadata: { name: pullSecretName, namespace: ns },
+          type: 'kubernetes.io/dockerconfigjson',
+          data: { '.dockerconfigjson': Buffer.from(cfg).toString('base64') }
+        });
+        log.push(`ImagePullSecret "${pullSecretName}" created/updated`);
+        hasPullSecret = true;
+      }
+    }
+
+    const podSpec = {
+      serviceAccountName: 'ionos-machine-api-provider',
+      priorityClassName:  'system-cluster-critical',
+      nodeSelector: { 'node-role.kubernetes.io/master': '' },
+      tolerations: [
+        { key: 'node-role.kubernetes.io/master',    effect: 'NoSchedule' },
+        { key: 'node.kubernetes.io/not-ready',      effect: 'NoExecute', tolerationSeconds: 120 },
+        { key: 'node.kubernetes.io/unreachable',    effect: 'NoExecute', tolerationSeconds: 120 }
+      ],
+      containers: [{
+        name: 'manager', image: providerImage, imagePullPolicy: 'Always',
+        command: ['/manager'],
+        args:    ['--leader-elect=true', '--leader-election-namespace=openshift-machine-api', '--v=2'],
+        ports: [{ name: 'metrics', containerPort: 8080 }, { name: 'healthz', containerPort: 8081 }],
+        livenessProbe:  { httpGet: { path: '/healthz', port: 'healthz' }, initialDelaySeconds: 15, periodSeconds: 20 },
+        readinessProbe: { httpGet: { path: '/readyz',  port: 'healthz' }, initialDelaySeconds: 5,  periodSeconds: 10 },
+        resources: { requests: { cpu: '50m', memory: '64Mi' }, limits: { cpu: '200m', memory: '128Mi' } },
+        securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ['ALL'] } }
+      }],
+      securityContext: { runAsNonRoot: true, seccompProfile: { type: 'RuntimeDefault' } },
+      terminationGracePeriodSeconds: 10
+    };
+    if (hasPullSecret) podSpec.imagePullSecrets = [{ name: pullSecretName }];
+    await ocpApply(depBase, 'ionos-machine-api-provider', {
+      apiVersion: 'apps/v1', kind: 'Deployment',
+      metadata: { name: 'ionos-machine-api-provider', namespace: ns, labels: { app: 'ionos-machine-api-provider' } },
+      spec: { replicas: 1, selector: { matchLabels: { app: 'ionos-machine-api-provider' } },
+              template: { metadata: { labels: { app: 'ionos-machine-api-provider' } }, spec: podSpec } }
+    });
+    log.push(`Deployment "ionos-machine-api-provider" created/updated (image: ${providerImage})`);
+
+    // ── ionos-machine-auto-approver ─────────────────────────────────────────
+    await ocpApply(saBase, 'ionos-machine-auto-approver', {
+      apiVersion: 'v1', kind: 'ServiceAccount',
+      metadata: { name: 'ionos-machine-auto-approver', namespace: ns }
+    });
+    log.push('ServiceAccount "ionos-machine-auto-approver" created/updated');
+
+    await ocpApply(crBase, 'ionos-machine-auto-approver', {
+      apiVersion: 'rbac.authorization.k8s.io/v1', kind: 'ClusterRole',
+      metadata: { name: 'ionos-machine-auto-approver' },
+      rules: [
+        { apiGroups: ['certificates.k8s.io'], resources: ['certificatesigningrequests'],          verbs: ['get','list','watch'] },
+        { apiGroups: ['certificates.k8s.io'], resources: ['certificatesigningrequests/approval'], verbs: ['update','patch'] },
+        { apiGroups: ['certificates.k8s.io'], resources: ['signers'],
+          resourceNames: ['kubernetes.io/kube-apiserver-client-kubelet','kubernetes.io/kubelet-serving'],
+          verbs: ['approve'] }
+      ]
+    });
+    log.push('ClusterRole "ionos-machine-auto-approver" created/updated');
+
+    await ocpApply(crbBase, 'ionos-machine-auto-approver', {
+      apiVersion: 'rbac.authorization.k8s.io/v1', kind: 'ClusterRoleBinding',
+      metadata: { name: 'ionos-machine-auto-approver' },
+      roleRef:  { apiGroup: 'rbac.authorization.k8s.io', kind: 'ClusterRole', name: 'ionos-machine-auto-approver' },
+      subjects: [{ kind: 'ServiceAccount', name: 'ionos-machine-auto-approver', namespace: ns }]
+    });
+    log.push('ClusterRoleBinding "ionos-machine-auto-approver" created/updated');
+
+    const approverScript = [
+      'echo "ionos-machine-auto-approver started"',
+      'while true; do',
+      '  kubectl get csr --no-headers 2>/dev/null | while read name age signer requestor dur cond; do',
+      '    if [ "$cond" = "Pending" ]; then',
+      '      echo "Approving CSR: $name"',
+      '      kubectl certificate approve "$name" 2>&1 || true',
+      '    fi',
+      '  done',
+      '  sleep 30',
+      'done'
+    ].join('\n');
+    await ocpApply(depBase, 'ionos-machine-auto-approver', {
+      apiVersion: 'apps/v1', kind: 'Deployment',
+      metadata: { name: 'ionos-machine-auto-approver', namespace: ns, labels: { app: 'ionos-machine-auto-approver' } },
+      spec: {
+        replicas: 1, selector: { matchLabels: { app: 'ionos-machine-auto-approver' } },
+        template: {
+          metadata: { labels: { app: 'ionos-machine-auto-approver' } },
+          spec: {
+            serviceAccountName: 'ionos-machine-auto-approver',
+            priorityClassName:  'system-cluster-critical',
+            nodeSelector: { 'node-role.kubernetes.io/master': '' },
+            tolerations: [
+              { key: 'node-role.kubernetes.io/master',    effect: 'NoSchedule' },
+              { key: 'node.kubernetes.io/not-ready',      effect: 'NoExecute', tolerationSeconds: 120 },
+              { key: 'node.kubernetes.io/unreachable',    effect: 'NoExecute', tolerationSeconds: 120 }
+            ],
+            containers: [{
+              name: 'approver', image: 'bitnami/kubectl:latest', imagePullPolicy: 'Always',
+              command: ['/bin/sh', '-c'], args: [approverScript],
+              resources: { requests: { cpu: '10m', memory: '32Mi' }, limits: { cpu: '50m', memory: '64Mi' } },
+              securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'] } }
+            }],
+            securityContext: { runAsNonRoot: true, seccompProfile: { type: 'RuntimeDefault' } },
+            terminationGracePeriodSeconds: 10
+          }
+        }
+      }
+    });
+    log.push('Deployment "ionos-machine-auto-approver" created/updated (image: bitnami/kubectl:latest)');
+
+    res.json({ ok: true, log });
+  } catch (err) {
+    res.json({ ok: false, error: err.message, log });
+  }
+});
+
 app.post('/api/scale', async (req, res) => {
   if (!requireFields(res, req.body, ['apiUrl', 'ocpToken', 'machineSetName', 'desiredReplicas'])) return;
   const { apiUrl, ocpToken, machineSetName, desiredReplicas } = req.body;

@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.1.11</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.1.15</span>
   </div>
 
   <div class="banner-actions">
@@ -874,16 +874,25 @@
     <!-- Provider deployment toggle -->
     <div id="as-provider-deploy-group" style="margin-top:1rem;border:1px solid #1e3a5f;border-radius:8px;overflow:hidden">
       <div style="padding:0.7rem 0.9rem;background:#0f2035">
-        <label style="display:flex;align-items:center;gap:0.6rem;cursor:pointer;font-size:0.88rem;color:#93c5fd;font-weight:600">
-          <input type="checkbox" id="as-deploy-provider" style="accent-color:#3b82f6;width:15px;height:15px" />
-          Deploy IONOS Machine API provider to this cluster (first-time setup)
-        </label>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:0.75rem;flex-wrap:wrap">
+          <label style="display:flex;align-items:center;gap:0.6rem;cursor:pointer;font-size:0.88rem;color:#93c5fd;font-weight:600;flex:1;min-width:0">
+            <input type="checkbox" id="as-deploy-provider" style="accent-color:#3b82f6;width:15px;height:15px;flex-shrink:0" />
+            Deploy IONOS API Provider and Auto CSR Approver
+          </label>
+          <button id="provider-install-btn" onclick="installProvider()"
+            style="background:#1e3a5f;color:#93c5fd;border:1px solid #2563eb;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;cursor:pointer;display:flex;align-items:center;gap:0.4rem;white-space:nowrap;flex-shrink:0">
+            <span id="provider-install-label">&#8659; Install</span>
+            <span class="spinner hidden" id="provider-install-spinner" style="border-top-color:#93c5fd"></span>
+          </button>
+        </div>
         <p style="font-size:0.78rem;color:#4b7aab;margin:0.45rem 0 0 1.6rem">
           Deploys <code style="color:#60a5fa">ionos-machine-api-provider</code> and
           <code style="color:#60a5fa">ionos-machine-auto-approver</code> into
           <code style="color:#60a5fa">openshift-machine-api</code> (ServiceAccount, ClusterRole,
-          ClusterRoleBinding and Deployment for each). Skip this if both are already running.
+          ClusterRoleBinding and Deployment for each). The Install button applies both components
+          immediately — use it if either is missing from the cluster.
         </p>
+        <div id="provider-install-result" class="hidden" style="margin-top:0.6rem;margin-left:1.6rem;font-size:0.78rem;border-radius:6px;padding:0.5rem 0.75rem"></div>
       </div>
 
       <!-- Registry config — shown when deploy-provider is checked -->
@@ -1796,6 +1805,75 @@
       setLoading('get-token-label', 'get-token-spinner', 'get-token-btn', false, '&#128273; Get Token');
     }
   });
+
+  // ── Install both provider components immediately ───────────────────────────
+  async function installProvider() {
+    const btn     = document.getElementById('provider-install-btn');
+    const label   = document.getElementById('provider-install-label');
+    const spinner = document.getElementById('provider-install-spinner');
+    const result  = document.getElementById('provider-install-result');
+
+    const clusterUrl = document.getElementById('as-cluster-url')?.value?.trim() || '';
+    const token      = document.getElementById('as-token')?.value?.trim() || '';
+    if (!clusterUrl || !token) {
+      result.className = 'visible';
+      result.style.background = '#2d1a1a';
+      result.style.color = '#f87171';
+      result.style.border = '1px solid #7f1d1d';
+      result.textContent = 'Cluster API URL and token are required.';
+      return;
+    }
+
+    btn.disabled = true;
+    label.textContent = 'Installing…';
+    spinner.classList.remove('hidden');
+    result.className = 'hidden';
+    result.textContent = '';
+
+    try {
+      const body = {
+        clusterApiUrl:    clusterUrl,
+        ocpToken:         token,
+        registryType:     document.getElementById('as-registry-type')?.value || 'dockerhub',
+        registryImage:    document.getElementById('as-registry-image')?.value?.trim() || '',
+        registryUsername: document.getElementById('as-registry-user')?.value?.trim() || '',
+        registryPassword: document.getElementById('as-registry-pass')?.value?.trim() || ''
+      };
+      const resp = await fetch('/api/deploy-provider', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const data = await resp.json();
+      const lines = (data.log || []).join('\n');
+      if (data.ok) {
+        result.className = 'visible';
+        result.style.background = '#0d2a1a';
+        result.style.color = '#6ee7b7';
+        result.style.border = '1px solid #065f46';
+        result.style.whiteSpace = 'pre-wrap';
+        result.textContent = lines || 'Installed successfully.';
+        await checkProviderStatus();
+      } else {
+        result.className = 'visible';
+        result.style.background = '#2d1a1a';
+        result.style.color = '#f87171';
+        result.style.border = '1px solid #7f1d1d';
+        result.style.whiteSpace = 'pre-wrap';
+        result.textContent = (data.error || 'Install failed.') + (lines ? '\n\n' + lines : '');
+      }
+    } catch (err) {
+      result.className = 'visible';
+      result.style.background = '#2d1a1a';
+      result.style.color = '#f87171';
+      result.style.border = '1px solid #7f1d1d';
+      result.textContent = 'Request failed: ' + err.message;
+    } finally {
+      btn.disabled = false;
+      label.textContent = '↙ Install';
+      spinner.classList.add('hidden');
+    }
+  }
 
   // ── Machine API Provider status check ─────────────────────────────────────
   async function checkProviderStatus() {
