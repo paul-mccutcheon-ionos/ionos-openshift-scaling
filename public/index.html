@@ -863,9 +863,11 @@
       </button>
     </div>
     <p style="font-size:0.82rem;color:#64748b;margin:0 0 1rem">
-      Verifies the <code style="color:#38bdf8">ionos-machine-api-provider</code> Deployment in the
-      <code style="color:#38bdf8">openshift-machine-api</code> namespace is present and healthy.
-      This provider is required for the autoscaler to create IONOS Cloud VMs automatically.
+      Verifies the <code style="color:#38bdf8">ionos-machine-api-provider</code> and
+      <code style="color:#38bdf8">ionos-machine-auto-approver</code> Deployments in
+      <code style="color:#38bdf8">openshift-machine-api</code>. The provider manages IONOS Cloud VMs
+      for the autoscaler; the auto-approver watches for pending CSRs every 30 s and approves them
+      automatically so new nodes join without manual intervention.
     </p>
     <div id="provider-status-result" style="font-size:0.85rem"></div>
 
@@ -877,8 +879,10 @@
           Deploy IONOS Machine API provider to this cluster (first-time setup)
         </label>
         <p style="font-size:0.78rem;color:#4b7aab;margin:0.45rem 0 0 1.6rem">
-          Applies the ServiceAccount, ClusterRole, ClusterRoleBinding and Deployment into the
-          <code style="color:#60a5fa">openshift-machine-api</code> namespace. Skip this if the provider is already running.
+          Deploys <code style="color:#60a5fa">ionos-machine-api-provider</code> and
+          <code style="color:#60a5fa">ionos-machine-auto-approver</code> into
+          <code style="color:#60a5fa">openshift-machine-api</code> (ServiceAccount, ClusterRole,
+          ClusterRoleBinding and Deployment for each). Skip this if both are already running.
         </p>
       </div>
 
@@ -1287,8 +1291,9 @@
       <div class="iso-step" id="as-s1" data-status="pending"><span class="iso-step-icon">○</span><span>Fetch source MachineSet</span></div>
       <div class="iso-step hidden" id="as-s2" data-status="pending"><span class="iso-step-icon">○</span><span>Create cloned MachineSet</span></div>
       <!-- ionos steps -->
-      <div class="iso-step hidden" id="as-si0" data-status="pending"><span class="iso-step-icon">○</span><span>Deploy Machine API provider</span></div>
-      <div class="iso-step hidden" id="as-si1" data-status="pending"><span class="iso-step-icon">○</span><span>Create IONOS credentials Secret</span></div>
+      <div class="iso-step hidden" id="as-si0"  data-status="pending"><span class="iso-step-icon">○</span><span>Deploy Machine API provider</span></div>
+      <div class="iso-step hidden" id="as-si0b" data-status="pending"><span class="iso-step-icon">○</span><span>Deploy ionos-machine-auto-approver</span></div>
+      <div class="iso-step hidden" id="as-si1"  data-status="pending"><span class="iso-step-icon">○</span><span>Create IONOS credentials Secret</span></div>
       <div class="iso-step hidden" id="as-si2" data-status="pending"><span class="iso-step-icon">○</span><span>Verify worker-user-data Secret</span></div>
       <!-- Frankfurt diversity steps — shown only when Frankfurt create mode is active -->
       <div class="iso-step hidden" id="as-fra1" data-status="pending"><span class="iso-step-icon">○</span><span>Create secondary Frankfurt VDC</span></div>
@@ -1308,28 +1313,6 @@
     <!-- Done / error -->
     <div id="as-done" class="hidden" style="background:#2e1065;border:1px solid #7c3aed;border-radius:8px;padding:0.85rem 1rem;font-size:0.85rem;color:#c4b5fd;margin-bottom:0.85rem"></div>
     <div class="error-box" id="as-error"></div>
-
-    <!-- ── Discovered Node Auto Approval ─────────────────────────────────── -->
-    <div style="background:#0f172a;border:1px solid #1e3a5f;border-radius:8px;padding:0.9rem 1rem;margin-bottom:1rem">
-      <label style="display:flex;gap:0.75rem;align-items:flex-start;cursor:pointer">
-        <input type="checkbox" id="auto-approve-csrs" checked style="margin-top:0.15rem;width:1rem;height:1rem;accent-color:#7c3aed;cursor:pointer;flex-shrink:0">
-        <span>
-          <strong style="color:#e2e8f0;font-size:0.9rem">Discovered Node Auto Approval</strong>
-          <span style="display:block;font-size:0.78rem;color:#64748b;margin-top:0.25rem;line-height:1.5">
-            OpenShift's built-in <code style="color:#93c5fd">cluster-machine-approver</code> only
-            auto-approves CSRs for first-party providers (AWS, Azure, GCP). On IONOS
-            (User-Provisioned Infrastructure) it cannot cross-reference new nodes against Machine
-            objects, so every new worker lands as
-            <em style="color:#93c5fd">Discovered · Approval required</em> and waits for manual CSR
-            approval before joining the cluster. When checked, this tool polls every 30 s and
-            approves any pending CSRs automatically. Once a node has joined and its
-            <code style="color:#93c5fd">Node</code> object is registered, OpenShift handles
-            all future certificate renewals automatically — no further intervention needed.
-          </span>
-        </span>
-      </label>
-      <div id="auto-approve-status" style="margin-top:0.55rem;font-size:0.78rem;padding-left:1.75rem;display:none"></div>
-    </div>
 
     <div style="margin-top:1rem">
       <button class="btn" id="as-apply-btn" style="background:#4c1d95;color:#c4b5fd;font-weight:600;padding:0.7rem 1.5rem">
@@ -1830,59 +1813,60 @@
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || r.statusText);
 
-      if (!data.found) {
-        result.innerHTML = `
-          <div style="display:flex;align-items:flex-start;gap:0.75rem;padding:0.75rem 1rem;background:#1c0a0a;border:1px solid #7f1d1d;border-radius:8px">
-            <span style="font-size:1.3rem;line-height:1">&#10060;</span>
-            <div>
-              <div style="color:#fca5a5;font-weight:600;margin-bottom:0.25rem">Not installed</div>
-              <div style="color:#64748b;font-size:0.8rem">The <code style="color:#38bdf8">ionos-machine-api-provider</code> Deployment was not found in <code style="color:#38bdf8">openshift-machine-api</code>.<br>
-              Check <strong>Deploy IONOS Machine API provider</strong> below and run the autoscaler wizard to install it.</div>
+      const renderDeployment = (name, dep) => {
+        if (!dep || !dep.found) {
+          return `
+            <div style="display:flex;align-items:flex-start;gap:0.75rem;padding:0.65rem 0.9rem;background:#1c0a0a;border:1px solid #7f1d1d;border-radius:8px;margin-bottom:0.5rem">
+              <span style="font-size:1.1rem;line-height:1.2">&#10060;</span>
+              <div>
+                <code style="color:#38bdf8;font-size:0.82rem">${name}</code>
+                <span style="color:#fca5a5;font-size:0.82rem;margin-left:0.5rem">Not found</span>
+              </div>
+            </div>`;
+        }
+        const healthy      = dep.ready >= dep.desired && dep.desired > 0;
+        const statusColour = healthy ? '#22c55e' : '#f59e0b';
+        const statusIcon   = healthy ? '&#9989;' : '&#9888;&#65039;';
+        const statusLabel  = healthy ? 'Running' : `Degraded — ${dep.ready}/${dep.desired} ready`;
+        const bgColour     = healthy ? '#0a1c0a' : '#1c150a';
+        const borderColour = healthy ? '#14532d' : '#78350f';
+        const podRows = (dep.pods || []).map(p => {
+          const podReady    = p.ready ? '<span style="color:#22c55e">&#10003;</span>' : '<span style="color:#f59e0b">&#8722;</span>';
+          const phaseColour = p.phase === 'Running' ? '#86efac' : p.phase === 'Pending' ? '#fcd34d' : '#f87171';
+          return `<tr style="border-top:1px solid #1e293b">
+            <td style="padding:0.25rem 0.5rem">${podReady}</td>
+            <td style="padding:0.25rem 0.5rem;font-family:monospace;font-size:0.76rem;color:#e2e8f0">${escHtml(p.name)}</td>
+            <td style="padding:0.25rem 0.5rem;color:${phaseColour}">${p.phase}</td>
+            <td style="padding:0.25rem 0.5rem;color:#94a3b8">${p.restarts}</td>
+          </tr>`;
+        }).join('');
+        return `
+          <div style="padding:0.65rem 0.9rem;background:${bgColour};border:1px solid ${borderColour};border-radius:8px;margin-bottom:0.5rem">
+            <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:${dep.image ? '0.3rem' : '0'}">
+              <span style="font-size:1.1rem;line-height:1.2">${statusIcon}</span>
+              <code style="color:#38bdf8;font-size:0.82rem">${name}</code>
+              <span style="color:${statusColour};font-size:0.82rem">${statusLabel}</span>
             </div>
+            ${dep.image ? `<div style="font-size:0.75rem;color:#64748b;font-family:monospace;margin-bottom:${dep.pods?.length ? '0.4rem' : '0'}">Image: <span style="color:#94a3b8">${escHtml(dep.image)}</span></div>` : ''}
+            ${dep.pods?.length ? `
+            <table style="width:100%;border-collapse:collapse;font-size:0.8rem">
+              <thead><tr style="color:#4b5563;text-align:left;font-size:0.72rem;text-transform:uppercase;letter-spacing:0.05em">
+                <th style="padding:0.15rem 0.5rem;width:2rem"></th>
+                <th style="padding:0.15rem 0.5rem">Pod</th>
+                <th style="padding:0.15rem 0.5rem">Phase</th>
+                <th style="padding:0.15rem 0.5rem">Restarts</th>
+              </tr></thead>
+              <tbody>${podRows}</tbody>
+            </table>` : ''}
           </div>`;
-        return;
-      }
+      };
 
-      const healthy = data.ready >= data.desired && data.desired > 0;
-      const statusColour = healthy ? '#22c55e' : '#f59e0b';
-      const statusIcon   = healthy ? '&#9989;' : '&#9888;&#65039;';
-      const statusLabel  = healthy ? 'Running' : `Degraded — ${data.ready}/${data.desired} replicas ready`;
-      const bgColour     = healthy ? '#0a1c0a' : '#1c150a';
-      const borderColour = healthy ? '#14532d' : '#78350f';
+      result.innerHTML =
+        renderDeployment('ionos-machine-api-provider',  data.provider    || (data.found ? data : { found: false })) +
+        renderDeployment('ionos-machine-auto-approver', data.autoApprover || { found: false });
 
-      const podRows = data.pods.map(p => {
-        const podReady    = p.ready ? '<span style="color:#22c55e">&#10003;</span>' : '<span style="color:#f59e0b">&#8722;</span>';
-        const phaseColour = p.phase === 'Running' ? '#86efac' : p.phase === 'Pending' ? '#fcd34d' : '#f87171';
-        return `<tr style="border-top:1px solid #1e293b">
-          <td style="padding:0.3rem 0.6rem">${podReady}</td>
-          <td style="padding:0.3rem 0.6rem;font-family:monospace;font-size:0.78rem;color:#e2e8f0">${p.name}</td>
-          <td style="padding:0.3rem 0.6rem;color:${phaseColour}">${p.phase}</td>
-          <td style="padding:0.3rem 0.6rem;color:#94a3b8">${p.restarts}</td>
-        </tr>`;
-      }).join('');
-
-      result.innerHTML = `
-        <div style="padding:0.75rem 1rem;background:${bgColour};border:1px solid ${borderColour};border-radius:8px;margin-bottom:0.75rem">
-          <div style="display:flex;align-items:center;gap:0.6rem;margin-bottom:${data.image ? '0.4rem' : '0'}">
-            <span style="font-size:1.2rem;line-height:1">${statusIcon}</span>
-            <span style="color:${statusColour};font-weight:600">${statusLabel}</span>
-          </div>
-          ${data.image ? `<div style="font-size:0.78rem;color:#64748b;font-family:monospace">Image: <span style="color:#94a3b8">${data.image}</span></div>` : ''}
-        </div>
-        ${data.pods.length ? `
-        <table style="width:100%;border-collapse:collapse;font-size:0.82rem">
-          <thead>
-            <tr style="color:#4b5563;text-align:left;font-size:0.75rem;text-transform:uppercase;letter-spacing:0.05em">
-              <th style="padding:0.2rem 0.6rem;width:2rem"></th>
-              <th style="padding:0.2rem 0.6rem">Pod</th>
-              <th style="padding:0.2rem 0.6rem">Phase</th>
-              <th style="padding:0.2rem 0.6rem">Restarts</th>
-            </tr>
-          </thead>
-          <tbody>${podRows}</tbody>
-        </table>` : '<div style="color:#4b5563;font-size:0.8rem">No pods found.</div>'}`;
     } catch (err) {
-      result.innerHTML = `<div style="color:#f87171;font-size:0.82rem">Error: ${err.message}</div>`;
+      result.innerHTML = `<div style="color:#f87171;font-size:0.82rem">Error: ${escHtml(err.message)}</div>`;
     } finally {
       btn.disabled = false;
       btn.innerHTML = '&#8635; Check';
@@ -1955,12 +1939,9 @@
   let workerServerName = null;
   let workerMainVolId  = null;  // the permanent 120 GB boot SSD (not the ISO volume)
 
-  let pollInterval        = null;
-  let pollCount           = 0;
-  const POLL_MAX          = 12;
-
-  let autoApproveTimer      = null;
-  let autoApproveCumulative = 0;
+  let pollInterval = null;
+  let pollCount    = 0;
+  const POLL_MAX   = 12;
 
   // ── Utilities ──────────────────────────────────────────────────────────────
   function escHtml(str) {
@@ -2177,8 +2158,6 @@
       switchNav(currentNav);
       // Auto-check provider status in the background
       checkProviderStatus();
-      // Start auto CSR approver if enabled
-      if (document.getElementById('auto-approve-csrs').checked) startAutoApprove();
       // Show the correct action card based on current radio selection
       applyScalingActionChoice();
       document.getElementById('add-node-card').classList.remove('hidden');
@@ -2192,7 +2171,6 @@
   // ── Disconnect ─────────────────────────────────────────────────────────────
   document.getElementById('disconnect-btn').addEventListener('click', () => {
     stopPolling();
-    stopAutoApprove();
     clusterApiUrl = ''; ocpToken = ''; ionosToken = ''; datacenterId = '';
     mgmtHost = ''; sshUser = 'root'; sshKey = ''; sshPassphrase = '';
     mgmtServerId = ''; workerServerId = null;
@@ -2496,51 +2474,6 @@
       const state = await apiPost('/api/refresh', { apiUrl: clusterApiUrl, ocpToken });
       renderAll(state);
     } catch (_) {}
-  }
-
-  // ── Auto CSR Approver ──────────────────────────────────────────────────────
-  async function autoApproveOnce() {
-    if (!clusterApiUrl || !ocpToken) return;
-    const statusEl = document.getElementById('auto-approve-status');
-    try {
-      const state   = await apiPost('/api/refresh', { apiUrl: clusterApiUrl, ocpToken });
-      const pending = state.pendingCsrs || [];
-      if (pending.length) {
-        const names = pending.map(c => c.name);
-        const data  = await apiPost('/api/approve-csrs', { apiUrl: clusterApiUrl, ocpToken, csrNames: names });
-        autoApproveCumulative += data.approved.length;
-        if (statusEl) {
-          statusEl.innerHTML = `&#10003; Approved ${data.approved.length} CSR(s) — ${autoApproveCumulative} total · ${new Date().toLocaleTimeString()}`;
-          statusEl.style.color = '#6ee7b7';
-        }
-        renderAll(state);
-      } else {
-        if (statusEl) {
-          statusEl.innerHTML = `&#8635; Watching — no pending CSRs · ${new Date().toLocaleTimeString()}`;
-          statusEl.style.color = '#64748b';
-        }
-      }
-    } catch (err) {
-      if (statusEl) {
-        statusEl.innerHTML = `&#9888; Error: ${escHtml(err.message)}`;
-        statusEl.style.color = '#fca5a5';
-      }
-    }
-  }
-
-  function startAutoApprove() {
-    stopAutoApprove();
-    autoApproveCumulative = 0;
-    const statusEl = document.getElementById('auto-approve-status');
-    if (statusEl) statusEl.style.display = '';
-    autoApproveOnce();
-    autoApproveTimer = setInterval(autoApproveOnce, 30000);
-  }
-
-  function stopAutoApprove() {
-    if (autoApproveTimer) { clearInterval(autoApproveTimer); autoApproveTimer = null; }
-    const statusEl = document.getElementById('auto-approve-status');
-    if (statusEl) { statusEl.style.display = 'none'; statusEl.textContent = ''; }
   }
 
   // ── CSR approval ───────────────────────────────────────────────────────────
@@ -3033,7 +2966,7 @@
   );
 
   // ── Auto-Scaling ───────────────────────────────────────────────────────────
-  const AS_ALL_STEP_IDS = ['as-s1','as-s2','as-si0','as-si1','as-si2','as-si3','as-s3','as-s4'];
+  const AS_ALL_STEP_IDS = ['as-s1','as-s2','as-si0','as-si0b','as-si1','as-si2','as-si3','as-s3','as-s4'];
   let asStepIdx = 0;
   let asActiveStepIds = [];
 
@@ -3066,6 +2999,9 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     // Step visibility
     document.getElementById('as-s1').classList.toggle('hidden', !isClone);
     document.getElementById('as-s2').classList.toggle('hidden', !isClone);
+    const deployProv = document.getElementById('as-deploy-provider')?.checked;
+    document.getElementById('as-si0').classList.toggle('hidden',  !(isIonos && deployProv));
+    document.getElementById('as-si0b').classList.toggle('hidden', !(isIonos && deployProv));
     document.getElementById('as-si1').classList.toggle('hidden', !isIonos);
     document.getElementById('as-si2').classList.toggle('hidden', !isIonos);
     document.getElementById('as-si3').classList.toggle('hidden', !isIonos);
@@ -3190,11 +3126,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
   // Show/hide registry fields when deploy-provider checkbox changes
   document.getElementById('as-deploy-provider').addEventListener('change', function () {
     document.getElementById('as-registry-fields').style.display = this.checked ? '' : 'none';
-  });
-
-  document.getElementById('auto-approve-csrs').addEventListener('change', function () {
-    if (this.checked && clusterApiUrl) startAutoApprove();
-    else stopAutoApprove();
+    applyAsModeVisibility();
   });
 
   // Update registry field labels/hints when registry type changes
@@ -3480,7 +3412,10 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     // Set step visibility for this run
     document.getElementById('as-s1').classList.toggle('hidden', !isClone);
     document.getElementById('as-s2').classList.toggle('hidden', !isClone);
-    if (deployProvider) document.getElementById('as-si0').classList.remove('hidden');
+    if (deployProvider) {
+      document.getElementById('as-si0').classList.remove('hidden');
+      document.getElementById('as-si0b').classList.remove('hidden');
+    }
     document.getElementById('as-si1').classList.toggle('hidden', !isIonos);
     document.getElementById('as-si2').classList.toggle('hidden', !isIonos);
     document.getElementById('as-si3').classList.toggle('hidden', !isIonos);
@@ -3498,7 +3433,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
       : ['as-si3'];
     asActiveStepIds = isClone ? ['as-s1','as-s2','as-s3','as-s4']
                    : isIonos ? [
-                       ...(deployProvider ? ['as-si0'] : []),
+                       ...(deployProvider ? ['as-si0','as-si0b'] : []),
                        'as-si1','as-si2',
                        ...fraSteps,
                        'as-s3','as-s4'

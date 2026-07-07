@@ -501,40 +501,51 @@ app.get('/api/provider-status', async (req, res) => {
   const { apiUrl, ocpToken } = req.query;
   if (!apiUrl || !ocpToken) return res.status(400).json({ error: 'apiUrl and ocpToken are required' });
 
-  const ns      = 'openshift-machine-api';
-  const depName = 'ionos-machine-api-provider';
+  const ns = 'openshift-machine-api';
 
-  try {
-    let deployment = null;
+  const fetchDeployment = async (name) => {
+    let dep = null;
     try {
-      deployment = await ocpGet(apiUrl, `/apis/apps/v1/namespaces/${ns}/deployments/${depName}`, ocpToken);
+      dep = await ocpGet(apiUrl, `/apis/apps/v1/namespaces/${ns}/deployments/${name}`, ocpToken);
     } catch (e) {
       if (e.status !== 404) throw e;
-      // 404 → not installed
     }
-
-    if (!deployment) return res.json({ found: false });
+    if (!dep) return { found: false };
 
     const pods = await ocpGet(
       apiUrl,
-      `/api/v1/namespaces/${ns}/pods?labelSelector=app%3D${encodeURIComponent(depName)}`,
+      `/api/v1/namespaces/${ns}/pods?labelSelector=app%3D${encodeURIComponent(name)}`,
       ocpToken
     );
+    return {
+      found:     true,
+      desired:   dep.spec?.replicas ?? 1,
+      ready:     dep.status?.readyReplicas     || 0,
+      available: dep.status?.availableReplicas || 0,
+      image:     dep.spec?.template?.spec?.containers?.[0]?.image || '',
+      pods: (pods.items || []).map(p => ({
+        name:     p.metadata.name,
+        phase:    p.status?.phase || 'Unknown',
+        ready:    (p.status?.conditions || []).some(c => c.type === 'Ready' && c.status === 'True'),
+        image:    p.spec?.containers?.[0]?.image || '',
+        restarts: p.status?.containerStatuses?.[0]?.restartCount || 0,
+      }))
+    };
+  };
 
-    const desired   = deployment.spec?.replicas ?? 1;
-    const ready     = deployment.status?.readyReplicas     || 0;
-    const available = deployment.status?.availableReplicas || 0;
-    const image     = deployment.spec?.template?.spec?.containers?.[0]?.image || '';
+  try {
+    const [provider, autoApprover] = await Promise.all([
+      fetchDeployment('ionos-machine-api-provider'),
+      fetchDeployment('ionos-machine-auto-approver'),
+    ]);
 
-    const podList = (pods.items || []).map(p => ({
-      name:     p.metadata.name,
-      phase:    p.status?.phase || 'Unknown',
-      ready:    (p.status?.conditions || []).some(c => c.type === 'Ready' && c.status === 'True'),
-      image:    p.spec?.containers?.[0]?.image || '',
-      restarts: p.status?.containerStatuses?.[0]?.restartCount || 0,
-    }));
+    // Preserve backward-compat: top-level fields still reflect the provider
+    const base = provider.found
+      ? { found: true, desired: provider.desired, ready: provider.ready,
+          available: provider.available, image: provider.image, pods: provider.pods }
+      : { found: false };
 
-    res.json({ found: true, desired, ready, available, image, pods: podList });
+    res.json({ ...base, provider, autoApprover });
   } catch (err) {
     res.status(502).json({ error: err.message });
   }
@@ -801,6 +812,99 @@ app.post('/api/setup-autoscaler', async (req, res) => {
       await ocpApply(depBase, 'ionos-machine-api-provider', dep);
       log(`Deployment "ionos-machine-api-provider" created/updated (image: ${providerImage})\n`);
       step('IONOS Machine API provider deployed', 'ok');
+
+      // ── Step 0b: Deploy ionos-machine-auto-approver ─────────────────────────
+      step('Deploying ionos-machine-auto-approver…', 'working');
+
+      const aaSa = {
+        apiVersion: 'v1', kind: 'ServiceAccount',
+        metadata: { name: 'ionos-machine-auto-approver', namespace: 'openshift-machine-api' }
+      };
+      await ocpApply(saBase, 'ionos-machine-auto-approver', aaSa);
+      log('ServiceAccount "ionos-machine-auto-approver" created/updated\n');
+
+      const aaCr = {
+        apiVersion: 'rbac.authorization.k8s.io/v1', kind: 'ClusterRole',
+        metadata: { name: 'ionos-machine-auto-approver' },
+        rules: [
+          { apiGroups: ['certificates.k8s.io'], resources: ['certificatesigningrequests'],          verbs: ['get','list','watch'] },
+          { apiGroups: ['certificates.k8s.io'], resources: ['certificatesigningrequests/approval'], verbs: ['update','patch'] },
+          { apiGroups: ['certificates.k8s.io'], resources: ['signers'],
+            resourceNames: ['kubernetes.io/kube-apiserver-client-kubelet','kubernetes.io/kubelet-serving'],
+            verbs: ['approve'] }
+        ]
+      };
+      await ocpApply(crBase, 'ionos-machine-auto-approver', aaCr);
+      log('ClusterRole "ionos-machine-auto-approver" created/updated\n');
+
+      const aaCrb = {
+        apiVersion: 'rbac.authorization.k8s.io/v1', kind: 'ClusterRoleBinding',
+        metadata: { name: 'ionos-machine-auto-approver' },
+        roleRef:  { apiGroup: 'rbac.authorization.k8s.io', kind: 'ClusterRole', name: 'ionos-machine-auto-approver' },
+        subjects: [{ kind: 'ServiceAccount', name: 'ionos-machine-auto-approver', namespace: 'openshift-machine-api' }]
+      };
+      await ocpApply(crbBase, 'ionos-machine-auto-approver', aaCrb);
+      log('ClusterRoleBinding "ionos-machine-auto-approver" created/updated\n');
+
+      // Shell loop: list CSRs, approve any in Pending state, sleep 30s
+      const approverScript = [
+        'echo "ionos-machine-auto-approver started"',
+        'while true; do',
+        '  kubectl get csr --no-headers 2>/dev/null | while read name age signer requestor dur cond; do',
+        '    if [ "$cond" = "Pending" ]; then',
+        '      echo "Approving CSR: $name"',
+        '      kubectl certificate approve "$name" 2>&1 || true',
+        '    fi',
+        '  done',
+        '  sleep 30',
+        'done'
+      ].join('\n');
+
+      const aaDep = {
+        apiVersion: 'apps/v1', kind: 'Deployment',
+        metadata: { name: 'ionos-machine-auto-approver', namespace: 'openshift-machine-api',
+                    labels: { app: 'ionos-machine-auto-approver' } },
+        spec: {
+          replicas: 1,
+          selector: { matchLabels: { app: 'ionos-machine-auto-approver' } },
+          template: {
+            metadata: { labels: { app: 'ionos-machine-auto-approver' } },
+            spec: {
+              serviceAccountName: 'ionos-machine-auto-approver',
+              priorityClassName:  'system-cluster-critical',
+              nodeSelector: { 'node-role.kubernetes.io/master': '' },
+              tolerations: [
+                { key: 'node-role.kubernetes.io/master',    effect: 'NoSchedule' },
+                { key: 'node.kubernetes.io/not-ready',      effect: 'NoExecute', tolerationSeconds: 120 },
+                { key: 'node.kubernetes.io/unreachable',    effect: 'NoExecute', tolerationSeconds: 120 }
+              ],
+              containers: [{
+                name:            'approver',
+                image:           'bitnami/kubectl:latest',
+                imagePullPolicy: 'Always',
+                command:         ['/bin/sh', '-c'],
+                args:            [approverScript],
+                resources: {
+                  requests: { cpu: '10m', memory: '32Mi' },
+                  limits:   { cpu: '50m', memory: '64Mi' }
+                },
+                securityContext: {
+                  allowPrivilegeEscalation: false,
+                  capabilities: { drop: ['ALL'] }
+                }
+              }],
+              securityContext: {
+                runAsNonRoot:   true,
+                seccompProfile: { type: 'RuntimeDefault' }
+              },
+              terminationGracePeriodSeconds: 10
+            }
+          }
+        }
+      };
+      await ocpApply(depBase, 'ionos-machine-auto-approver', aaDep);
+      log('Deployment "ionos-machine-auto-approver" created/updated (image: bitnami/kubectl:latest)\n');
+      step('ionos-machine-auto-approver deployed', 'ok');
     }
 
     // ── Step 1: IONOS credentials secret ─────────────────────────────────────
