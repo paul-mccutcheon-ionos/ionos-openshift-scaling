@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.1.18</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.1.19</span>
   </div>
 
   <div class="banner-actions">
@@ -556,6 +556,10 @@
     <div class="nav-item" data-section="autoscaling">
       <span class="nav-item-icon">&#9889;</span>
       Machine Autoscaling Management
+    </div>
+    <div class="nav-item" data-section="healthchecks">
+      <span class="nav-item-icon">&#129657;</span>
+      Machine Health Checks
     </div>
   </nav>
 
@@ -1607,6 +1611,138 @@
     <div class="error-box" id="csrs-error"></div>
   </div>
 
+  <!-- ══════════════════════════════════════════════════════════════════════
+       Machine Health Checks section
+       ══════════════════════════════════════════════════════════════════════ -->
+
+  <div id="healthchecks-connect-hint" style="display:none;text-align:center;padding:3rem 1rem;color:#4b5563;font-size:0.9rem">
+    <div style="font-size:2rem;margin-bottom:0.75rem">&#128279;</div>
+    Connect to your cluster first using the <strong style="color:#60a5fa">Cluster Connection</strong> tab.
+  </div>
+
+  <!-- ── Card: Existing Health Checks ──────────────────────────────────────── -->
+  <div class="card hidden" id="mhc-list-card">
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.75rem;margin-bottom:1rem">
+      <h2 style="margin:0">&#129657; Machine Health Checks</h2>
+      <button id="mhc-refresh-btn" onclick="loadMhcList()" style="background:#0f2035;color:#60a5fa;border:1px solid #1e3a5f;border-radius:6px;padding:0.4rem 0.9rem;font-size:0.82rem;cursor:pointer;display:flex;align-items:center;gap:0.4rem">
+        <span id="mhc-refresh-label">&#8635; Refresh</span>
+        <span class="spinner hidden" id="mhc-refresh-spinner" style="border-top-color:#60a5fa"></span>
+      </button>
+    </div>
+    <p style="font-size:0.85rem;color:#94a3b8;margin-bottom:1.25rem;line-height:1.6">
+      A MachineHealthCheck automatically detects and remediates unhealthy nodes. When a node's
+      <code style="background:#1e2333;padding:0.1rem 0.35rem;border-radius:3px;font-size:0.82rem">Ready</code> condition
+      stays <code style="background:#1e2333;padding:0.1rem 0.35rem;border-radius:3px;font-size:0.82rem">False</code> or
+      <code style="background:#1e2333;padding:0.1rem 0.35rem;border-radius:3px;font-size:0.82rem">Unknown</code> beyond the
+      timeout, the underlying Machine is deleted so the MachineSet can provision a fresh replacement.
+      The <strong style="color:#e2e8f0">maxUnhealthy</strong> threshold acts as a safety circuit-breaker — if a large-scale
+      outage takes down more than that percentage simultaneously, remediation pauses to prevent cascading deletions of
+      remaining healthy infrastructure.
+    </p>
+    <div id="mhc-list-content">
+      <div style="color:#64748b;font-size:0.85rem;padding:1.5rem 0;text-align:center">Click Refresh to load health checks from the cluster.</div>
+    </div>
+    <div class="error-box hidden" id="mhc-list-error"></div>
+  </div>
+
+  <!-- ── Card: Create / Edit Health Check ──────────────────────────────────── -->
+  <div class="card hidden" id="mhc-create-card">
+    <h2 style="margin-bottom:0.25rem">&#9998; Create / Edit Health Check</h2>
+    <p style="font-size:0.85rem;color:#94a3b8;margin-bottom:1.25rem">Define a new MachineHealthCheck or overwrite an existing one by using the same name.</p>
+
+    <!-- Template picker -->
+    <div style="margin-bottom:1.25rem">
+      <label style="display:block;font-size:0.8rem;color:#94a3b8;margin-bottom:0.4rem">Quick-fill from template</label>
+      <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+        <button onclick="mhcApplyTemplate('worker')" style="background:#0f2035;color:#60a5fa;border:1px solid #1e3a5f;border-radius:6px;padding:0.4rem 0.9rem;font-size:0.82rem;cursor:pointer">
+          &#128736; Standard Worker
+        </button>
+        <button onclick="mhcApplyTemplate('fast')" style="background:#0f2035;color:#a78bfa;border:1px solid #312e5e;border-radius:6px;padding:0.4rem 0.9rem;font-size:0.82rem;cursor:pointer">
+          &#9889; Fast Detection (60s)
+        </button>
+        <button onclick="mhcApplyTemplate('conservative')" style="background:#0f2035;color:#6ee7b7;border:1px solid #065f46;border-radius:6px;padding:0.4rem 0.9rem;font-size:0.82rem;cursor:pointer">
+          &#128737; Conservative (10m)
+        </button>
+      </div>
+    </div>
+
+    <!-- Name -->
+    <div style="margin-bottom:1rem">
+      <label style="display:block;font-size:0.8rem;color:#94a3b8;margin-bottom:0.35rem">Name <span style="color:#f87171">*</span></label>
+      <input type="text" id="mhc-name" placeholder="e.g. worker-healthcheck"
+        style="width:100%;max-width:400px;background:#0f1117;border:1px solid #2d3348;border-radius:6px;padding:0.5rem 0.75rem;color:#e2e8f0;font-size:0.88rem;font-family:'Courier New',monospace" />
+    </div>
+
+    <!-- Selector -->
+    <div style="margin-bottom:1rem">
+      <label style="display:block;font-size:0.8rem;color:#94a3b8;margin-bottom:0.35rem">Target selector</label>
+      <div style="display:flex;gap:0.75rem;align-items:center;flex-wrap:wrap;margin-bottom:0.5rem">
+        <select id="mhc-selector-type" onchange="mhcSelectorTypeChanged()" style="background:#0f1117;border:1px solid #2d3348;border-radius:6px;padding:0.45rem 0.65rem;color:#e2e8f0;font-size:0.85rem">
+          <option value="worker-role">All worker nodes (role: worker)</option>
+          <option value="infra-role">All infra nodes (role: infra)</option>
+          <option value="custom">Custom label selector</option>
+        </select>
+      </div>
+      <div id="mhc-selector-custom" style="display:none">
+        <label style="display:block;font-size:0.78rem;color:#64748b;margin-bottom:0.3rem">Custom matchLabels (one <code style="background:#1e2333;padding:0.05rem 0.3rem;border-radius:3px">key=value</code> per line)</label>
+        <textarea id="mhc-selector-labels" rows="3" placeholder="machine.openshift.io/cluster-api-machineset=my-machineset"
+          style="width:100%;background:#0f1117;border:1px solid #2d3348;border-radius:6px;padding:0.5rem 0.75rem;color:#e2e8f0;font-size:0.82rem;font-family:'Courier New',monospace;resize:vertical"></textarea>
+      </div>
+    </div>
+
+    <!-- Unhealthy conditions -->
+    <div style="margin-bottom:1rem">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem">
+        <label style="font-size:0.8rem;color:#94a3b8">Unhealthy conditions</label>
+        <button onclick="mhcAddCondition()" style="background:#0f2035;color:#60a5fa;border:1px solid #1e3a5f;border-radius:6px;padding:0.25rem 0.65rem;font-size:0.78rem;cursor:pointer">+ Add</button>
+      </div>
+      <div style="background:#0c1220;border:1px solid #1e2d3d;border-radius:8px;overflow:hidden">
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:0;padding:0.4rem 0.75rem;background:#0f1829;border-bottom:1px solid #1e2d3d">
+          <span style="font-size:0.75rem;color:#64748b;font-weight:600">TYPE</span>
+          <span style="font-size:0.75rem;color:#64748b;font-weight:600">STATUS</span>
+          <span style="font-size:0.75rem;color:#64748b;font-weight:600">TIMEOUT</span>
+          <span></span>
+        </div>
+        <div id="mhc-conditions-rows"></div>
+      </div>
+      <p style="font-size:0.77rem;color:#4b5563;margin-top:0.4rem;line-height:1.5">
+        If a node's <strong style="color:#94a3b8">Ready</strong> condition stays <strong style="color:#94a3b8">False</strong> (node reports a problem) or
+        <strong style="color:#94a3b8">Unknown</strong> (network isolation / kernel panic, kubelet unreachable) beyond the timeout, remediation triggers.
+      </p>
+    </div>
+
+    <!-- maxUnhealthy + nodeStartupTimeout -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1.25rem;max-width:520px">
+      <div>
+        <label style="display:block;font-size:0.8rem;color:#94a3b8;margin-bottom:0.35rem">maxUnhealthy</label>
+        <input type="text" id="mhc-max-unhealthy" placeholder="40%"
+          style="width:100%;background:#0f1117;border:1px solid #2d3348;border-radius:6px;padding:0.5rem 0.75rem;color:#e2e8f0;font-size:0.88rem;font-family:'Courier New',monospace" />
+        <p style="font-size:0.75rem;color:#4b5563;margin-top:0.3rem;line-height:1.4">
+          Safety circuit-breaker. If more than this fraction are unhealthy at once, remediation pauses to avoid cascading deletions.
+          Use a percentage (<code style="background:#1e2333;padding:0.05rem 0.3rem;border-radius:3px">40%</code>) or absolute count (<code style="background:#1e2333;padding:0.05rem 0.3rem;border-radius:3px">2</code>).
+        </p>
+      </div>
+      <div>
+        <label style="display:block;font-size:0.8rem;color:#94a3b8;margin-bottom:0.35rem">nodeStartupTimeout</label>
+        <input type="text" id="mhc-startup-timeout" placeholder="10m"
+          style="width:100%;background:#0f1117;border:1px solid #2d3348;border-radius:6px;padding:0.5rem 0.75rem;color:#e2e8f0;font-size:0.88rem;font-family:'Courier New',monospace" />
+        <p style="font-size:0.75rem;color:#4b5563;margin-top:0.3rem;line-height:1.4">
+          Grace period for new nodes joining the cluster. Health checking is suspended until this time has elapsed after node creation.
+        </p>
+      </div>
+    </div>
+
+    <!-- Apply button -->
+    <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap">
+      <button id="mhc-apply-btn" onclick="applyMhc()" style="background:#1a3a5c;color:#93c5fd;border:1px solid #1e3a5f;border-radius:6px;padding:0.5rem 1.2rem;font-size:0.88rem;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:0.5rem">
+        <span id="mhc-apply-label">&#10003; Apply Health Check</span>
+        <span class="spinner hidden" id="mhc-apply-spinner" style="border-top-color:#93c5fd"></span>
+      </button>
+    </div>
+    <div id="mhc-apply-result" class="hidden" style="margin-top:0.75rem;padding:0.6rem 0.9rem;border-radius:6px;font-size:0.85rem"></div>
+    <div class="error-box hidden" id="mhc-apply-error"></div>
+  </div>
+
   </div><!-- /container -->
   </main><!-- /main-content -->
 </div><!-- /app-layout -->
@@ -1648,7 +1784,8 @@
   const NAV_GROUPS = {
     connection:  ['connect-card', 'overview-card', 'machinesets-card', 'nodes-card'],
     manual:      ['manual-connect-hint', 'scaling-action-card', 'scale-in-card', 'add-node-card', 'csrs-card'],
-    autoscaling: ['autoscaling-connect-hint', 'machine-api-status-card', 'autoscale-card'],
+    autoscaling:  ['autoscaling-connect-hint', 'machine-api-status-card', 'autoscale-card'],
+    healthchecks: ['healthchecks-connect-hint', 'mhc-list-card', 'mhc-create-card'],
   };
   let currentNav = 'connection';
 
@@ -2338,8 +2475,11 @@
       document.getElementById('autoscale-card').classList.remove('hidden');
       // Refresh nav hints state after connection
       switchNav(currentNav);
-      // Auto-check provider status in the background
+      // Auto-check provider status and MHCs in the background
       checkProviderStatus();
+      document.getElementById('mhc-list-card').classList.remove('hidden');
+      document.getElementById('mhc-create-card').classList.remove('hidden');
+      loadMhcList();
       // Show the correct action card based on current radio selection
       applyScalingActionChoice();
       document.getElementById('add-node-card').classList.remove('hidden');
@@ -2365,7 +2505,8 @@
     hideError('connect-error');
 
     ['overview-card','machinesets-card','nodes-card','csrs-card',
-     'scaling-action-card','scale-in-card','autoscale-card','add-node-card','machine-api-status-card'].forEach(id =>
+     'scaling-action-card','scale-in-card','autoscale-card','add-node-card','machine-api-status-card',
+     'mhc-list-card','mhc-create-card'].forEach(id =>
       document.getElementById(id).classList.add('hidden')
     );
     // Restore connect hints
@@ -3894,6 +4035,229 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
 
   // Initialise form state to match the default-selected radio (Create new IONOS MachineSet)
   applyAsModeVisibility();
+
+  // ── Machine Health Checks ───────────────────────────────────────────────────
+
+  const MHC_TEMPLATES = {
+    worker: {
+      name: 'worker-healthcheck',
+      selectorType: 'worker-role',
+      conditions: [
+        { type: 'Ready', status: 'False',   timeout: '300s' },
+        { type: 'Ready', status: 'Unknown', timeout: '300s' },
+      ],
+      maxUnhealthy: '40%',
+      nodeStartupTimeout: '10m',
+    },
+    fast: {
+      name: 'worker-healthcheck-fast',
+      selectorType: 'worker-role',
+      conditions: [
+        { type: 'Ready', status: 'False',   timeout: '60s' },
+        { type: 'Ready', status: 'Unknown', timeout: '60s' },
+      ],
+      maxUnhealthy: '40%',
+      nodeStartupTimeout: '5m',
+    },
+    conservative: {
+      name: 'worker-healthcheck-conservative',
+      selectorType: 'worker-role',
+      conditions: [
+        { type: 'Ready', status: 'False',   timeout: '600s' },
+        { type: 'Ready', status: 'Unknown', timeout: '600s' },
+      ],
+      maxUnhealthy: '20%',
+      nodeStartupTimeout: '15m',
+    },
+  };
+
+  function mhcApplyTemplate(key) {
+    const t = MHC_TEMPLATES[key];
+    if (!t) return;
+    document.getElementById('mhc-name').value = t.name;
+    document.getElementById('mhc-selector-type').value = t.selectorType;
+    mhcSelectorTypeChanged();
+    document.getElementById('mhc-max-unhealthy').value = t.maxUnhealthy;
+    document.getElementById('mhc-startup-timeout').value = t.nodeStartupTimeout;
+    const rows = document.getElementById('mhc-conditions-rows');
+    rows.innerHTML = '';
+    t.conditions.forEach(c => mhcAddCondition(c.type, c.status, c.timeout));
+  }
+
+  function mhcSelectorTypeChanged() {
+    const v = document.getElementById('mhc-selector-type').value;
+    document.getElementById('mhc-selector-custom').style.display = v === 'custom' ? 'block' : 'none';
+  }
+
+  function mhcAddCondition(type = 'Ready', status = 'Unknown', timeout = '300s') {
+    const rows = document.getElementById('mhc-conditions-rows');
+    const row = document.createElement('div');
+    row.style.cssText = 'display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:0.5rem;padding:0.4rem 0.75rem;border-bottom:1px solid #1e2d3d;align-items:center';
+    row.innerHTML = `
+      <select style="background:#0f1117;border:1px solid #2d3348;border-radius:5px;padding:0.3rem 0.5rem;color:#e2e8f0;font-size:0.82rem">
+        <option value="Ready" ${type==='Ready'?'selected':''}>Ready</option>
+        <option value="MemoryPressure" ${type==='MemoryPressure'?'selected':''}>MemoryPressure</option>
+        <option value="DiskPressure" ${type==='DiskPressure'?'selected':''}>DiskPressure</option>
+        <option value="PIDPressure" ${type==='PIDPressure'?'selected':''}>PIDPressure</option>
+      </select>
+      <select style="background:#0f1117;border:1px solid #2d3348;border-radius:5px;padding:0.3rem 0.5rem;color:#e2e8f0;font-size:0.82rem">
+        <option value="False" ${status==='False'?'selected':''}>False</option>
+        <option value="Unknown" ${status==='Unknown'?'selected':''}>Unknown</option>
+        <option value="True" ${status==='True'?'selected':''}>True</option>
+      </select>
+      <input type="text" value="${escHtml(timeout)}" placeholder="300s"
+        style="background:#0f1117;border:1px solid #2d3348;border-radius:5px;padding:0.3rem 0.5rem;color:#e2e8f0;font-size:0.82rem;font-family:'Courier New',monospace;width:100%" />
+      <button onclick="this.closest('div').remove()" style="background:transparent;border:none;color:#ef4444;cursor:pointer;font-size:1rem;padding:0 0.25rem" title="Remove">&#10005;</button>
+    `;
+    rows.appendChild(row);
+  }
+
+  function mhcBuildSelector() {
+    const type = document.getElementById('mhc-selector-type').value;
+    if (type === 'worker-role') return { matchLabels: { 'machine.openshift.io/cluster-api-machine-role': 'worker' } };
+    if (type === 'infra-role')  return { matchLabels: { 'machine.openshift.io/cluster-api-machine-role': 'infra' } };
+    const labels = {};
+    document.getElementById('mhc-selector-labels').value.split('\n').forEach(line => {
+      const [k, ...rest] = line.trim().split('=');
+      if (k && rest.length) labels[k.trim()] = rest.join('=').trim();
+    });
+    return { matchLabels: labels };
+  }
+
+  function mhcReadConditions() {
+    return Array.from(document.getElementById('mhc-conditions-rows').children).map(row => {
+      const sels = row.querySelectorAll('select');
+      const inp  = row.querySelector('input');
+      return { type: sels[0].value, status: sels[1].value, timeout: inp.value.trim() };
+    });
+  }
+
+  async function loadMhcList() {
+    if (!clusterApiUrl || !ocpToken) return;
+    const btn = document.getElementById('mhc-refresh-btn');
+    const lbl = document.getElementById('mhc-refresh-label');
+    const spin = document.getElementById('mhc-refresh-spinner');
+    const errEl = document.getElementById('mhc-list-error');
+    const content = document.getElementById('mhc-list-content');
+    btn.disabled = true; lbl.textContent = 'Loading…'; spin.classList.remove('hidden');
+    errEl.classList.add('hidden');
+    try {
+      const data = await apiPost('/api/mhc-list', { clusterApiUrl, ocpToken });
+      if (!data.ok) throw new Error(data.error);
+      if (!data.items.length) {
+        content.innerHTML = '<div style="color:#64748b;font-size:0.85rem;padding:1.5rem 0;text-align:center">No MachineHealthChecks found in <code>openshift-machine-api</code>.</div>';
+        return;
+      }
+      content.innerHTML = data.items.map(mhc => {
+        const healthy = mhc.currentHealthy != null ? mhc.currentHealthy : '–';
+        const expected = mhc.expectedMachines != null ? mhc.expectedMachines : '–';
+        const conditions = mhc.unhealthyConditions.map(c =>
+          `<span style="background:#0f1829;border:1px solid #1e2d3d;border-radius:4px;padding:0.1rem 0.4rem;font-size:0.75rem;font-family:'Courier New',monospace;white-space:nowrap">${escHtml(c.type)}=${escHtml(c.status)} / ${escHtml(c.timeout)}</span>`
+        ).join(' ');
+        const labelPills = Object.entries(mhc.selector?.matchLabels || {}).map(([k,v]) =>
+          `<span style="background:#0f2035;border:1px solid #1e3a5f;border-radius:3px;padding:0.05rem 0.4rem;font-size:0.72rem;color:#60a5fa;font-family:'Courier New',monospace">${escHtml(k)}=${escHtml(v)}</span>`
+        ).join(' ');
+        return `<div style="padding:0.8rem 1rem;border-bottom:1px solid #1e2d3d">
+          <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:0.75rem;flex-wrap:wrap">
+            <div style="flex:1;min-width:0">
+              <div style="display:flex;align-items:center;gap:0.6rem;flex-wrap:wrap;margin-bottom:0.4rem">
+                <span style="font-weight:600;color:#e2e8f0;font-size:0.9rem">${escHtml(mhc.name)}</span>
+                <span style="font-size:0.75rem;color:#64748b">${escHtml(mhc.creationTimestamp || '')}</span>
+              </div>
+              <div style="margin-bottom:0.35rem;display:flex;gap:0.35rem;flex-wrap:wrap">${labelPills}</div>
+              <div style="display:flex;gap:0.35rem;flex-wrap:wrap;margin-bottom:0.35rem">${conditions}</div>
+              <div style="font-size:0.78rem;color:#64748b">
+                maxUnhealthy: <span style="color:#94a3b8">${escHtml(mhc.maxUnhealthy||'–')}</span>
+                &nbsp;·&nbsp; nodeStartupTimeout: <span style="color:#94a3b8">${escHtml(mhc.nodeStartupTimeout||'–')}</span>
+                &nbsp;·&nbsp; healthy: <span style="color:#6ee7b7">${healthy}</span> / <span style="color:#94a3b8">${expected}</span>
+              </div>
+            </div>
+            <div style="display:flex;gap:0.4rem;flex-shrink:0">
+              <button onclick="mhcLoadForEdit(${JSON.stringify(JSON.stringify(mhc))})" style="background:#0f2035;color:#60a5fa;border:1px solid #1e3a5f;border-radius:5px;padding:0.3rem 0.7rem;font-size:0.78rem;cursor:pointer">&#9998; Edit</button>
+              <button onclick="deleteMhc('${escHtml(mhc.name)}')" style="background:#1c0a0a;color:#f87171;border:1px solid #7f1d1d;border-radius:5px;padding:0.3rem 0.7rem;font-size:0.78rem;cursor:pointer">&#128465; Delete</button>
+            </div>
+          </div>
+        </div>`;
+      }).join('');
+    } catch (err) {
+      errEl.textContent = err.message; errEl.classList.remove('hidden');
+    } finally {
+      btn.disabled = false; lbl.textContent = '↻ Refresh'; spin.classList.add('hidden');
+    }
+  }
+
+  function mhcLoadForEdit(jsonStr) {
+    const mhc = JSON.parse(jsonStr);
+    document.getElementById('mhc-name').value = mhc.name || '';
+    document.getElementById('mhc-max-unhealthy').value = mhc.maxUnhealthy || '';
+    document.getElementById('mhc-startup-timeout').value = mhc.nodeStartupTimeout || '';
+    // Determine selector type
+    const labels = mhc.selector?.matchLabels || {};
+    const roleVal = labels['machine.openshift.io/cluster-api-machine-role'];
+    const selType = document.getElementById('mhc-selector-type');
+    if (roleVal === 'worker') { selType.value = 'worker-role'; }
+    else if (roleVal === 'infra') { selType.value = 'infra-role'; }
+    else {
+      selType.value = 'custom';
+      document.getElementById('mhc-selector-labels').value = Object.entries(labels).map(([k,v]) => `${k}=${v}`).join('\n');
+    }
+    mhcSelectorTypeChanged();
+    // Conditions
+    document.getElementById('mhc-conditions-rows').innerHTML = '';
+    (mhc.unhealthyConditions || []).forEach(c => mhcAddCondition(c.type, c.status, c.timeout));
+    // Scroll to create card
+    document.getElementById('mhc-create-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  async function applyMhc() {
+    if (!clusterApiUrl || !ocpToken) return;
+    const name = document.getElementById('mhc-name').value.trim();
+    if (!name) { showError('mhc-apply-error', 'Name is required.'); return; }
+    const conditions = mhcReadConditions();
+    if (!conditions.length) { showError('mhc-apply-error', 'Add at least one unhealthy condition.'); return; }
+    const maxUnhealthy = document.getElementById('mhc-max-unhealthy').value.trim() || '40%';
+    const nodeStartupTimeout = document.getElementById('mhc-startup-timeout').value.trim() || '10m';
+    const btn = document.getElementById('mhc-apply-btn');
+    const lbl = document.getElementById('mhc-apply-label');
+    const spin = document.getElementById('mhc-apply-spinner');
+    const result = document.getElementById('mhc-apply-result');
+    const errEl = document.getElementById('mhc-apply-error');
+    btn.disabled = true; lbl.textContent = 'Applying…'; spin.classList.remove('hidden');
+    result.classList.add('hidden'); errEl.classList.add('hidden');
+    try {
+      const data = await apiPost('/api/mhc-apply', {
+        clusterApiUrl, ocpToken, name,
+        selector: mhcBuildSelector(),
+        unhealthyConditions: conditions,
+        maxUnhealthy,
+        nodeStartupTimeout,
+      });
+      if (!data.ok) throw new Error(data.error);
+      result.style.cssText = 'margin-top:0.75rem;padding:0.6rem 0.9rem;border-radius:6px;font-size:0.85rem;background:#0a1f0a;border:1px solid #166534;color:#86efac';
+      result.textContent = `✓ Health check "${name}" ${data.action} successfully.`;
+      result.classList.remove('hidden');
+      loadMhcList();
+    } catch (err) {
+      showError('mhc-apply-error', err.message);
+    } finally {
+      btn.disabled = false; lbl.textContent = '✓ Apply Health Check'; spin.classList.add('hidden');
+    }
+  }
+
+  async function deleteMhc(name) {
+    if (!clusterApiUrl || !ocpToken) return;
+    if (!confirm(`Delete MachineHealthCheck "${name}"?\n\nThe cluster will stop monitoring and remediating the targeted nodes.`)) return;
+    try {
+      const data = await apiPost('/api/mhc-delete', { clusterApiUrl, ocpToken, name });
+      if (!data.ok) throw new Error(data.error);
+      loadMhcList();
+    } catch (err) {
+      alert(`Delete failed: ${err.message}`);
+    }
+  }
+
+  // Initialise conditions rows with the standard worker template on first load
+  mhcApplyTemplate('worker');
 
 </script>
 </body>

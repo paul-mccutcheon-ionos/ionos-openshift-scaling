@@ -604,6 +604,7 @@ app.post('/api/check-provider-rbac', async (req, res) => {
       check('patch',   'machinesets', 'machine.openshift.io', 'finalizers'),
       check('get',     'secrets',               ''),
       check('get',     'nodes',                 ''),
+      check('delete',  'nodes',                 ''),
     ]);
     const missing = checks.filter(c => !c.allowed);
     res.json({ ok: missing.length === 0, checks, missing });
@@ -681,7 +682,7 @@ app.post('/api/deploy-provider', async (req, res) => {
         { apiGroups: ['machine.openshift.io'], resources: ['machinesets/status'],    verbs: ['get','patch','update'] },
         { apiGroups: ['machine.openshift.io'], resources: ['machinesets/finalizers'],verbs: ['patch','update'] },
         { apiGroups: [''],                     resources: ['secrets'],               verbs: ['get','list','watch'] },
-        { apiGroups: [''],                     resources: ['nodes'],                 verbs: ['get','list','watch'] },
+        { apiGroups: [''],                     resources: ['nodes'],                 verbs: ['get','list','watch','delete'] },
         { apiGroups: ['coordination.k8s.io'],  resources: ['leases'],               verbs: ['get','list','watch','create','update','patch','delete'] },
         { apiGroups: [''],                     resources: ['events'],                verbs: ['create','patch'] }
       ]
@@ -1011,7 +1012,7 @@ app.post('/api/setup-autoscaler', async (req, res) => {
           { apiGroups: ['machine.openshift.io'], resources: ['machinesets/status'],    verbs: ['get','patch','update'] },
           { apiGroups: ['machine.openshift.io'], resources: ['machinesets/finalizers'],verbs: ['patch','update'] },
           { apiGroups: [''],                     resources: ['secrets'],               verbs: ['get','list','watch'] },
-          { apiGroups: [''],                     resources: ['nodes'],                 verbs: ['get','list','watch'] },
+          { apiGroups: [''],                     resources: ['nodes'],                 verbs: ['get','list','watch','delete'] },
           { apiGroups: ['coordination.k8s.io'],  resources: ['leases'],               verbs: ['get','list','watch','create','update','patch','delete'] },
           { apiGroups: [''],                     resources: ['events'],                verbs: ['create','patch'] }
         ]
@@ -4178,6 +4179,81 @@ rm -f ${lftpScript}
     fail(err.message || String(err));
   } finally {
     if (conn) try { conn.end(); } catch (_) {}
+  }
+});
+
+// ── Machine Health Checks ─────────────────────────────────────────────────────
+
+app.post('/api/mhc-list', async (req, res) => {
+  if (!requireFields(res, req.body, ['clusterApiUrl','ocpToken'])) return;
+  const { clusterApiUrl, ocpToken } = req.body;
+  try {
+    const r = await ocpGet(clusterApiUrl, '/apis/machine.openshift.io/v1beta1/namespaces/openshift-machine-api/machinehealthchecks', ocpToken);
+    const items = (r.items || []).map(m => ({
+      name:               m.metadata.name,
+      creationTimestamp:  m.metadata.creationTimestamp,
+      selector:           m.spec.selector,
+      unhealthyConditions:m.spec.unhealthyConditions || [],
+      maxUnhealthy:       m.spec.maxUnhealthy,
+      nodeStartupTimeout: m.spec.nodeStartupTimeout,
+      currentHealthy:     m.status?.currentHealthy,
+      expectedMachines:   m.status?.expectedMachines,
+      remediationsAllowed:m.status?.remediationsAllowed,
+    }));
+    res.json({ ok: true, items });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+app.post('/api/mhc-apply', async (req, res) => {
+  if (!requireFields(res, req.body, ['clusterApiUrl','ocpToken','name','selector','unhealthyConditions','maxUnhealthy','nodeStartupTimeout'])) return;
+  const { clusterApiUrl, ocpToken, name, selector, unhealthyConditions, maxUnhealthy, nodeStartupTimeout } = req.body;
+  const hdrs = { 'Authorization': `Bearer ${ocpToken}`, 'Content-Type': 'application/json' };
+  const manifest = {
+    apiVersion: 'machine.openshift.io/v1beta1',
+    kind: 'MachineHealthCheck',
+    metadata: { name, namespace: 'openshift-machine-api' },
+    spec: { selector, unhealthyConditions, maxUnhealthy, nodeStartupTimeout },
+  };
+  const base = `${clusterApiUrl}/apis/machine.openshift.io/v1beta1/namespaces/openshift-machine-api/machinehealthchecks`;
+  try {
+    // Try PATCH first (update existing), fall back to POST (create new)
+    const patchR = await fetch(`${base}/${encodeURIComponent(name)}`, {
+      method: 'PATCH',
+      headers: { ...hdrs, 'Content-Type': 'application/merge-patch+json' },
+      body: JSON.stringify(manifest),
+      agent: INSECURE_AGENT,
+    });
+    if (patchR.status === 404) {
+      const postR = await fetch(base, { method: 'POST', headers: hdrs, body: JSON.stringify(manifest), agent: INSECURE_AGENT });
+      const d = await postR.json();
+      if (!postR.ok) return res.json({ ok: false, error: d.message || `HTTP ${postR.status}` });
+      return res.json({ ok: true, action: 'created', name: d.metadata?.name });
+    }
+    const d = await patchR.json();
+    if (!patchR.ok) return res.json({ ok: false, error: d.message || `HTTP ${patchR.status}` });
+    res.json({ ok: true, action: 'updated', name: d.metadata?.name });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+app.post('/api/mhc-delete', async (req, res) => {
+  if (!requireFields(res, req.body, ['clusterApiUrl','ocpToken','name'])) return;
+  const { clusterApiUrl, ocpToken, name } = req.body;
+  try {
+    const r = await fetch(
+      `${clusterApiUrl}/apis/machine.openshift.io/v1beta1/namespaces/openshift-machine-api/machinehealthchecks/${encodeURIComponent(name)}`,
+      { method: 'DELETE', headers: { 'Authorization': `Bearer ${ocpToken}` }, agent: INSECURE_AGENT }
+    );
+    if (!r.ok && r.status !== 404) {
+      const d = await r.json().catch(() => ({}));
+      return res.json({ ok: false, error: d.message || `HTTP ${r.status}` });
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
   }
 });
 
