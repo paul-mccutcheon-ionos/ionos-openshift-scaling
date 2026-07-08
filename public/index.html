@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.1.24</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.1.25</span>
   </div>
 
   <div class="banner-actions">
@@ -1856,6 +1856,18 @@
         <div style="display:grid;gap:1.2rem">
           <div>
             <h4 style="margin-bottom:0.6rem;color:#94a3b8;font-size:0.85rem;text-transform:uppercase;letter-spacing:0.05em">Control Plane (×3 Dedicated Core)</h4>
+            <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.75rem">
+              <label style="font-size:0.85rem;color:#94a3b8;white-space:nowrap">CPU Family</label>
+              <select id="ncw-cp-cpu-family" style="flex:1;background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.45rem 0.75rem;font-size:0.85rem">
+                <option value="AMD_EPYC">AMD_EPYC</option>
+                <option value="AMD_TURIN">AMD_TURIN (Frankfurt only)</option>
+                <option value="INTEL_XEON">INTEL_XEON</option>
+              </select>
+              <button id="ncw-cpu-family-refresh" type="button" onclick="ncwLoadCpuFamilies()"
+                style="background:#1e3a5f;border:1px solid #2d5a8e;color:#e2e8f0;border-radius:6px;padding:0.45rem 0.8rem;font-size:0.82rem;cursor:pointer;white-space:nowrap">
+                &#8635; Refresh
+              </button>
+            </div>
             <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.75rem">
               <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
                 Cores
@@ -4735,6 +4747,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
         break;
       }
       case 2:
+        ncwConfig.cpuFamily     = document.getElementById('ncw-cp-cpu-family').value;
         ncwConfig.controlCores  = document.getElementById('ncw-cp-cores').value;
         ncwConfig.controlRamGB  = document.getElementById('ncw-cp-ram').value;
         ncwConfig.controlDiskGB = document.getElementById('ncw-cp-disk').value;
@@ -5022,10 +5035,36 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     }
   }
 
-  // Auto-refresh image list when location changes (if token is already entered)
+  // ── CPU family loader ──────────────────────────────────────────────────────
+  async function ncwLoadCpuFamilies() {
+    const token    = document.getElementById('ncw-ionos-token').value.trim() || ncwConfig.ionosToken || '';
+    const location = document.getElementById('ncw-vdc-location').value;
+    const sel      = document.getElementById('ncw-cp-cpu-family');
+    const btn      = document.getElementById('ncw-cpu-family-refresh');
+    if (!token) return;
+    if (btn) { btn.disabled = true; btn.textContent = '...'; }
+    try {
+      const r = await fetch(`/api/new-cluster/cpu-families?location=${encodeURIComponent(location)}&token=${encodeURIComponent(token)}`);
+      const { families, error } = await r.json();
+      if (error) throw new Error(error);
+      if (families && families.length > 0) {
+        const prev = sel.value;
+        sel.innerHTML = families.map(f => {
+          const label = f.maxCores ? `${f.family}  (max ${f.maxCores}C / ${f.maxRamGB} GB)` : f.family;
+          return `<option value="${escHtml(f.family)}">${escHtml(label)}</option>`;
+        }).join('');
+        if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+      }
+    } catch (_) { /* keep current options */ }
+    finally {
+      if (btn) { btn.disabled = false; btn.textContent = '↻ Refresh'; }
+    }
+  }
+
+  // Auto-refresh image list and CPU families when location changes (if token is entered)
   document.getElementById('ncw-vdc-location').addEventListener('change', () => {
     const token = document.getElementById('ncw-ionos-token').value.trim() || ncwConfig.ionosToken || '';
-    if (token) ncwLoadMgmtImages();
+    if (token) { ncwLoadMgmtImages(); ncwLoadCpuFamilies(); }
   });
 
 </script>

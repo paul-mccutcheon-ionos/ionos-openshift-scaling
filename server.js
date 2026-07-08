@@ -4330,6 +4330,48 @@ app.get('/api/new-cluster/mgmt-images', async (req, res) => {
   }
 });
 
+// GET /api/new-cluster/cpu-families?location=de/txl&token=...
+// Returns Dedicated Core CPU families available in the given IONOS location.
+app.get('/api/new-cluster/cpu-families', async (req, res) => {
+  const { location, token } = req.query;
+  if (!location || !token) return res.status(400).json({ error: 'location and token required' });
+
+  const parts  = location.replace(/\/\d+$/, '').split('/');  // 'de/txl' → ['de','txl']
+  const region = parts[0];
+  const loc    = parts[1];
+
+  try {
+    const data    = await ionosGet(`/locations/${region}/${loc}`, token);
+    const archs   = data?.properties?.cpuArchitecture || [];
+    if (archs.length > 0) {
+      return res.json({
+        families: archs.map(a => ({
+          family:    a.cpuFamily,
+          maxCores:  a.maxCores,
+          maxRamGB:  Math.round((a.maxRam || 0) / 1024),
+          vendor:    a.vendor || '',
+        }))
+      });
+    }
+  } catch (_) { /* fall through to defaults */ }
+
+  // Hardcoded fallbacks by base location
+  const defaults = {
+    'de/fra':  [{ family: 'AMD_TURIN' }, { family: 'AMD_EPYC' }, { family: 'INTEL_XEON' }],
+    'de/txl':  [{ family: 'AMD_EPYC' }, { family: 'INTEL_XEON' }],
+    'gb/lhr':  [{ family: 'AMD_EPYC' }, { family: 'INTEL_XEON' }],
+    'us/las':  [{ family: 'AMD_EPYC' }, { family: 'INTEL_XEON' }],
+    'us/ewr':  [{ family: 'AMD_EPYC' }, { family: 'INTEL_XEON' }],
+    'es/vit':  [{ family: 'AMD_EPYC' }, { family: 'INTEL_XEON' }],
+    'fr/par':  [{ family: 'AMD_EPYC' }, { family: 'INTEL_XEON' }],
+  };
+  const baseLocation = `${region}/${loc}`;
+  res.json({
+    families: defaults[baseLocation] || [{ family: 'AMD_EPYC' }, { family: 'INTEL_XEON' }, { family: 'AMD_TURIN' }],
+    fallback: true,
+  });
+});
+
 // GET /api/new-cluster/ocp-versions
 app.get('/api/new-cluster/ocp-versions', async (_req, res) => {
   const minors = ['4.19', '4.18', '4.17'];
@@ -4354,8 +4396,10 @@ app.get('/api/new-cluster/ocp-versions', async (_req, res) => {
 app.post('/api/new-cluster/create-infra', async (req, res) => {
   const { ionosToken, clusterName, vdcName, vdcLocation,
           controlCores, controlRamGB, controlDiskGB,
+          cpuFamily,
           ocpSshPubKey, mgmtSshPubKey,
           mgmtImageId, mgmtImageName } = req.body;
+  const resolvedCpuFamily = cpuFamily || 'AMD_EPYC';
   const { step, log, done, fail } = makeSseHelpers(res);
 
   // IONOS image catalog uses the base location without zone suffix (de/fra not de/fra/2)
@@ -4458,14 +4502,14 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
 
     // 6. Create 3 control plane VMs
     step(`Create 3 control plane VMs (${controlCores}C / ${controlRamGB} GB / ${controlDiskGB} GB)`, 'running');
-    log('Creating Dedicated Core control plane VMs (AMD_TURIN)...\n');
+    log(`Creating Dedicated Core control plane VMs (${resolvedCpuFamily})...\n`);
     const cpSrvs = await Promise.all([0, 1, 2].map(i =>
       ionosPost(`/datacenters/${dcId}/servers`, ionosToken, {
         properties: {
           name: `${clusterName}-control-${i}`,
           cores:     parseInt(controlCores, 10),
           ram:       parseInt(controlRamGB, 10) * 1024,
-          cpuFamily: 'AMD_TURIN',
+          cpuFamily: resolvedCpuFamily,
           type:      'DEDICATED_CORE'
         },
         entities: {
