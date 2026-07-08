@@ -4257,6 +4257,672 @@ app.post('/api/mhc-delete', async (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// INSTALL NEW OPENSHIFT CLUSTER
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Per-installation server-side state (survives phase transitions within a session)
+const clusterInstallState = new Map();
+
+// IONOS FTP hostname from VDC location: de/fra/2 → ftp-fra-2.ionos.com
+function ftpHostForLoc(loc) {
+  const p    = (loc || 'de/fra').split('/');
+  const city = p[1] || p[0] || 'fra';
+  const zone = p[2] || '';
+  return zone ? `ftp-${city}-${zone}.ionos.com` : `ftp-${city}.ionos.com`;
+}
+
+// SSE helper factory
+function makeSseHelpers(res) {
+  res.setHeader('Content-Type',  'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection',    'keep-alive');
+  res.flushHeaders();
+  const emit = obj             => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+  const step = (label, status) => emit({ type: 'step', label, status });
+  const log  = text            => emit({ type: 'log',  text });
+  const done = (msg, data)     => { emit({ type: 'done',  message: msg, ...(data ? { data } : {}) }); res.end(); };
+  const fail = msg             => { emit({ type: 'error', message: msg }); res.end(); };
+  return { emit, step, log, done, fail };
+}
+
+// GET /api/new-cluster/ocp-versions
+app.get('/api/new-cluster/ocp-versions', async (_req, res) => {
+  const minors = ['4.19', '4.18', '4.17'];
+  const out = [];
+  for (const minor of minors) {
+    try {
+      const r = await fetch(
+        `https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable-${minor}/release.txt`,
+        { headers: { 'User-Agent': 'ionos-ocp-tool/1.0' } }
+      );
+      const text = r.ok ? await r.text() : '';
+      const m    = text.match(/Version:\s*(\S+)/);
+      out.push({ minor, version: m ? m[1] : `${minor}.x`, label: m ? `${minor}  (${m[1]})` : `${minor}  (latest)` });
+    } catch {
+      out.push({ minor, version: `${minor}.x`, label: `${minor}  (latest)` });
+    }
+  }
+  res.json({ versions: out });
+});
+
+// ── Phase A: Create Infrastructure ────────────────────────────────────────
+app.post('/api/new-cluster/create-infra', async (req, res) => {
+  const { ionosToken, clusterName, vdcName, vdcLocation,
+          controlCores, controlRamGB, controlDiskGB,
+          ocpSshPubKey, mgmtSshPubKey } = req.body;
+  const { step, log, done, fail } = makeSseHelpers(res);
+
+  try {
+    // 1. Reserve 3 public IPs
+    step('Reserve public IP addresses', 'running');
+    log('Reserving 3 public IPs (management, NLB, NAT gateway)...\n');
+    const [mgmtIpBlk, nlbIpBlk, natIpBlk] = await Promise.all([
+      ionosPost('/ipblocks', ionosToken, { properties: { name: `${clusterName}-mgmt-ip`, size: 1, location: vdcLocation } }),
+      ionosPost('/ipblocks', ionosToken, { properties: { name: `${clusterName}-nlb-ip`,  size: 1, location: vdcLocation } }),
+      ionosPost('/ipblocks', ionosToken, { properties: { name: `${clusterName}-nat-ip`,  size: 1, location: vdcLocation } }),
+    ]);
+    const mgmtPubIp = mgmtIpBlk.properties.ips[0];
+    const nlbPubIp  = nlbIpBlk.properties.ips[0];
+    const natPubIp  = natIpBlk.properties.ips[0];
+    log(`  Management: ${mgmtPubIp}\n  NLB:        ${nlbPubIp}\n  NAT GW:     ${natPubIp}\n`);
+    step('Reserve public IP addresses', 'done');
+
+    // 2. Create VDC
+    step('Create Virtual Data Center', 'running');
+    log(`Creating VDC "${vdcName}" in ${vdcLocation}...\n`);
+    const vdc  = await ionosPost('/datacenters', ionosToken, {
+      properties: { name: vdcName, location: vdcLocation, description: `OpenShift cluster ${clusterName}` }
+    });
+    const dcId = vdc.id;
+    log(`  VDC ID: ${dcId}\n`);
+    step('Create Virtual Data Center', 'done');
+
+    // 3. Create LANs
+    step('Create private and public LANs', 'running');
+    const [privLan, pubLan] = await Promise.all([
+      ionosPost(`/datacenters/${dcId}/lans`, ionosToken, { properties: { name: `${clusterName}-private`, public: false } }),
+      ionosPost(`/datacenters/${dcId}/lans`, ionosToken, { properties: { name: `${clusterName}-public`,  public: true  } }),
+    ]);
+    const privLanId = parseInt(privLan.id, 10);
+    const pubLanId  = parseInt(pubLan.id, 10);
+    log(`  Private LAN: ${privLanId}   Public LAN: ${pubLanId}\n`);
+    step('Create private and public LANs', 'done');
+
+    // 4. Locate RHEL 9 image
+    step('Locate RHEL 9 image for management VM', 'running');
+    log('Searching IONOS image catalog...\n');
+    const imgResp = await ionosGet('/images?depth=1', ionosToken);
+    const rhel9   = (imgResp.items || []).find(img => {
+      if (img.properties?.location !== vdcLocation) return false;
+      if (img.properties?.imageType !== 'HDD')      return false;
+      const n = (img.properties?.name || '').toLowerCase();
+      return (n.includes('rhel') || n.includes('red hat')) &&
+             (n.includes(' 9') || n.includes('-9') || n.includes(':9') || / 9\./.test(n));
+    });
+    if (!rhel9) {
+      fail(`No RHEL 9 HDD image found in location "${vdcLocation}". ` +
+           `Upload or import a RHEL 9 image for this location in the IONOS DCD first.`);
+      return;
+    }
+    log(`  Found: ${rhel9.properties.name}  (${rhel9.id})\n`);
+    step('Locate RHEL 9 image for management VM', 'done');
+
+    // 5. Create management VM
+    step('Create management VM (2 vCPU, 4 GB RAM)', 'running');
+    const sshKeys = [(mgmtSshPubKey || ocpSshPubKey || '').trim()].filter(Boolean);
+    const mgmtSrv = await ionosPost(`/datacenters/${dcId}/servers`, ionosToken, {
+      properties: { name: `${clusterName}-mgmt`, cores: 2, ram: 4096, type: 'VCPU' },
+      entities: {
+        volumes: { items: [{ properties: {
+          name: `${clusterName}-mgmt-root`, size: 50, type: 'SSD Standard', image: rhel9.id,
+          ...(sshKeys.length ? { sshKeys } : { imagePassword: 'Temp1OcpInstall!' })
+        }}] },
+        nics: { items: [
+          { properties: { name: 'private', lan: privLanId, dhcp: true } },
+          { properties: { name: 'public',  lan: pubLanId,  dhcp: false, ips: [mgmtPubIp] } },
+        ] }
+      }
+    });
+    log(`  Management VM ID: ${mgmtSrv.id}\n`);
+    step('Create management VM (2 vCPU, 4 GB RAM)', 'done');
+
+    // 6. Create 3 control plane VMs
+    step(`Create 3 control plane VMs (${controlCores}C / ${controlRamGB} GB / ${controlDiskGB} GB)`, 'running');
+    log('Creating Dedicated Core control plane VMs (AMD_TURIN)...\n');
+    const cpSrvs = await Promise.all([0, 1, 2].map(i =>
+      ionosPost(`/datacenters/${dcId}/servers`, ionosToken, {
+        properties: {
+          name: `${clusterName}-control-${i}`,
+          cores:     parseInt(controlCores, 10),
+          ram:       parseInt(controlRamGB, 10) * 1024,
+          cpuFamily: 'AMD_TURIN',
+          type:      'DEDICATED_CORE'
+        },
+        entities: {
+          volumes: { items: [{ properties: {
+            name:        `${clusterName}-control-${i}-root`,
+            size:        parseInt(controlDiskGB, 10),
+            type:        'SSD Premium',
+            licenceType: 'LINUX'
+          }}] },
+          nics: { items: [
+            { properties: { name: 'private', lan: privLanId, dhcp: true } }
+          ] }
+        }
+      })
+    ));
+    cpSrvs.forEach((s, i) => log(`  control-${i}: ${s.id}\n`));
+    step(`Create 3 control plane VMs (${controlCores}C / ${controlRamGB} GB / ${controlDiskGB} GB)`, 'done');
+
+    // 7. Wait for VDC resources to provision
+    step('Provision VDC resources (Dedicated Core: 5–10 min)', 'running');
+    log('Waiting — Dedicated Core servers can take 5–10 minutes to provision...\n');
+    const kaTimer = setInterval(() => log('  Still provisioning...\n'), 30000);
+    try {
+      await ionosWaitAvailable(`/datacenters/${dcId}`, ionosToken, 900000);
+    } finally { clearInterval(kaTimer); }
+    log('  All resources AVAILABLE\n');
+    step('Provision VDC resources (Dedicated Core: 5–10 min)', 'done');
+
+    // 8. Read NIC IPs + MACs from control plane VMs
+    step('Read control plane IP and MAC addresses', 'running');
+    const cpDetails = await Promise.all(cpSrvs.map(async (s, i) => {
+      const d   = await ionosGet(`/datacenters/${dcId}/servers/${s.id}?depth=3`, ionosToken);
+      const nic = (d.entities?.nics?.items || []).find(n => n.properties.lan === privLanId);
+      const ip  = nic?.properties?.ips?.[0]  || null;
+      const mac = nic?.properties?.mac || null;
+      log(`  control-${i}: IP=${ip}  MAC=${mac}\n`);
+      return { id: s.id, ip, mac, name: `control-${i}` };
+    }));
+    if (cpDetails.some(d => !d.ip || !d.mac)) {
+      fail('Could not read IP/MAC from one or more control plane NICs. ' +
+           'The DHCP assignment may not have completed. Wait a moment and retry this phase.');
+      return;
+    }
+    step('Read control plane IP and MAC addresses', 'done');
+
+    // Derive subnet / gateway from first CP IP
+    const [a, b, c] = cpDetails[0].ip.split('.');
+    const gatewayIp  = `${a}.${b}.${c}.1`;
+    const subnetCidr = `${a}.${b}.${c}.0/24`;
+    log(`  Subnet: ${subnetCidr}   Gateway: ${gatewayIp}\n`);
+
+    // Management VM private IP
+    const mgmtDet    = await ionosGet(`/datacenters/${dcId}/servers/${mgmtSrv.id}?depth=3`, ionosToken);
+    const mgmtPrivNic = (mgmtDet.entities?.nics?.items || []).find(n => n.properties.lan === privLanId);
+    const mgmtPrivIp  = mgmtPrivNic?.properties?.ips?.[0] || null;
+    log(`  Management VM: private=${mgmtPrivIp}  public=${mgmtPubIp}\n`);
+
+    // 9. Create NAT Gateway
+    step('Create NAT Gateway', 'running');
+    const natGw = await ionosPost(`/datacenters/${dcId}/natgateways`, ionosToken, {
+      properties: {
+        name:      `${clusterName}-nat-gw`,
+        publicIps: [natPubIp],
+        lans:      [{ id: privLanId, gatewayIps: [`${gatewayIp}/24`] }]
+      }
+    });
+    await ionosPost(`/datacenters/${dcId}/natgateways/${natGw.id}/rules`, ionosToken, {
+      properties: {
+        name: 'snat-private', type: 'SNAT', protocol: 'ALL',
+        sourceSubnet: subnetCidr, publicIp: natPubIp
+      }
+    });
+    log(`  NAT Gateway: ${natGw.id}\n`);
+    step('Create NAT Gateway', 'done');
+
+    // 10. Create Network Load Balancer
+    step('Create Network Load Balancer', 'running');
+    const nlb = await ionosPost(`/datacenters/${dcId}/networkloadbalancers`, ionosToken, {
+      properties: {
+        name: `${clusterName}-nlb`, listenerLan: pubLanId,
+        targetLan: privLanId,       ips: [nlbPubIp]
+      }
+    });
+    for (const { port, name } of [
+      { port: 6443,  name: 'kube-api'      },
+      { port: 22623, name: 'mcs'           },
+      { port: 80,    name: 'http-ingress'  },
+      { port: 443,   name: 'https-ingress' },
+    ]) {
+      await ionosPost(`/datacenters/${dcId}/networkloadbalancers/${nlb.id}/forwardingrules`, ionosToken, {
+        properties: {
+          name: `${clusterName}-${name}`, algorithm: 'ROUND_ROBIN', protocol: 'TCP',
+          listenerIp: nlbPubIp, listenerPort: port,
+          targets: cpDetails.map(d => ({ ip: d.ip, port, weight: 1 }))
+        }
+      });
+      log(`  NLB rule: ${port}/TCP → [${cpDetails.map(d => d.ip).join(', ')}]\n`);
+    }
+    log(`  NLB: ${nlb.id}\n`);
+    step('Create Network Load Balancer', 'done');
+
+    const infra = {
+      dcId, privLanId, pubLanId,
+      mgmtSrvId: mgmtSrv.id, mgmtPubIp, mgmtPrivIp,
+      natGwId: natGw.id, natPubIp,
+      nlbId: nlb.id, nlbPubIp,
+      cpDetails, gatewayIp, subnetCidr,
+      ipBlockIds: [mgmtIpBlk.id, nlbIpBlk.id, natIpBlk.id]
+    };
+    clusterInstallState.set(clusterName, { ...req.body, infra });
+    done('Infrastructure created successfully', infra);
+  } catch (e) {
+    fail(`Infrastructure creation failed: ${e.message}`);
+  }
+});
+
+// ── Phase B: Setup Management VM ──────────────────────────────────────────
+app.post('/api/new-cluster/setup-management', async (req, res) => {
+  const { clusterName } = req.body;
+  const saved = clusterInstallState.get(clusterName) || {};
+  const { step, log, done, fail } = makeSseHelpers(res);
+
+  const mgmtPubIp = saved.infra?.mgmtPubIp;
+  const privKey   = req.body.mgmtSshPrivKey || saved.mgmtSshPrivKey;
+  const ocpVer    = req.body.ocpVersion     || saved.ocpVersion;
+
+  if (!mgmtPubIp || !privKey) {
+    fail('Missing management VM IP or SSH private key. Ensure create-infra completed and SSH key was provided.');
+    return;
+  }
+
+  try {
+    step('Connect to management VM via SSH', 'running');
+    log(`Connecting to ${mgmtPubIp}:22 (retrying up to 3 min for first boot)...\n`);
+    let conn;
+    for (let i = 1; i <= 18; i++) {
+      try { conn = await sshConnect(mgmtPubIp, 'root', privKey); break; }
+      catch (e) {
+        if (i === 18) throw e;
+        log(`  Attempt ${i}/18 — ${e.message.slice(0, 50)}, retrying in 10 s...\n`);
+        await new Promise(r => setTimeout(r, 10000));
+      }
+    }
+    step('Connect to management VM via SSH', 'done');
+
+    step('Install httpd, lftp, curl, tar, jq', 'running');
+    await sshRunScriptStreaming(conn, `#!/bin/bash
+set -e
+dnf install -y httpd lftp curl wget tar jq 2>&1
+systemctl enable --now httpd
+echo "PKG_DONE"
+`, chunk => log(chunk));
+    step('Install httpd, lftp, curl, tar, jq', 'done');
+
+    // Resolve exact OCP version
+    let exactVer = /^\d+\.\d+\.\d+$/.test(ocpVer) ? ocpVer : null;
+    if (!exactVer) {
+      const minor = (ocpVer || '4.19').replace(/\.(x|latest)$/, '').match(/\d+\.\d+/)?.[0] || '4.19';
+      step(`Resolve latest OCP ${minor} patch version`, 'running');
+      const { stdout } = await sshRunScript(conn, `curl -sL "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable-${minor}/release.txt" | grep "^Version:" | awk '{print $2}'`);
+      exactVer = stdout.trim();
+      if (!/^\d+\.\d+\.\d+/.test(exactVer)) {
+        fail(`Could not resolve OCP version for ${minor}: got "${exactVer}"`);
+        conn.end(); return;
+      }
+      log(`  Resolved: ${exactVer}\n`);
+      step(`Resolve latest OCP ${minor} patch version`, 'done');
+    }
+
+    step(`Download openshift-install + oc client (${exactVer})`, 'running');
+    log('Downloading from mirror.openshift.com...\n');
+    await sshRunScriptStreaming(conn, `#!/bin/bash
+set -e
+MIRROR="https://mirror.openshift.com/pub/openshift-v4/clients/ocp/${exactVer}"
+echo "  → openshift-install..."
+curl -sL "$MIRROR/openshift-install-linux-${exactVer}.tar.gz" | tar -xzC /usr/local/bin openshift-install
+chmod +x /usr/local/bin/openshift-install
+echo "  → oc + kubectl..."
+curl -sL "$MIRROR/openshift-client-linux-${exactVer}.tar.gz" | tar -xzC /usr/local/bin oc kubectl
+chmod +x /usr/local/bin/oc /usr/local/bin/kubectl
+echo "Tools installed:"
+openshift-install version
+oc version --client
+`, chunk => log(chunk));
+    step(`Download openshift-install + oc client (${exactVer})`, 'done');
+
+    conn.end();
+    clusterInstallState.set(clusterName, { ...saved, exactVer });
+    done(`Management VM ready — OCP ${exactVer}`);
+  } catch (e) {
+    fail(`Management VM setup failed: ${e.message}`);
+  }
+});
+
+// ── Phase C: Generate Agent ISO ────────────────────────────────────────────
+app.post('/api/new-cluster/generate-iso', async (req, res) => {
+  const { clusterName } = req.body;
+  const saved = clusterInstallState.get(clusterName) || {};
+  const { step, log, done, fail } = makeSseHelpers(res);
+
+  const mgmtPubIp  = saved.infra?.mgmtPubIp;
+  const mgmtPrivIp = saved.infra?.mgmtPrivIp;
+  const cpDetails  = saved.infra?.cpDetails;
+  const subnetCidr = saved.infra?.subnetCidr;
+  const privKey    = req.body.mgmtSshPrivKey || saved.mgmtSshPrivKey;
+  const pullSecret = req.body.pullSecret     || saved.pullSecret;
+  const sshPubKey  = req.body.ocpSshPubKey  || saved.ocpSshPubKey;
+  const baseDomain = req.body.baseDomain     || saved.baseDomain;
+  const exactVer   = saved.exactVer         || req.body.ocpVersion;
+
+  if (!mgmtPubIp || !privKey) { fail('Missing infra state. Run create-infra + setup-management first.'); return; }
+
+  try {
+    const conn = await sshConnect(mgmtPubIp, 'root', privKey);
+
+    // Build YAML content
+    const installCfg = `apiVersion: v1
+baseDomain: ${baseDomain}
+compute:
+- architecture: amd64
+  hyperthreading: Enabled
+  name: worker
+  replicas: 0
+controlPlane:
+  architecture: amd64
+  hyperthreading: Enabled
+  name: master
+  replicas: 3
+metadata:
+  name: ${clusterName}
+networking:
+  clusterNetwork:
+  - cidr: 10.128.0.0/14
+    hostPrefix: 23
+  machineNetwork:
+  - cidr: ${subnetCidr}
+  networkType: OVNKubernetes
+  serviceNetwork:
+  - 172.30.0.0/16
+platform:
+  external:
+    platformName: ionoscloud
+    cloudControllerManager: None
+fips: false
+pullSecret: '${pullSecret.replace(/'/g, "'\\''")}'
+sshKey: '${(sshPubKey || '').trim()}'
+`;
+
+    const hostLines = cpDetails.map(d =>
+`- hostname: ${d.name}.${clusterName}.${baseDomain}
+  role: master
+  interfaces:
+  - name: ens6
+    macAddress: "${d.mac}"`
+    ).join('\n');
+
+    const agentCfg = `apiVersion: v1alpha1
+kind: AgentConfig
+metadata:
+  name: ${clusterName}
+bootArtifactsBaseURL: "http://${mgmtPrivIp}"
+rendezvousIP: ${cpDetails[0].ip}
+hosts:
+${hostLines}
+`;
+
+    step('Write install-config.yaml + agent-config.yaml', 'running');
+    const icB64 = Buffer.from(installCfg).toString('base64').match(/.{1,76}/g).join('\n');
+    const acB64 = Buffer.from(agentCfg).toString('base64').match(/.{1,76}/g).join('\n');
+    await sshRunScript(conn, `
+set -e
+rm -rf /opt/ocp-install && mkdir -p /opt/ocp-install
+base64 -d > /opt/ocp-install/install-config.yaml << 'B64EOF'
+${icB64}
+B64EOF
+base64 -d > /opt/ocp-install/agent-config.yaml << 'B64EOF'
+${acB64}
+B64EOF
+echo "CONFIGS_WRITTEN"
+`);
+    step('Write install-config.yaml + agent-config.yaml', 'done');
+
+    step('Generate agent installer ISO (openshift-install)', 'running');
+    log('Running openshift-install agent create image — this takes ~1–2 min...\n');
+    await sshRunScriptStreaming(conn, `#!/bin/bash
+set -e
+cd /opt/ocp-install
+openshift-install agent create image --dir /opt/ocp-install 2>&1
+echo "ISO_GENERATED"
+ls -lh /opt/ocp-install/agent.x86_64.iso
+`, chunk => log(chunk));
+    step('Generate agent installer ISO (openshift-install)', 'done');
+
+    step('Copy rootfs artifact to Apache (/var/www/html/)', 'running');
+    await sshRunScriptStreaming(conn, `#!/bin/bash
+set -e
+cp /opt/ocp-install/boot-artifacts/agent.x86_64-rootfs.img /var/www/html/
+chmod 644 /var/www/html/agent.x86_64-rootfs.img
+ls -lh /var/www/html/agent.x86_64-rootfs.img
+echo "ROOTFS_DEPLOYED"
+`, chunk => log(chunk));
+    step('Copy rootfs artifact to Apache (/var/www/html/)', 'done');
+
+    conn.end();
+    done('Agent ISO generated and rootfs deployed to Apache');
+  } catch (e) {
+    fail(`ISO generation failed: ${e.message}`);
+  }
+});
+
+// ── Phase D: Upload ISO to IONOS FTP ──────────────────────────────────────
+app.post('/api/new-cluster/upload-iso', async (req, res) => {
+  const { clusterName } = req.body;
+  const saved = clusterInstallState.get(clusterName) || {};
+  const { step, log, done, fail } = makeSseHelpers(res);
+
+  const mgmtPubIp  = saved.infra?.mgmtPubIp;
+  const dcId       = saved.infra?.dcId;
+  const vdcLoc     = saved.vdcLocation;
+  const privKey    = req.body.mgmtSshPrivKey || saved.mgmtSshPrivKey;
+  const ftpUser    = req.body.ionosFtpUser   || saved.ionosFtpUser;
+  const ftpPass    = req.body.ionosFtpPass   || saved.ionosFtpPass;
+  const ionosToken = req.body.ionosToken     || saved.ionosToken;
+  const ftpHost    = ftpHostForLoc(vdcLoc);
+  const isoName    = `${clusterName}-agent.iso`;
+
+  if (!mgmtPubIp || !privKey || !ftpUser || !ftpPass) {
+    fail('Missing required fields: infra state, SSH private key, or IONOS FTP credentials.');
+    return;
+  }
+
+  try {
+    const conn = await sshConnect(mgmtPubIp, 'root', privKey);
+
+    step(`Upload ISO via lftp to ${ftpHost}`, 'running');
+    log(`Uploading ${isoName} (~1 GB) — this may take several minutes...\n`);
+
+    const lftpScriptPath = `/tmp/.lftp-iso-upload`;
+    const lftpContent = `set ftp:ssl-allow true
+set ftp:ssl-allow/${ftpHost} true
+open ${ftpHost}
+user "${ftpUser}" "${ftpPass}"
+put /opt/ocp-install/agent.x86_64.iso -o iso-images/${isoName}
+bye
+`;
+    const lftpB64 = Buffer.from(lftpContent).toString('base64').match(/.{1,76}/g).join('\n');
+    await sshRunScript(conn, `
+base64 -d > ${lftpScriptPath} << 'B64EOF'
+${lftpB64}
+B64EOF
+chmod 600 ${lftpScriptPath}`);
+
+    await sshRunScriptStreaming(conn, `#!/bin/bash
+set -e
+lftp -f ${lftpScriptPath}
+rm -f ${lftpScriptPath}
+echo "FTP_UPLOAD_DONE"
+`, chunk => log(chunk));
+    step(`Upload ISO via lftp to ${ftpHost}`, 'done');
+    conn.end();
+
+    // Poll IONOS catalog until ISO image appears
+    step('Wait for ISO to register in IONOS image catalog (~2 min)', 'running');
+    log('Polling IONOS API for image registration...\n');
+    let isoImageId = null;
+    const deadline = Date.now() + 360000; // 6 min
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 15000));
+      const imgs  = await ionosGet('/images?depth=1', ionosToken);
+      const found = (imgs.items || []).find(img =>
+        img.properties?.name === isoName &&
+        img.properties?.location === vdcLoc &&
+        img.properties?.imageType === 'CDROM'
+      );
+      if (found) { isoImageId = found.id; log(`  Registered: ${found.id}\n`); break; }
+      log('  Not yet visible, retrying...\n');
+    }
+    if (!isoImageId) {
+      fail(`ISO "${isoName}" did not appear in the IONOS image catalog within 6 minutes. ` +
+           `Verify the FTP upload succeeded (check iso-images/ on ${ftpHost}).`);
+      return;
+    }
+    step('Wait for ISO to register in IONOS image catalog (~2 min)', 'done');
+
+    clusterInstallState.set(clusterName, { ...saved, isoImageId });
+    done('ISO uploaded and registered', { isoImageId });
+  } catch (e) {
+    fail(`ISO upload failed: ${e.message}`);
+  }
+});
+
+// ── Phase E: Attach ISO and Boot Control Plane VMs ────────────────────────
+app.post('/api/new-cluster/attach-boot', async (req, res) => {
+  const { clusterName } = req.body;
+  const saved = clusterInstallState.get(clusterName) || {};
+  const { step, log, done, fail } = makeSseHelpers(res);
+
+  const dcId       = saved.infra?.dcId;
+  const cpDetails  = saved.infra?.cpDetails;
+  const isoImageId = saved.isoImageId;
+  const ionosToken = req.body.ionosToken || saved.ionosToken;
+
+  if (!dcId || !cpDetails || !isoImageId) {
+    fail('Missing infra state or ISO image ID. Ensure create-infra and upload-iso completed.');
+    return;
+  }
+
+  try {
+    step('Attach agent ISO to control plane VMs (CD-ROM)', 'running');
+    for (const cp of cpDetails) {
+      await ionosPost(`/datacenters/${dcId}/servers/${cp.id}/cdroms`, ionosToken, { id: isoImageId });
+      log(`  Attached ISO to ${cp.name} (${cp.id})\n`);
+    }
+    step('Attach agent ISO to control plane VMs (CD-ROM)', 'done');
+
+    step('Set boot order: CD-ROM first', 'running');
+    for (const cp of cpDetails) {
+      await ionosPatch(`/datacenters/${dcId}/servers/${cp.id}`, ionosToken, {
+        properties: { bootCdrom: { id: isoImageId } }
+      });
+      log(`  Boot order set for ${cp.name}\n`);
+    }
+    step('Set boot order: CD-ROM first', 'done');
+
+    step('Provision VDC changes', 'running');
+    log('Waiting for VDC to finish provisioning boot-order changes...\n');
+    await ionosWaitAvailable(`/datacenters/${dcId}`, ionosToken, 300000);
+    step('Provision VDC changes', 'done');
+
+    step('Start all control plane VMs', 'running');
+    for (const cp of cpDetails) {
+      await ionosAction(`/datacenters/${dcId}/servers/${cp.id}/start`, ionosToken);
+      log(`  Started ${cp.name}\n`);
+    }
+    step('Start all control plane VMs', 'done');
+
+    done('Control plane VMs booting from agent ISO');
+  } catch (e) {
+    fail(`Attach/boot failed: ${e.message}`);
+  }
+});
+
+// ── Phase F: Monitor Bootstrap (~25–35 min) ───────────────────────────────
+app.post('/api/new-cluster/monitor-bootstrap', async (req, res) => {
+  const { clusterName } = req.body;
+  const saved   = clusterInstallState.get(clusterName) || {};
+  const { step, log, done, fail } = makeSseHelpers(res);
+
+  const mgmtPubIp = saved.infra?.mgmtPubIp;
+  const privKey   = req.body.mgmtSshPrivKey || saved.mgmtSshPrivKey;
+
+  if (!mgmtPubIp || !privKey) { fail('Missing infra state or SSH key.'); return; }
+
+  try {
+    const conn = await sshConnect(mgmtPubIp, 'root', privKey);
+    step('Wait for bootstrap-complete (~25–35 min)', 'running');
+    log('Running: openshift-install agent wait-for bootstrap-complete\n');
+    log('Streaming installer output — do not close this window.\n\n');
+    await sshRunScriptStreaming(conn, `#!/bin/bash
+cd /opt/ocp-install
+openshift-install agent wait-for bootstrap-complete --dir /opt/ocp-install 2>&1
+echo "BOOTSTRAP_COMPLETE"
+`, chunk => log(chunk));
+    step('Wait for bootstrap-complete (~25–35 min)', 'done');
+    conn.end();
+    done('Bootstrap complete — control plane is up');
+  } catch (e) {
+    fail(`Bootstrap monitoring failed: ${e.message}`);
+  }
+});
+
+// ── Phase G: Monitor Full Installation (~45–60 min) ───────────────────────
+app.post('/api/new-cluster/monitor-install', async (req, res) => {
+  const { clusterName } = req.body;
+  const saved   = clusterInstallState.get(clusterName) || {};
+  const { step, log, done, fail } = makeSseHelpers(res);
+
+  const mgmtPubIp = saved.infra?.mgmtPubIp;
+  const privKey   = req.body.mgmtSshPrivKey || saved.mgmtSshPrivKey;
+  const cluster   = clusterName;
+  const domain    = saved.baseDomain || '';
+
+  if (!mgmtPubIp || !privKey) { fail('Missing infra state or SSH key.'); return; }
+
+  try {
+    const conn = await sshConnect(mgmtPubIp, 'root', privKey);
+    step('Wait for install-complete (~45–60 min)', 'running');
+    log('Running: openshift-install agent wait-for install-complete\n');
+    log('This is the longest phase — stream output below.\n\n');
+
+    let allOut = '';
+    await sshRunScriptStreaming(conn, `#!/bin/bash
+cd /opt/ocp-install
+openshift-install agent wait-for install-complete --dir /opt/ocp-install 2>&1
+echo "INSTALL_COMPLETE"
+`, chunk => { log(chunk); allOut += chunk; });
+
+    step('Wait for install-complete (~45–60 min)', 'done');
+
+    // Read credentials
+    const { stdout: kubeadminPw } = await sshRunScript(conn, `cat /opt/ocp-install/auth/kubeadmin-password 2>/dev/null || echo ""`).catch(() => ({ stdout: '' }));
+    const { stdout: kubeconfig }  = await sshRunScript(conn, `cat /opt/ocp-install/auth/kubeconfig 2>/dev/null || echo ""`).catch(() => ({ stdout: '' }));
+    conn.end();
+
+    const creds = {
+      kubeadminPass: kubeadminPw.trim() || null,
+      kubeconfig:    kubeconfig.trim()  || null,
+      apiUrl:        `https://api.${cluster}.${domain}:6443`,
+      consoleUrl:    `https://console-openshift-console.apps.${cluster}.${domain}`
+    };
+    clusterInstallState.set(clusterName, { ...saved, installComplete: true, ...creds });
+    done('Installation complete!', creds);
+  } catch (e) {
+    fail(`Install monitoring failed: ${e.message}`);
+  }
+});
+
+// GET /api/new-cluster/state/:clusterName — retrieve saved infra/credentials
+app.get('/api/new-cluster/state/:clusterName', (req, res) => {
+  const saved = clusterInstallState.get(req.params.clusterName);
+  if (!saved) return res.status(404).json({ error: 'No state found for this cluster name.' });
+  // Return safe subset (omit private key, pull secret, tokens)
+  const { mgmtSshPrivKey: _k, pullSecret: _p, ionosToken: _t, ionosFtpPass: _f, ...safe } = saved;
+  res.json(safe);
+});
+
 app.listen(PORT, () => {
   console.log(`IONOS OpenShift Scaling Tool running at http://localhost:${PORT}`);
 });

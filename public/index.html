@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.1.19</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.1.20</span>
   </div>
 
   <div class="banner-actions">
@@ -560,6 +560,10 @@
     <div class="nav-item" data-section="healthchecks">
       <span class="nav-item-icon">&#129657;</span>
       Machine Health Checks
+    </div>
+    <div class="nav-item" data-section="install-cluster">
+      <span class="nav-item-icon">&#128640;</span>
+      Install New Cluster
     </div>
   </nav>
 
@@ -1743,6 +1747,349 @@
     <div class="error-box hidden" id="mhc-apply-error"></div>
   </div>
 
+  <!-- ══ Install New Cluster section ══════════════════════════════════════ -->
+
+  <div class="card" id="new-cluster-card" style="display:none;max-width:860px">
+
+    <h2 style="margin-bottom:0.25rem">&#128640; Install New OpenShift Cluster</h2>
+    <p style="color:#94a3b8;font-size:0.85rem;margin-bottom:1.5rem">
+      Wizard to provision a full HA OpenShift cluster on IONOS Cloud — VDC, networking, NAT GW, NLB, control plane, and initial worker MachineSets.
+    </p>
+
+    <!-- ── Config wizard ─────────────────────────────────────────────── -->
+    <div id="ncw-config">
+
+      <!-- Stepper -->
+      <div id="ncw-stepper" style="display:flex;gap:0;margin-bottom:1.5rem;border-radius:8px;overflow:hidden;border:1px solid #1e293b">
+        <div class="ncw-step ncw-step-active" data-step="0" style="flex:1;padding:0.55rem 0.4rem;text-align:center;font-size:0.75rem;font-weight:600;cursor:pointer;background:#1e3a5f;color:#93c5fd;border-right:1px solid #1e293b">1. Credentials</div>
+        <div class="ncw-step" data-step="1" style="flex:1;padding:0.55rem 0.4rem;text-align:center;font-size:0.75rem;font-weight:600;cursor:pointer;background:#0f172a;color:#64748b;border-right:1px solid #1e293b">2. Identity</div>
+        <div class="ncw-step" data-step="2" style="flex:1;padding:0.55rem 0.4rem;text-align:center;font-size:0.75rem;font-weight:600;cursor:pointer;background:#0f172a;color:#64748b;border-right:1px solid #1e293b">3. Node Sizing</div>
+        <div class="ncw-step" data-step="3" style="flex:1;padding:0.55rem 0.4rem;text-align:center;font-size:0.75rem;font-weight:600;cursor:pointer;background:#0f172a;color:#64748b;border-right:1px solid #1e293b">4. SSH Keys</div>
+        <div class="ncw-step" data-step="4" style="flex:1;padding:0.55rem 0.4rem;text-align:center;font-size:0.75rem;font-weight:600;cursor:pointer;background:#0f172a;color:#64748b">5. Review</div>
+      </div>
+
+      <!-- Step 0: Credentials -->
+      <div id="ncw-panel-0">
+        <h3 style="margin-bottom:1rem;color:#cbd5e1">IONOS &amp; Red Hat Credentials</h3>
+        <div style="display:grid;gap:0.85rem">
+          <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+            IONOS Cloud API Token
+            <input id="ncw-ionos-token" type="password" placeholder="Paste your IONOS Cloud API token" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
+          </label>
+          <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+            IONOS FTP Username (account email)
+            <input id="ncw-ftp-user" type="text" placeholder="your@email.com" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
+          </label>
+          <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+            IONOS FTP Password
+            <input id="ncw-ftp-pass" type="password" placeholder="IONOS account password (used for FTP image upload)" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
+          </label>
+          <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+            Red Hat Pull Secret
+            <textarea id="ncw-pull-secret" rows="4" placeholder='{"auths":{"cloud.openshift.com":{"auth":"..."},...}}' style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.8rem;font-family:monospace;resize:vertical"></textarea>
+            <span style="font-size:0.75rem;color:#64748b">Obtain from <a href="https://console.redhat.com/openshift/install/pull-secret" target="_blank" style="color:#60a5fa">console.redhat.com</a></span>
+          </label>
+        </div>
+      </div>
+
+      <!-- Step 1: Cluster Identity -->
+      <div id="ncw-panel-1" style="display:none">
+        <h3 style="margin-bottom:1rem;color:#cbd5e1">Cluster Identity &amp; Location</h3>
+        <div style="display:grid;gap:0.85rem">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.85rem">
+            <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+              Cluster Name
+              <input id="ncw-cluster-name" type="text" placeholder="ocp1" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
+              <span style="font-size:0.75rem;color:#64748b">Short DNS label, e.g. ocp1</span>
+            </label>
+            <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+              Base Domain
+              <input id="ncw-base-domain" type="text" placeholder="example.com" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
+              <span style="font-size:0.75rem;color:#64748b">DNS records will be created under this domain</span>
+            </label>
+          </div>
+          <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+            OCP Version
+            <select id="ncw-ocp-version" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
+              <option value="">Loading versions...</option>
+            </select>
+          </label>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.85rem">
+            <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+              IONOS VDC Name
+              <input id="ncw-vdc-name" type="text" placeholder="My OpenShift Cluster" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
+            </label>
+            <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+              VDC Location
+              <select id="ncw-vdc-location" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
+                <option value="de/fra/2">Frankfurt 2 (de/fra/2)</option>
+                <option value="de/fra">Frankfurt (de/fra)</option>
+                <option value="de/txl">Berlin (de/txl)</option>
+                <option value="gb/lhr">London (gb/lhr)</option>
+                <option value="us/las">Las Vegas (us/las)</option>
+                <option value="us/ewr">Newark (us/ewr)</option>
+                <option value="es/vit">Spain (es/vit)</option>
+                <option value="fr/par">Paris (fr/par)</option>
+              </select>
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <!-- Step 2: Node Sizing -->
+      <div id="ncw-panel-2" style="display:none">
+        <h3 style="margin-bottom:1rem;color:#cbd5e1">Node Sizing</h3>
+        <p style="font-size:0.8rem;color:#64748b;margin-bottom:1rem">IONOS recommendation: 8 vCPU / 16 GB RAM / 600 GB SSD Premium for control plane (Dedicated Core, AMD TURIN).</p>
+        <div style="display:grid;gap:1.2rem">
+          <div>
+            <h4 style="margin-bottom:0.6rem;color:#94a3b8;font-size:0.85rem;text-transform:uppercase;letter-spacing:0.05em">Control Plane (×3 Dedicated Core)</h4>
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.75rem">
+              <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+                Cores
+                <input id="ncw-cp-cores" type="number" value="8" min="4" max="64" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
+              </label>
+              <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+                RAM (GB)
+                <input id="ncw-cp-ram" type="number" value="16" min="8" max="256" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
+              </label>
+              <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+                Disk (GB)
+                <input id="ncw-cp-disk" type="number" value="600" min="120" max="4096" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
+              </label>
+            </div>
+          </div>
+          <div>
+            <h4 style="margin-bottom:0.6rem;color:#94a3b8;font-size:0.85rem;text-transform:uppercase;letter-spacing:0.05em">Initial Worker MachineSet (×N vCPU)</h4>
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:0.75rem">
+              <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+                Replicas
+                <input id="ncw-w-replicas" type="number" value="2" min="0" max="20" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
+              </label>
+              <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+                Cores
+                <input id="ncw-w-cores" type="number" value="4" min="2" max="32" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
+              </label>
+              <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+                RAM (GB)
+                <input id="ncw-w-ram" type="number" value="8" min="4" max="128" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
+              </label>
+              <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+                Disk (GB)
+                <input id="ncw-w-disk" type="number" value="120" min="50" max="2048" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
+              </label>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Step 3: SSH Keys -->
+      <div id="ncw-panel-3" style="display:none">
+        <h3 style="margin-bottom:1rem;color:#cbd5e1">SSH Keys</h3>
+        <div style="display:grid;gap:0.85rem">
+          <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+            OCP Node SSH Public Key
+            <textarea id="ncw-ocp-ssh-pub" rows="3" placeholder="ssh-ed25519 AAAA..." style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.8rem;font-family:monospace;resize:vertical"></textarea>
+            <span style="font-size:0.75rem;color:#64748b">Injected into RHCOS nodes for emergency access via <code>core</code> user.</span>
+          </label>
+          <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+            Management VM SSH Public Key
+            <textarea id="ncw-mgmt-ssh-pub" rows="3" placeholder="ssh-ed25519 AAAA...  (leave blank to use OCP key above)" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.8rem;font-family:monospace;resize:vertical"></textarea>
+            <span style="font-size:0.75rem;color:#64748b">Authorized on the RHEL 9 management VM (root). Leave blank to use the OCP key.</span>
+          </label>
+          <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+            Management VM SSH Private Key <span style="color:#f87171">*</span>
+            <textarea id="ncw-mgmt-ssh-priv" rows="6" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.8rem;font-family:monospace;resize:vertical"></textarea>
+            <span style="font-size:0.75rem;color:#64748b">Used by this tool to SSH into the management VM during installation. Never stored on disk.</span>
+          </label>
+        </div>
+      </div>
+
+      <!-- Step 4: Review -->
+      <div id="ncw-panel-4" style="display:none">
+        <h3 style="margin-bottom:1rem;color:#cbd5e1">Review Configuration</h3>
+        <div id="ncw-review-content" style="background:#0b1e45;border:1px solid #1e3a5f;border-radius:8px;padding:1rem;font-size:0.82rem;font-family:monospace;line-height:1.8;color:#cbd5e1;white-space:pre-wrap"></div>
+        <div style="margin-top:1rem;padding:0.75rem 1rem;background:#1e1a0a;border:1px solid #78350f;border-radius:6px;font-size:0.8rem;color:#fcd34d">
+          <strong>&#9888; Pre-installation checklist:</strong><br>
+          &#10003; RHEL 9 HDD image is available in your target VDC location<br>
+          &#10003; DNS zone for your base domain is accessible (you will add records after infra creation)<br>
+          &#10003; IONOS FTP credentials are correct (same as your IONOS account login)<br>
+          &#10003; Sufficient IONOS quota: 3× Dedicated Core + 1× vCPU server, 3× SSD Premium 600 GB, 3× public IPs
+        </div>
+        <div class="error-box hidden" id="ncw-review-error" style="margin-top:0.75rem"></div>
+      </div>
+
+      <!-- Wizard nav buttons -->
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:1.5rem;padding-top:1rem;border-top:1px solid #1e293b">
+        <button id="ncw-btn-back" disabled
+          style="padding:0.5rem 1.2rem;border-radius:6px;border:1px solid #334155;background:transparent;color:#94a3b8;cursor:pointer;font-size:0.85rem">
+          &#8592; Back
+        </button>
+        <span id="ncw-step-indicator" style="font-size:0.78rem;color:#64748b">Step 1 of 5</span>
+        <button id="ncw-btn-next"
+          style="padding:0.5rem 1.4rem;border-radius:6px;border:none;background:#1d4ed8;color:#fff;cursor:pointer;font-size:0.85rem;font-weight:600">
+          Next &#8594;
+        </button>
+      </div>
+    </div><!-- /ncw-config -->
+
+    <!-- ── Install progress view ──────────────────────────────────────── -->
+    <div id="ncw-install" style="display:none">
+
+      <!-- DNS notice — shown after infra created, before setup-management -->
+      <div id="ncw-dns-notice" class="hidden" style="margin-bottom:1.25rem;padding:1rem;background:#1a1200;border:1px solid #92400e;border-radius:8px;font-size:0.84rem">
+        <div style="font-weight:700;color:#fcd34d;margin-bottom:0.5rem">&#128204; DNS Records Required Before Proceeding</div>
+        <p style="color:#fde68a;margin-bottom:0.5rem">Add these A records to your DNS zone, then tick the checkbox below to continue.</p>
+        <pre id="ncw-dns-records" style="background:#0f172a;padding:0.75rem;border-radius:6px;font-size:0.8rem;color:#86efac;overflow-x:auto;margin:0.5rem 0"></pre>
+        <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;color:#fde68a;font-size:0.83rem;margin-top:0.5rem">
+          <input type="checkbox" id="ncw-dns-confirmed" style="width:1rem;height:1rem">
+          I have added the DNS records above and they are propagating
+        </label>
+      </div>
+
+      <!-- Phase list -->
+      <div id="ncw-phases" style="display:flex;flex-direction:column;gap:0.6rem">
+
+        <!-- Phase A: Create Infrastructure -->
+        <div class="ncw-phase" id="ncw-phase-infra" data-status="pending">
+          <div class="ncw-phase-hdr" onclick="ncwTogglePhase('infra')" style="display:flex;align-items:center;gap:0.75rem;padding:0.75rem 1rem;background:#0b1e45;border:1px solid #1e3a5f;border-radius:8px;cursor:pointer">
+            <span class="ncw-phase-badge" style="width:1.6rem;height:1.6rem;border-radius:50%;background:#1e3a5f;display:flex;align-items:center;justify-content:center;font-size:0.72rem;font-weight:700;flex-shrink:0;color:#93c5fd">A</span>
+            <span style="flex:1;font-size:0.9rem;font-weight:600;color:#cbd5e1">Create Infrastructure</span>
+            <span class="ncw-phase-status" style="font-size:0.78rem;color:#64748b">Pending</span>
+            <button class="ncw-run-btn" id="ncw-run-infra" onclick="event.stopPropagation();ncwRunPhase('infra')"
+              style="padding:0.3rem 0.85rem;border-radius:5px;border:none;background:#1d4ed8;color:#fff;cursor:pointer;font-size:0.78rem;font-weight:600">Run</button>
+          </div>
+          <div class="ncw-phase-body hidden" id="ncw-body-infra" style="border:1px solid #1e3a5f;border-top:none;border-radius:0 0 8px 8px;padding:0.75rem;background:#070f1e">
+            <div id="ncw-steps-infra" style="display:flex;flex-direction:column;gap:0.3rem;margin-bottom:0.5rem;font-size:0.82rem"></div>
+            <pre id="ncw-log-infra" class="hidden" style="background:#0b1220;border-radius:6px;padding:0.6rem;font-size:0.75rem;max-height:220px;overflow-y:auto;margin:0;color:#94a3b8;white-space:pre-wrap"></pre>
+            <div class="error-box hidden" id="ncw-err-infra" style="margin-top:0.5rem"></div>
+          </div>
+        </div>
+
+        <!-- Phase B: Setup Management VM -->
+        <div class="ncw-phase" id="ncw-phase-mgmt" data-status="pending">
+          <div class="ncw-phase-hdr" onclick="ncwTogglePhase('mgmt')" style="display:flex;align-items:center;gap:0.75rem;padding:0.75rem 1rem;background:#0b1e45;border:1px solid #1e3a5f;border-radius:8px;cursor:pointer">
+            <span class="ncw-phase-badge" style="width:1.6rem;height:1.6rem;border-radius:50%;background:#1e3a5f;display:flex;align-items:center;justify-content:center;font-size:0.72rem;font-weight:700;flex-shrink:0;color:#93c5fd">B</span>
+            <span style="flex:1;font-size:0.9rem;font-weight:600;color:#cbd5e1">Setup Management VM</span>
+            <span class="ncw-phase-status" style="font-size:0.78rem;color:#64748b">Pending</span>
+            <button class="ncw-run-btn" id="ncw-run-mgmt" onclick="event.stopPropagation();ncwRunPhase('mgmt')" disabled
+              style="padding:0.3rem 0.85rem;border-radius:5px;border:none;background:#374151;color:#9ca3af;cursor:not-allowed;font-size:0.78rem;font-weight:600">Run</button>
+          </div>
+          <div class="ncw-phase-body hidden" id="ncw-body-mgmt" style="border:1px solid #1e3a5f;border-top:none;border-radius:0 0 8px 8px;padding:0.75rem;background:#070f1e">
+            <div id="ncw-steps-mgmt" style="display:flex;flex-direction:column;gap:0.3rem;margin-bottom:0.5rem;font-size:0.82rem"></div>
+            <pre id="ncw-log-mgmt" class="hidden" style="background:#0b1220;border-radius:6px;padding:0.6rem;font-size:0.75rem;max-height:220px;overflow-y:auto;margin:0;color:#94a3b8;white-space:pre-wrap"></pre>
+            <div class="error-box hidden" id="ncw-err-mgmt" style="margin-top:0.5rem"></div>
+          </div>
+        </div>
+
+        <!-- Phase C: Generate ISO -->
+        <div class="ncw-phase" id="ncw-phase-geniso" data-status="pending">
+          <div class="ncw-phase-hdr" onclick="ncwTogglePhase('geniso')" style="display:flex;align-items:center;gap:0.75rem;padding:0.75rem 1rem;background:#0b1e45;border:1px solid #1e3a5f;border-radius:8px;cursor:pointer">
+            <span class="ncw-phase-badge" style="width:1.6rem;height:1.6rem;border-radius:50%;background:#1e3a5f;display:flex;align-items:center;justify-content:center;font-size:0.72rem;font-weight:700;flex-shrink:0;color:#93c5fd">C</span>
+            <span style="flex:1;font-size:0.9rem;font-weight:600;color:#cbd5e1">Generate Agent Installer ISO</span>
+            <span class="ncw-phase-status" style="font-size:0.78rem;color:#64748b">Pending</span>
+            <button class="ncw-run-btn" id="ncw-run-geniso" onclick="event.stopPropagation();ncwRunPhase('geniso')" disabled
+              style="padding:0.3rem 0.85rem;border-radius:5px;border:none;background:#374151;color:#9ca3af;cursor:not-allowed;font-size:0.78rem;font-weight:600">Run</button>
+          </div>
+          <div class="ncw-phase-body hidden" id="ncw-body-geniso" style="border:1px solid #1e3a5f;border-top:none;border-radius:0 0 8px 8px;padding:0.75rem;background:#070f1e">
+            <div id="ncw-steps-geniso" style="display:flex;flex-direction:column;gap:0.3rem;margin-bottom:0.5rem;font-size:0.82rem"></div>
+            <pre id="ncw-log-geniso" class="hidden" style="background:#0b1220;border-radius:6px;padding:0.6rem;font-size:0.75rem;max-height:220px;overflow-y:auto;margin:0;color:#94a3b8;white-space:pre-wrap"></pre>
+            <div class="error-box hidden" id="ncw-err-geniso" style="margin-top:0.5rem"></div>
+          </div>
+        </div>
+
+        <!-- Phase D: Upload ISO -->
+        <div class="ncw-phase" id="ncw-phase-upload" data-status="pending">
+          <div class="ncw-phase-hdr" onclick="ncwTogglePhase('upload')" style="display:flex;align-items:center;gap:0.75rem;padding:0.75rem 1rem;background:#0b1e45;border:1px solid #1e3a5f;border-radius:8px;cursor:pointer">
+            <span class="ncw-phase-badge" style="width:1.6rem;height:1.6rem;border-radius:50%;background:#1e3a5f;display:flex;align-items:center;justify-content:center;font-size:0.72rem;font-weight:700;flex-shrink:0;color:#93c5fd">D</span>
+            <span style="flex:1;font-size:0.9rem;font-weight:600;color:#cbd5e1">Upload ISO to IONOS Image Catalog</span>
+            <span class="ncw-phase-status" style="font-size:0.78rem;color:#64748b">Pending</span>
+            <button class="ncw-run-btn" id="ncw-run-upload" onclick="event.stopPropagation();ncwRunPhase('upload')" disabled
+              style="padding:0.3rem 0.85rem;border-radius:5px;border:none;background:#374151;color:#9ca3af;cursor:not-allowed;font-size:0.78rem;font-weight:600">Run</button>
+          </div>
+          <div class="ncw-phase-body hidden" id="ncw-body-upload" style="border:1px solid #1e3a5f;border-top:none;border-radius:0 0 8px 8px;padding:0.75rem;background:#070f1e">
+            <div id="ncw-steps-upload" style="display:flex;flex-direction:column;gap:0.3rem;margin-bottom:0.5rem;font-size:0.82rem"></div>
+            <pre id="ncw-log-upload" class="hidden" style="background:#0b1220;border-radius:6px;padding:0.6rem;font-size:0.75rem;max-height:220px;overflow-y:auto;margin:0;color:#94a3b8;white-space:pre-wrap"></pre>
+            <div class="error-box hidden" id="ncw-err-upload" style="margin-top:0.5rem"></div>
+          </div>
+        </div>
+
+        <!-- Phase E: Attach ISO and Boot -->
+        <div class="ncw-phase" id="ncw-phase-boot" data-status="pending">
+          <div class="ncw-phase-hdr" onclick="ncwTogglePhase('boot')" style="display:flex;align-items:center;gap:0.75rem;padding:0.75rem 1rem;background:#0b1e45;border:1px solid #1e3a5f;border-radius:8px;cursor:pointer">
+            <span class="ncw-phase-badge" style="width:1.6rem;height:1.6rem;border-radius:50%;background:#1e3a5f;display:flex;align-items:center;justify-content:center;font-size:0.72rem;font-weight:700;flex-shrink:0;color:#93c5fd">E</span>
+            <span style="flex:1;font-size:0.9rem;font-weight:600;color:#cbd5e1">Attach ISO &amp; Boot Control Plane VMs</span>
+            <span class="ncw-phase-status" style="font-size:0.78rem;color:#64748b">Pending</span>
+            <button class="ncw-run-btn" id="ncw-run-boot" onclick="event.stopPropagation();ncwRunPhase('boot')" disabled
+              style="padding:0.3rem 0.85rem;border-radius:5px;border:none;background:#374151;color:#9ca3af;cursor:not-allowed;font-size:0.78rem;font-weight:600">Run</button>
+          </div>
+          <div class="ncw-phase-body hidden" id="ncw-body-boot" style="border:1px solid #1e3a5f;border-top:none;border-radius:0 0 8px 8px;padding:0.75rem;background:#070f1e">
+            <div id="ncw-steps-boot" style="display:flex;flex-direction:column;gap:0.3rem;margin-bottom:0.5rem;font-size:0.82rem"></div>
+            <pre id="ncw-log-boot" class="hidden" style="background:#0b1220;border-radius:6px;padding:0.6rem;font-size:0.75rem;max-height:220px;overflow-y:auto;margin:0;color:#94a3b8;white-space:pre-wrap"></pre>
+            <div class="error-box hidden" id="ncw-err-boot" style="margin-top:0.5rem"></div>
+          </div>
+        </div>
+
+        <!-- Phase F: Monitor Bootstrap -->
+        <div class="ncw-phase" id="ncw-phase-bootstrap" data-status="pending">
+          <div class="ncw-phase-hdr" onclick="ncwTogglePhase('bootstrap')" style="display:flex;align-items:center;gap:0.75rem;padding:0.75rem 1rem;background:#0b1e45;border:1px solid #1e3a5f;border-radius:8px;cursor:pointer">
+            <span class="ncw-phase-badge" style="width:1.6rem;height:1.6rem;border-radius:50%;background:#1e3a5f;display:flex;align-items:center;justify-content:center;font-size:0.72rem;font-weight:700;flex-shrink:0;color:#93c5fd">F</span>
+            <span style="flex:1;font-size:0.9rem;font-weight:600;color:#cbd5e1">Monitor Bootstrap (~25–35 min)</span>
+            <span class="ncw-phase-status" style="font-size:0.78rem;color:#64748b">Pending</span>
+            <button class="ncw-run-btn" id="ncw-run-bootstrap" onclick="event.stopPropagation();ncwRunPhase('bootstrap')" disabled
+              style="padding:0.3rem 0.85rem;border-radius:5px;border:none;background:#374151;color:#9ca3af;cursor:not-allowed;font-size:0.78rem;font-weight:600">Run</button>
+          </div>
+          <div class="ncw-phase-body hidden" id="ncw-body-bootstrap" style="border:1px solid #1e3a5f;border-top:none;border-radius:0 0 8px 8px;padding:0.75rem;background:#070f1e">
+            <div id="ncw-steps-bootstrap" style="display:flex;flex-direction:column;gap:0.3rem;margin-bottom:0.5rem;font-size:0.82rem"></div>
+            <pre id="ncw-log-bootstrap" class="hidden" style="background:#0b1220;border-radius:6px;padding:0.6rem;font-size:0.75rem;max-height:300px;overflow-y:auto;margin:0;color:#94a3b8;white-space:pre-wrap"></pre>
+            <div class="error-box hidden" id="ncw-err-bootstrap" style="margin-top:0.5rem"></div>
+          </div>
+        </div>
+
+        <!-- Phase G: Monitor Full Install -->
+        <div class="ncw-phase" id="ncw-phase-finalinstall" data-status="pending">
+          <div class="ncw-phase-hdr" onclick="ncwTogglePhase('finalinstall')" style="display:flex;align-items:center;gap:0.75rem;padding:0.75rem 1rem;background:#0b1e45;border:1px solid #1e3a5f;border-radius:8px;cursor:pointer">
+            <span class="ncw-phase-badge" style="width:1.6rem;height:1.6rem;border-radius:50%;background:#1e3a5f;display:flex;align-items:center;justify-content:center;font-size:0.72rem;font-weight:700;flex-shrink:0;color:#93c5fd">G</span>
+            <span style="flex:1;font-size:0.9rem;font-weight:600;color:#cbd5e1">Monitor Full Installation (~45–60 min)</span>
+            <span class="ncw-phase-status" style="font-size:0.78rem;color:#64748b">Pending</span>
+            <button class="ncw-run-btn" id="ncw-run-finalinstall" onclick="event.stopPropagation();ncwRunPhase('finalinstall')" disabled
+              style="padding:0.3rem 0.85rem;border-radius:5px;border:none;background:#374151;color:#9ca3af;cursor:not-allowed;font-size:0.78rem;font-weight:600">Run</button>
+          </div>
+          <div class="ncw-phase-body hidden" id="ncw-body-finalinstall" style="border:1px solid #1e3a5f;border-top:none;border-radius:0 0 8px 8px;padding:0.75rem;background:#070f1e">
+            <div id="ncw-steps-finalinstall" style="display:flex;flex-direction:column;gap:0.3rem;margin-bottom:0.5rem;font-size:0.82rem"></div>
+            <pre id="ncw-log-finalinstall" class="hidden" style="background:#0b1220;border-radius:6px;padding:0.6rem;font-size:0.75rem;max-height:300px;overflow-y:auto;margin:0;color:#94a3b8;white-space:pre-wrap"></pre>
+            <div class="error-box hidden" id="ncw-err-finalinstall" style="margin-top:0.5rem"></div>
+          </div>
+        </div>
+
+      </div><!-- /ncw-phases -->
+
+      <!-- Completion panel -->
+      <div id="ncw-complete" class="hidden" style="margin-top:1.25rem;padding:1.25rem;background:#0a1f0a;border:1px solid #166534;border-radius:8px">
+        <h3 style="color:#86efac;margin-bottom:1rem">&#10003; Installation Complete!</h3>
+        <div style="display:grid;gap:0.6rem;font-size:0.84rem">
+          <div><span style="color:#64748b">API URL:</span> <code id="ncw-cred-api" style="color:#34d399"></code></div>
+          <div><span style="color:#64748b">Console:</span> <code id="ncw-cred-console" style="color:#34d399"></code></div>
+          <div><span style="color:#64748b">kubeadmin password:</span> <code id="ncw-cred-pw" style="color:#fbbf24;background:#1c1200;padding:0.1rem 0.4rem;border-radius:4px"></code></div>
+        </div>
+        <p style="margin-top:0.85rem;font-size:0.8rem;color:#64748b">
+          Connect to the new cluster using the <strong style="color:#60a5fa">Cluster Connection</strong> tab above. Use the API URL and kubeadmin credentials.
+          The kubeconfig is available at <code>/opt/ocp-install/auth/kubeconfig</code> on the management VM.
+        </p>
+        <div style="margin-top:0.75rem;padding:0.6rem 0.85rem;background:#1e1a0a;border:1px solid #78350f;border-radius:6px;font-size:0.8rem;color:#fde68a">
+          <strong>&#128204; Next step:</strong> Deploy the IONOS Machine API provider and create worker MachineSets for autoscaling.
+          Use the <strong>Machine Autoscaling Management</strong> section after connecting to the cluster.
+        </div>
+      </div>
+
+      <!-- Back to config button -->
+      <button onclick="ncwShowConfig()" style="margin-top:1rem;padding:0.4rem 0.85rem;border-radius:6px;border:1px solid #334155;background:transparent;color:#64748b;cursor:pointer;font-size:0.8rem">
+        &#8592; Back to Configuration
+      </button>
+
+    </div><!-- /ncw-install -->
+
+  </div><!-- /new-cluster-card -->
+
   </div><!-- /container -->
   </main><!-- /main-content -->
 </div><!-- /app-layout -->
@@ -1785,7 +2132,8 @@
     connection:  ['connect-card', 'overview-card', 'machinesets-card', 'nodes-card'],
     manual:      ['manual-connect-hint', 'scaling-action-card', 'scale-in-card', 'add-node-card', 'csrs-card'],
     autoscaling:  ['autoscaling-connect-hint', 'machine-api-status-card', 'autoscale-card'],
-    healthchecks: ['healthchecks-connect-hint', 'mhc-list-card', 'mhc-create-card'],
+    healthchecks:    ['healthchecks-connect-hint', 'mhc-list-card', 'mhc-create-card'],
+    'install-cluster': ['new-cluster-card'],
   };
   let currentNav = 'connection';
 
@@ -4258,6 +4606,356 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
 
   // Initialise conditions rows with the standard worker template on first load
   mhcApplyTemplate('worker');
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // INSTALL NEW CLUSTER WIZARD
+  // ═══════════════════════════════════════════════════════════════════════
+
+  let ncwStep = 0;
+  const NCW_TOTAL_STEPS = 5;
+
+  // Collected config — populated across wizard steps
+  let ncwConfig = {};
+
+  // Phase → backend endpoint mapping
+  const NCW_PHASES = {
+    infra:       'create-infra',
+    mgmt:        'setup-management',
+    geniso:      'generate-iso',
+    upload:      'upload-iso',
+    boot:        'attach-boot',
+    bootstrap:   'monitor-bootstrap',
+    finalinstall:'monitor-install',
+  };
+  // Phase order for auto-advance
+  const NCW_PHASE_ORDER = ['infra','mgmt','geniso','upload','boot','bootstrap','finalinstall'];
+
+  // ── Stepper navigation ────────────────────────────────────────────────
+
+  function ncwGotoStep(n) {
+    document.getElementById(`ncw-panel-${ncwStep}`).style.display = 'none';
+    document.querySelectorAll('.ncw-step').forEach(el => {
+      const s = parseInt(el.dataset.step, 10);
+      el.style.background = s === n ? '#1e3a5f' : '#0f172a';
+      el.style.color       = s === n ? '#93c5fd' : '#64748b';
+    });
+    ncwStep = n;
+    document.getElementById(`ncw-panel-${ncwStep}`).style.display = '';
+    document.getElementById('ncw-step-indicator').textContent = `Step ${ncwStep + 1} of ${NCW_TOTAL_STEPS}`;
+    document.getElementById('ncw-btn-back').disabled = (ncwStep === 0);
+    document.getElementById('ncw-btn-next').innerHTML =
+      ncwStep === NCW_TOTAL_STEPS - 1 ? '&#128640; Start Installation' : 'Next &#8594;';
+    if (ncwStep === NCW_TOTAL_STEPS - 1) ncwBuildReview();
+  }
+
+  function ncwBuildReview() {
+    const c = ncwConfig;
+    const lines = [
+      `Cluster Name:      ${c.clusterName || '—'}`,
+      `Base Domain:       ${c.baseDomain || '—'}`,
+      `OCP Version:       ${c.ocpVersion || '—'}`,
+      `VDC Name:          ${c.vdcName || '—'}`,
+      `VDC Location:      ${c.vdcLocation || '—'}`,
+      ``,
+      `Control Plane:     3× Dedicated Core (AMD TURIN)`,
+      `                   ${c.controlCores || 8} cores / ${c.controlRamGB || 16} GB RAM / ${c.controlDiskGB || 600} GB SSD Premium`,
+      ``,
+      `Workers (initial): ${c.workerReplicas || 2}× vCPU`,
+      `                   ${c.workerCores || 4} cores / ${c.workerRamGB || 8} GB RAM / ${c.workerDiskGB || 120} GB SSD Standard`,
+      ``,
+      `IONOS Token:       ${c.ionosToken ? '✓ provided' : '✗ missing'}`,
+      `FTP Credentials:   ${c.ionosFtpUser ? `${c.ionosFtpUser}  /  ****` : '✗ missing'}`,
+      `Pull Secret:       ${c.pullSecret ? '✓ provided' : '✗ missing'}`,
+      `OCP SSH Pub Key:   ${c.ocpSshPubKey ? '✓ provided' : '✗ missing'}`,
+      `Mgmt SSH Priv Key: ${c.mgmtSshPrivKey ? '✓ provided' : '✗ missing'}`,
+    ];
+    document.getElementById('ncw-review-content').textContent = lines.join('\n');
+    const missing = [];
+    if (!c.ionosToken)    missing.push('IONOS Token');
+    if (!c.ionosFtpUser)  missing.push('FTP Username');
+    if (!c.ionosFtpPass)  missing.push('FTP Password');
+    if (!c.pullSecret)    missing.push('Pull Secret');
+    if (!c.clusterName)   missing.push('Cluster Name');
+    if (!c.baseDomain)    missing.push('Base Domain');
+    if (!c.ocpVersion)    missing.push('OCP Version');
+    if (!c.vdcName)       missing.push('VDC Name');
+    if (!c.mgmtSshPrivKey) missing.push('Mgmt SSH Private Key');
+    const errEl = document.getElementById('ncw-review-error');
+    if (missing.length) {
+      errEl.classList.remove('hidden');
+      errEl.textContent = 'Missing required fields: ' + missing.join(', ');
+    } else {
+      errEl.classList.add('hidden');
+    }
+  }
+
+  function ncwCollectStep() {
+    switch (ncwStep) {
+      case 0:
+        ncwConfig.ionosToken    = document.getElementById('ncw-ionos-token').value.trim();
+        ncwConfig.ionosFtpUser  = document.getElementById('ncw-ftp-user').value.trim();
+        ncwConfig.ionosFtpPass  = document.getElementById('ncw-ftp-pass').value.trim();
+        ncwConfig.pullSecret    = document.getElementById('ncw-pull-secret').value.trim();
+        break;
+      case 1:
+        ncwConfig.clusterName   = document.getElementById('ncw-cluster-name').value.trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
+        ncwConfig.baseDomain    = document.getElementById('ncw-base-domain').value.trim();
+        ncwConfig.ocpVersion    = document.getElementById('ncw-ocp-version').value;
+        ncwConfig.vdcName       = document.getElementById('ncw-vdc-name').value.trim();
+        ncwConfig.vdcLocation   = document.getElementById('ncw-vdc-location').value;
+        break;
+      case 2:
+        ncwConfig.controlCores  = document.getElementById('ncw-cp-cores').value;
+        ncwConfig.controlRamGB  = document.getElementById('ncw-cp-ram').value;
+        ncwConfig.controlDiskGB = document.getElementById('ncw-cp-disk').value;
+        ncwConfig.workerReplicas= document.getElementById('ncw-w-replicas').value;
+        ncwConfig.workerCores   = document.getElementById('ncw-w-cores').value;
+        ncwConfig.workerRamGB   = document.getElementById('ncw-w-ram').value;
+        ncwConfig.workerDiskGB  = document.getElementById('ncw-w-disk').value;
+        break;
+      case 3:
+        ncwConfig.ocpSshPubKey  = document.getElementById('ncw-ocp-ssh-pub').value.trim();
+        ncwConfig.mgmtSshPubKey = document.getElementById('ncw-mgmt-ssh-pub').value.trim();
+        ncwConfig.mgmtSshPrivKey= document.getElementById('ncw-mgmt-ssh-priv').value.trim();
+        break;
+    }
+  }
+
+  document.getElementById('ncw-btn-next').addEventListener('click', () => {
+    ncwCollectStep();
+    if (ncwStep < NCW_TOTAL_STEPS - 1) {
+      ncwGotoStep(ncwStep + 1);
+    } else {
+      // Review step → Start Installation
+      const errEl = document.getElementById('ncw-review-error');
+      if (!errEl.classList.contains('hidden')) {
+        errEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        return;
+      }
+      ncwShowInstall();
+    }
+  });
+
+  document.getElementById('ncw-btn-back').addEventListener('click', () => {
+    if (ncwStep > 0) ncwGotoStep(ncwStep - 1);
+  });
+
+  document.querySelectorAll('.ncw-step').forEach(el =>
+    el.addEventListener('click', () => { ncwCollectStep(); ncwGotoStep(parseInt(el.dataset.step, 10)); })
+  );
+
+  function ncwShowConfig() {
+    document.getElementById('ncw-config').style.display = '';
+    document.getElementById('ncw-install').style.display = 'none';
+  }
+
+  function ncwShowInstall() {
+    document.getElementById('ncw-config').style.display = 'none';
+    document.getElementById('ncw-install').style.display = '';
+    // Auto-run phase A
+    ncwRunPhase('infra');
+  }
+
+  // ── Phase runner ──────────────────────────────────────────────────────
+
+  function ncwTogglePhase(key) {
+    const body = document.getElementById(`ncw-body-${key}`);
+    body.classList.toggle('hidden');
+  }
+
+  function ncwSetPhaseStatus(key, status, label) {
+    const ph   = document.getElementById(`ncw-phase-${key}`);
+    const stat = ph.querySelector('.ncw-phase-status');
+    ph.dataset.status = status;
+    if (stat) stat.textContent = label;
+    // Update badge colour
+    const badge = ph.querySelector('.ncw-phase-badge');
+    if (badge) {
+      badge.style.background = status === 'done'    ? '#166534' :
+                               status === 'running' ? '#1d4ed8' :
+                               status === 'error'   ? '#7f1d1d' : '#1e3a5f';
+      badge.style.color      = status === 'done'    ? '#86efac' :
+                               status === 'running' ? '#bfdbfe' :
+                               status === 'error'   ? '#fca5a5' : '#93c5fd';
+    }
+  }
+
+  function ncwEnablePhaseBtn(key) {
+    const btn = document.getElementById(`ncw-run-${key}`);
+    if (!btn) return;
+    btn.disabled = false;
+    btn.style.background = '#1d4ed8';
+    btn.style.color      = '#fff';
+    btn.style.cursor     = 'pointer';
+  }
+
+  async function ncwRunPhase(key) {
+    const endpoint   = NCW_PHASES[key];
+    const stepsEl    = document.getElementById(`ncw-steps-${key}`);
+    const logEl      = document.getElementById(`ncw-log-${key}`);
+    const errEl      = document.getElementById(`ncw-err-${key}`);
+    const bodyEl     = document.getElementById(`ncw-body-${key}`);
+    const runBtn     = document.getElementById(`ncw-run-${key}`);
+
+    // Open body panel
+    bodyEl.classList.remove('hidden');
+    stepsEl.innerHTML = '';
+    logEl.textContent = '';
+    logEl.classList.add('hidden');
+    errEl.classList.add('hidden');
+    if (runBtn) { runBtn.disabled = true; runBtn.textContent = 'Running...'; }
+    ncwSetPhaseStatus(key, 'running', 'Running...');
+
+    const stepMap = {};
+
+    function addOrUpdateStep(label, status) {
+      const icon = status === 'done' ? '&#10003;' : status === 'running' ? '&#8635;' : '&#10007;';
+      const col  = status === 'done' ? '#86efac'  : status === 'running' ? '#93c5fd'  : '#fca5a5';
+      if (stepMap[label]) {
+        stepMap[label].innerHTML = `<span style="color:${col}">${icon}</span> ${escHtml(label)}`;
+      } else {
+        const el = document.createElement('div');
+        el.innerHTML = `<span style="color:${col}">${icon}</span> ${escHtml(label)}`;
+        stepsEl.appendChild(el);
+        stepMap[label] = el;
+      }
+    }
+
+    try {
+      const resp = await fetch(`/api/new-cluster/${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...ncwConfig })
+      });
+      if (!resp.ok) {
+        const d = await resp.json().catch(() => ({}));
+        throw new Error(d.error || `HTTP ${resp.status}`);
+      }
+
+      const reader = resp.body.getReader();
+      const dec    = new TextDecoder();
+      let buf = '';
+      let doneData = null;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const parts = buf.split('\n\n');
+        buf = parts.pop();
+        for (const part of parts) {
+          const dl = part.split('\n').find(l => l.startsWith('data:'));
+          if (!dl) continue;
+          let ev;
+          try { ev = JSON.parse(dl.slice(5)); } catch { continue; }
+
+          if (ev.type === 'step') {
+            addOrUpdateStep(ev.label, ev.status);
+          } else if (ev.type === 'log') {
+            logEl.classList.remove('hidden');
+            logEl.textContent += ev.text;
+            logEl.scrollTop = logEl.scrollHeight;
+          } else if (ev.type === 'done') {
+            doneData = ev.data || null;
+          } else if (ev.type === 'error') {
+            throw new Error(ev.message);
+          }
+        }
+      }
+
+      ncwSetPhaseStatus(key, 'done', 'Done ✓');
+      if (runBtn) { runBtn.textContent = 'Retry'; runBtn.disabled = false; }
+
+      // Phase-specific post-success actions
+      ncwOnPhaseSuccess(key, doneData);
+
+    } catch (e) {
+      ncwSetPhaseStatus(key, 'error', 'Error ✗');
+      errEl.classList.remove('hidden');
+      errEl.textContent = e.message;
+      if (runBtn) { runBtn.textContent = 'Retry'; runBtn.disabled = false; }
+    }
+  }
+
+  function ncwOnPhaseSuccess(key, data) {
+    switch (key) {
+      case 'infra': {
+        // Show DNS records notice, then enable mgmt phase
+        if (data) {
+          const dns = [
+            `api.${ncwConfig.clusterName}.${ncwConfig.baseDomain}          IN A  ${data.nlbPubIp}`,
+            `api-int.${ncwConfig.clusterName}.${ncwConfig.baseDomain}      IN A  ${data.nlbPubIp}`,
+            `*.apps.${ncwConfig.clusterName}.${ncwConfig.baseDomain}       IN A  ${data.nlbPubIp}`,
+          ].join('\n');
+          document.getElementById('ncw-dns-records').textContent = dns;
+          document.getElementById('ncw-dns-notice').classList.remove('hidden');
+          // Only enable mgmt once DNS is confirmed
+          document.getElementById('ncw-dns-confirmed').addEventListener('change', function() {
+            if (this.checked) ncwEnablePhaseBtn('mgmt');
+            else {
+              const btn = document.getElementById('ncw-run-mgmt');
+              btn.disabled = true;
+              btn.style.background = '#374151';
+              btn.style.color = '#9ca3af';
+              btn.style.cursor = 'not-allowed';
+            }
+          }, { once: false });
+        } else {
+          ncwEnablePhaseBtn('mgmt');
+        }
+        break;
+      }
+      case 'mgmt':
+        ncwEnablePhaseBtn('geniso');
+        break;
+      case 'geniso':
+        ncwEnablePhaseBtn('upload');
+        break;
+      case 'upload':
+        ncwEnablePhaseBtn('boot');
+        break;
+      case 'boot':
+        ncwEnablePhaseBtn('bootstrap');
+        break;
+      case 'bootstrap':
+        ncwEnablePhaseBtn('finalinstall');
+        break;
+      case 'finalinstall':
+        if (data) ncwShowCredentials(data);
+        break;
+    }
+  }
+
+  function ncwShowCredentials(data) {
+    const panel = document.getElementById('ncw-complete');
+    panel.classList.remove('hidden');
+    document.getElementById('ncw-cred-api').textContent     = data.apiUrl     || '—';
+    document.getElementById('ncw-cred-console').textContent = data.consoleUrl || '—';
+    document.getElementById('ncw-cred-pw').textContent      = data.kubeadminPass || '(check /opt/ocp-install/auth/kubeadmin-password on management VM)';
+    panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  // Load OCP versions when the install-cluster section is first viewed
+  let ncwVersionsLoaded = false;
+  const origSwitchNav = switchNav;
+  switchNav = function(target) {
+    origSwitchNav(target);
+    if (target === 'install-cluster' && !ncwVersionsLoaded) {
+      ncwVersionsLoaded = true;
+      fetch('/api/new-cluster/ocp-versions')
+        .then(r => r.json())
+        .then(({ versions }) => {
+          const sel = document.getElementById('ncw-ocp-version');
+          sel.innerHTML = versions.map(v =>
+            `<option value="${escHtml(v.version)}">${escHtml(v.label)}</option>`
+          ).join('');
+        })
+        .catch(() => {
+          const sel = document.getElementById('ncw-ocp-version');
+          sel.innerHTML = `<option value="4.19.x">4.19 (latest)</option><option value="4.18.x">4.18 (latest)</option><option value="4.17.x">4.17 (latest)</option>`;
+        });
+    }
+  };
 
 </script>
 </body>
