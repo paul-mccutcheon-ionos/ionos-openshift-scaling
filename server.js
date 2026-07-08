@@ -4287,6 +4287,49 @@ function makeSseHelpers(res) {
   return { emit, step, log, done, fail };
 }
 
+// GET /api/new-cluster/mgmt-images?location=de/fra/2&token=...
+// Returns IONOS HDD images suitable for the management VM, sorted RHEL-family 9 first.
+app.get('/api/new-cluster/mgmt-images', async (req, res) => {
+  const { location, token } = req.query;
+  if (!token || !location) return res.status(400).json({ error: 'location and token required' });
+
+  const baseLocation = location.replace(/\/\d+$/, '');
+
+  try {
+    const imgResp = await ionosGet('/images?depth=1', token);
+
+    const imagePriority = name => {
+      const n = name.toLowerCase();
+      if (n.includes('rocky') && / 9[^0-9]/.test(n))               return 0;
+      if (n.includes('rocky'))                                        return 1;
+      if ((n.includes('rhel') || n.includes('red hat')) && / 9[^0-9]/.test(n)) return 2;
+      if (n.includes('rhel') || n.includes('red hat'))               return 3;
+      if (n.includes('almalinux') && / 9[^0-9]/.test(n))            return 4;
+      if (n.includes('almalinux'))                                    return 5;
+      if (n.includes('centos'))                                       return 6;
+      if (n.includes('ubuntu'))                                       return 7;
+      if (n.includes('debian'))                                       return 8;
+      return 9;
+    };
+
+    const images = (imgResp.items || [])
+      .filter(img => {
+        const imgLoc = (img.properties?.location || '').replace(/\/\d+$/, '');
+        return imgLoc === baseLocation && img.properties?.imageType === 'HDD';
+      })
+      .map(img => ({
+        id:   img.id,
+        name: img.properties.name,
+        size: img.properties.size || 0,
+      }))
+      .sort((a, b) => imagePriority(a.name) - imagePriority(b.name) || a.name.localeCompare(b.name));
+
+    res.json({ images });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /api/new-cluster/ocp-versions
 app.get('/api/new-cluster/ocp-versions', async (_req, res) => {
   const minors = ['4.19', '4.18', '4.17'];
@@ -4311,7 +4354,8 @@ app.get('/api/new-cluster/ocp-versions', async (_req, res) => {
 app.post('/api/new-cluster/create-infra', async (req, res) => {
   const { ionosToken, clusterName, vdcName, vdcLocation,
           controlCores, controlRamGB, controlDiskGB,
-          ocpSshPubKey, mgmtSshPubKey } = req.body;
+          ocpSshPubKey, mgmtSshPubKey,
+          mgmtImageId, mgmtImageName } = req.body;
   const { step, log, done, fail } = makeSseHelpers(res);
 
   // IONOS image catalog uses the base location without zone suffix (de/fra not de/fra/2)
@@ -4361,32 +4405,37 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
     log(`  Public LAN ID: ${pubLanId}\n`);
     step('Create public LAN (internet access)', 'done');
 
-    // 4. Locate RHEL 9 image
-    // Images are indexed by base location (de/fra) not zone-specific location (de/fra/2)
-    step('Locate RHEL 9 image for management VM', 'running');
-    log(`Searching IONOS image catalog for location "${baseLocation}"...\n`);
-    const imgResp = await ionosGet('/images?depth=1', ionosToken);
-    const rhel9   = (imgResp.items || []).find(img => {
-      const imgLoc = (img.properties?.location || '').replace(/\/\d+$/, '');
-      if (imgLoc !== baseLocation)              return false;
-      if (img.properties?.imageType !== 'HDD') return false;
-      const n = (img.properties?.name || '').toLowerCase();
-      return (n.includes('rhel') || n.includes('red hat')) &&
-             (n.includes(' 9') || n.includes('-9') || n.includes(':9') || / 9\./.test(n));
-    });
-    if (!rhel9) {
-      // Log all found images to help diagnose
-      const found = (imgResp.items || [])
-        .filter(img => (img.properties?.location || '').replace(/\/\d+$/, '') === baseLocation && img.properties?.imageType === 'HDD')
-        .map(img => img.properties?.name)
-        .join(', ');
-      fail(`No RHEL 9 HDD image found for location "${baseLocation}". ` +
-           `HDD images available: ${found || 'none'}. ` +
-           `Upload or import a RHEL 9 image in the IONOS DCD first.`);
-      return;
+    // 4. Resolve management VM image
+    step('Resolve management VM image', 'running');
+    let resolvedImageId;
+    if (mgmtImageId) {
+      resolvedImageId = mgmtImageId;
+      log(`  Using selected image: ${mgmtImageName || mgmtImageId}\n`);
+    } else {
+      // Fallback: auto-detect Rocky 9 / RHEL 9 / AlmaLinux 9
+      log(`No image pre-selected — searching catalog for Rocky/RHEL/AlmaLinux 9 in "${baseLocation}"...\n`);
+      const imgResp = await ionosGet('/images?depth=1', ionosToken);
+      const found   = (imgResp.items || []).find(img => {
+        const imgLoc = (img.properties?.location || '').replace(/\/\d+$/, '');
+        if (imgLoc !== baseLocation)              return false;
+        if (img.properties?.imageType !== 'HDD') return false;
+        const n = (img.properties?.name || '').toLowerCase();
+        return (n.includes('rocky') || n.includes('rhel') || n.includes('red hat') || n.includes('almalinux')) &&
+               (/ 9[^0-9]/.test(n) || n.endsWith(' 9') || n.includes('-9') || n.includes(':9'));
+      });
+      if (!found) {
+        const hddNames = (imgResp.items || [])
+          .filter(img => (img.properties?.location || '').replace(/\/\d+$/, '') === baseLocation && img.properties?.imageType === 'HDD')
+          .map(img => img.properties?.name).join(', ');
+        fail(`No Rocky/RHEL/AlmaLinux 9 image found for "${baseLocation}". ` +
+             `Go back to step 2 and select a management VM image, or import one in the IONOS DCD. ` +
+             `Available HDD images: ${hddNames || 'none'}.`);
+        return;
+      }
+      resolvedImageId = found.id;
+      log(`  Auto-detected: ${found.properties.name}  (${found.id})\n`);
     }
-    log(`  Found: ${rhel9.properties.name}  (${rhel9.id})\n`);
-    step('Locate RHEL 9 image for management VM', 'done');
+    step('Resolve management VM image', 'done');
 
     // 5. Create management VM
     step('Create management VM (2 vCPU, 4 GB RAM)', 'running');
@@ -4395,7 +4444,7 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
       properties: { name: `${clusterName}-mgmt`, cores: 2, ram: 4096, type: 'VCPU' },
       entities: {
         volumes: { items: [{ properties: {
-          name: `${clusterName}-mgmt-root`, size: 50, type: 'SSD Standard', image: rhel9.id,
+          name: `${clusterName}-mgmt-root`, size: 50, type: 'SSD Standard', image: resolvedImageId,
           ...(sshKeys.length ? { sshKeys } : { imagePassword: 'Temp1OcpInstall!' })
         }}] },
         nics: { items: [

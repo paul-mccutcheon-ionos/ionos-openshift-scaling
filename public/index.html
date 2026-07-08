@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.1.23</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.1.24</span>
   </div>
 
   <div class="banner-actions">
@@ -1833,6 +1833,19 @@
               </select>
             </label>
           </div>
+          <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+            Management VM OS Image
+            <div style="display:flex;gap:0.5rem;align-items:center">
+              <select id="ncw-mgmt-image" style="flex:1;background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
+                <option value="">— Enter token &amp; select location, then click Refresh —</option>
+              </select>
+              <button id="ncw-mgmt-image-refresh" type="button" onclick="ncwLoadMgmtImages()"
+                style="background:#1e3a5f;border:1px solid #2d5a8e;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.8rem;font-size:0.82rem;cursor:pointer;white-space:nowrap">
+                &#8635; Refresh
+              </button>
+            </div>
+            <span style="font-size:0.75rem;color:#64748b">Rocky Linux 9 or RHEL 9 recommended — management VM uses <code>dnf</code>. Leave blank to auto-detect.</span>
+          </label>
         </div>
       </div>
 
@@ -1894,7 +1907,7 @@
           <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
             Management VM SSH Public Key
             <textarea id="ncw-mgmt-ssh-pub" rows="3" placeholder="ssh-ed25519 AAAA...  (leave blank to use OCP key above)" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.8rem;font-family:monospace;resize:vertical"></textarea>
-            <span style="font-size:0.75rem;color:#64748b">Authorized on the RHEL 9 management VM (root). Leave blank to use the OCP key.</span>
+            <span style="font-size:0.75rem;color:#64748b">Authorized on the management VM (root). Leave blank to use the OCP key above.</span>
           </label>
           <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
             Management VM SSH Private Key <span style="color:#f87171">*</span>
@@ -4710,13 +4723,17 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
         ncwConfig.ionosFtpPass  = document.getElementById('ncw-ftp-pass').value.trim();
         ncwConfig.pullSecret    = document.getElementById('ncw-pull-secret').value.trim();
         break;
-      case 1:
-        ncwConfig.clusterName   = document.getElementById('ncw-cluster-name').value.trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
-        ncwConfig.baseDomain    = document.getElementById('ncw-base-domain').value.trim();
-        ncwConfig.ocpVersion    = document.getElementById('ncw-ocp-version').value;
-        ncwConfig.vdcName       = document.getElementById('ncw-vdc-name').value.trim();
-        ncwConfig.vdcLocation   = document.getElementById('ncw-vdc-location').value;
+      case 1: {
+        ncwConfig.clusterName    = document.getElementById('ncw-cluster-name').value.trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
+        ncwConfig.baseDomain     = document.getElementById('ncw-base-domain').value.trim();
+        ncwConfig.ocpVersion     = document.getElementById('ncw-ocp-version').value;
+        ncwConfig.vdcName        = document.getElementById('ncw-vdc-name').value.trim();
+        ncwConfig.vdcLocation    = document.getElementById('ncw-vdc-location').value;
+        const imgSel             = document.getElementById('ncw-mgmt-image');
+        ncwConfig.mgmtImageId    = imgSel?.value || '';
+        ncwConfig.mgmtImageName  = imgSel?.options[imgSel.selectedIndex]?.text || '';
         break;
+      }
       case 2:
         ncwConfig.controlCores  = document.getElementById('ncw-cp-cores').value;
         ncwConfig.controlRamGB  = document.getElementById('ncw-cp-ram').value;
@@ -4975,6 +4992,41 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
       // Step 1 fields are populated by the .env file upload handler (banner button)
     }
   };
+
+  // ── Management VM image loader ─────────────────────────────────────────────
+  async function ncwLoadMgmtImages() {
+    const token    = document.getElementById('ncw-ionos-token').value.trim() || ncwConfig.ionosToken || '';
+    const location = document.getElementById('ncw-vdc-location').value;
+    const sel      = document.getElementById('ncw-mgmt-image');
+    const btn      = document.getElementById('ncw-mgmt-image-refresh');
+    if (!token) {
+      sel.innerHTML = '<option value="">— Enter IONOS API token first —</option>';
+      return;
+    }
+    sel.innerHTML = '<option value="">Loading images...</option>';
+    if (btn) { btn.disabled = true; btn.textContent = '...'; }
+    try {
+      const r = await fetch(`/api/new-cluster/mgmt-images?location=${encodeURIComponent(location)}&token=${encodeURIComponent(token)}`);
+      const { images, error } = await r.json();
+      if (error) throw new Error(error);
+      if (!images || images.length === 0) {
+        sel.innerHTML = '<option value="">No HDD images found for this location</option>';
+        return;
+      }
+      sel.innerHTML = '<option value="">— auto-detect Rocky/RHEL/AlmaLinux 9 —</option>' +
+        images.map(img => `<option value="${escHtml(img.id)}">${escHtml(img.name)}${img.size ? ' (' + img.size + ' GB)' : ''}</option>`).join('');
+    } catch (e) {
+      sel.innerHTML = `<option value="">Error: ${escHtml(e.message)}</option>`;
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = '↻ Refresh'; }
+    }
+  }
+
+  // Auto-refresh image list when location changes (if token is already entered)
+  document.getElementById('ncw-vdc-location').addEventListener('change', () => {
+    const token = document.getElementById('ncw-ionos-token').value.trim() || ncwConfig.ionosToken || '';
+    if (token) ncwLoadMgmtImages();
+  });
 
 </script>
 </body>
