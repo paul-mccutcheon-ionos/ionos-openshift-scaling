@@ -387,6 +387,7 @@ app.get('/api/env-prefill', async (req, res) => {
     mgmtInternalIp:    str('OCP_MGMT_INTERNAL_IP'),
     ocpAdminUsername:  str('OCP_ADMIN_USERNAME'),
     ocpAdminPassword:  str('OCP_ADMIN_PASSWORD'),
+    rhPullSecret:      str('RH_PULL_SECRET'),
   });
 });
 

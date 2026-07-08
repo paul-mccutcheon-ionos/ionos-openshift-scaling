@@ -4935,13 +4935,15 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
-  // Load OCP versions when the install-cluster section is first viewed
+  // On first visit to install-cluster: load OCP versions + pre-fill from .env
   let ncwVersionsLoaded = false;
   const origSwitchNav = switchNav;
   switchNav = function(target) {
     origSwitchNav(target);
     if (target === 'install-cluster' && !ncwVersionsLoaded) {
       ncwVersionsLoaded = true;
+
+      // Load available OCP versions into the dropdown
       fetch('/api/new-cluster/ocp-versions')
         .then(r => r.json())
         .then(({ versions }) => {
@@ -4951,9 +4953,28 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
           ).join('');
         })
         .catch(() => {
-          const sel = document.getElementById('ncw-ocp-version');
-          sel.innerHTML = `<option value="4.19.x">4.19 (latest)</option><option value="4.18.x">4.18 (latest)</option><option value="4.17.x">4.17 (latest)</option>`;
+          document.getElementById('ncw-ocp-version').innerHTML =
+            `<option value="4.19.x">4.19 (latest)</option>` +
+            `<option value="4.18.x">4.18 (latest)</option>` +
+            `<option value="4.17.x">4.17 (latest)</option>`;
         });
+
+      // Pre-fill step 1 from server .env (IONOS token, FTP creds, pull secret)
+      fetch('/api/env-prefill')
+        .then(r => r.ok ? r.json() : null)
+        .then(env => {
+          if (!env) return;
+          const setIfEmpty = (id, val) => {
+            if (!val) return;
+            const el = document.getElementById(id);
+            if (el && !el.value.trim()) el.value = val;
+          };
+          setIfEmpty('ncw-ionos-token',  env.ionosToken);
+          setIfEmpty('ncw-ftp-user',     env.ionosFtpUser);
+          setIfEmpty('ncw-ftp-pass',     env.ionosFtpPass);
+          setIfEmpty('ncw-pull-secret',  env.rhPullSecret);
+        })
+        .catch(() => {});  // silent — fields stay blank if .env has no values
     }
   };
 
