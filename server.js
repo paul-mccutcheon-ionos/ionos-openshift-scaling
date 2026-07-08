@@ -4399,54 +4399,89 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
           cpuFamily,
           ocpSshPubKey, mgmtSshPubKey,
           mgmtImageId, mgmtImageName } = req.body;
-  const resolvedCpuFamily = cpuFamily || 'AMD_EPYC';
   const { step, log, done, fail } = makeSseHelpers(res);
 
-  // IONOS image catalog uses the base location without zone suffix (de/fra not de/fra/2)
-  const baseLocation = vdcLocation.replace(/\/\d+$/, '');
+  const baseLocation      = vdcLocation.replace(/\/\d+$/, '');
+  const resolvedCpuFamily = cpuFamily || 'AMD_EPYC';
+  const byName = (items, name) => (items || []).find(i => i.properties?.name === name);
+  const logFound   = label => log(`  (exists) ${label}\n`);
+  const logCreated = label => log(`  (new)    ${label}\n`);
 
   try {
-    // 1. Reserve 3 public IPs
+    // 1. Find or reserve IP blocks
     step('Reserve public IP addresses', 'running');
-    log('Reserving 3 public IPs (management, NLB, NAT gateway)...\n');
-    const [mgmtIpBlk, nlbIpBlk, natIpBlk] = await Promise.all([
-      ionosPost('/ipblocks', ionosToken, { properties: { name: `${clusterName}-mgmt-ip`, size: 1, location: vdcLocation } }),
-      ionosPost('/ipblocks', ionosToken, { properties: { name: `${clusterName}-nlb-ip`,  size: 1, location: vdcLocation } }),
-      ionosPost('/ipblocks', ionosToken, { properties: { name: `${clusterName}-nat-ip`,  size: 1, location: vdcLocation } }),
+    log('Checking for existing IP address reservations...\n');
+    const allBlocks = await ionosGet('/ipblocks?depth=1', ionosToken);
+
+    const getOrCreateIp = async suffix => {
+      const ex = byName(allBlocks.items, `${clusterName}-${suffix}`);
+      if (ex) { logFound(`${clusterName}-${suffix}: ${ex.properties.ips[0]}`); return { id: ex.id, ip: ex.properties.ips[0] }; }
+      const blk = await ionosPost('/ipblocks', ionosToken,
+        { properties: { name: `${clusterName}-${suffix}`, size: 1, location: vdcLocation } });
+      logCreated(`${clusterName}-${suffix}: ${blk.properties.ips[0]}`);
+      return { id: blk.id, ip: blk.properties.ips[0] };
+    };
+    const [mgmtIpRes, nlbIpRes, natIpRes] = await Promise.all([
+      getOrCreateIp('mgmt-ip'),
+      getOrCreateIp('nlb-ip'),
+      getOrCreateIp('nat-ip'),
     ]);
-    const mgmtPubIp = mgmtIpBlk.properties.ips[0];
-    const nlbPubIp  = nlbIpBlk.properties.ips[0];
-    const natPubIp  = natIpBlk.properties.ips[0];
-    log(`  Management: ${mgmtPubIp}\n  NLB:        ${nlbPubIp}\n  NAT GW:     ${natPubIp}\n`);
+    const { ip: mgmtPubIp } = mgmtIpRes;
+    const { ip: nlbPubIp  } = nlbIpRes;
+    const { ip: natPubIp  } = natIpRes;
     step('Reserve public IP addresses', 'done');
 
-    // 2. Create VDC
+    // 2. Find or create VDC
     step('Create Virtual Data Center', 'running');
-    log(`Creating VDC "${vdcName}" in ${vdcLocation}...\n`);
-    const vdc  = await ionosPost('/datacenters', ionosToken, {
-      properties: { name: vdcName, location: vdcLocation, description: `OpenShift cluster ${clusterName}` }
-    });
-    const dcId = vdc.id;
-    log(`  VDC ID: ${dcId}\n`);
-    // Must wait for VDC to be AVAILABLE before creating child resources
-    await ionosWaitAvailable(`/datacenters/${dcId}`, ionosToken, 120000);
+    const allDcs  = await ionosGet('/datacenters?depth=1', ionosToken);
+    const existDc = byName(allDcs.items, vdcName);
+    let dcId;
+    if (existDc) {
+      dcId = existDc.id;
+      logFound(`VDC "${vdcName}" (${dcId})`);
+      if ((existDc.metadata?.state || '') !== 'AVAILABLE')
+        await ionosWaitAvailable(`/datacenters/${dcId}`, ionosToken, 120000);
+    } else {
+      log(`Creating VDC "${vdcName}" in ${vdcLocation}...\n`);
+      const vdc = await ionosPost('/datacenters', ionosToken,
+        { properties: { name: vdcName, location: vdcLocation, description: `OpenShift cluster ${clusterName}` } });
+      dcId = vdc.id;
+      await ionosWaitAvailable(`/datacenters/${dcId}`, ionosToken, 120000);
+      logCreated(`VDC "${vdcName}" (${dcId})`);
+    }
     step('Create Virtual Data Center', 'done');
 
-    // 3. Create LANs sequentially (IONOS rejects parallel LAN creation on a new VDC)
+    // 3. Find or create LANs (fetch list once before any creation)
+    const allLans = await ionosGet(`/datacenters/${dcId}/lans?depth=1`, ionosToken);
+
     step('Create private LAN', 'running');
-    const privLan   = await ionosPost(`/datacenters/${dcId}/lans`, ionosToken,
-      { properties: { name: `${clusterName}-private`, public: false } });
-    const privLanId = parseInt(privLan.id, 10);
-    await ionosWaitAvailable(`/datacenters/${dcId}/lans/${privLanId}`, ionosToken, 60000);
-    log(`  Private LAN ID: ${privLanId}\n`);
+    let privLanId;
+    const existPriv = byName(allLans.items, `${clusterName}-private`);
+    if (existPriv) {
+      privLanId = parseInt(existPriv.id, 10);
+      logFound(`Private LAN ${privLanId}`);
+    } else {
+      const lan = await ionosPost(`/datacenters/${dcId}/lans`, ionosToken,
+        { properties: { name: `${clusterName}-private`, public: false } });
+      privLanId = parseInt(lan.id, 10);
+      await ionosWaitAvailable(`/datacenters/${dcId}/lans/${privLanId}`, ionosToken, 60000);
+      logCreated(`Private LAN ${privLanId}`);
+    }
     step('Create private LAN', 'done');
 
     step('Create public LAN (internet access)', 'running');
-    const pubLan   = await ionosPost(`/datacenters/${dcId}/lans`, ionosToken,
-      { properties: { name: `${clusterName}-public`, public: true } });
-    const pubLanId = parseInt(pubLan.id, 10);
-    await ionosWaitAvailable(`/datacenters/${dcId}/lans/${pubLanId}`, ionosToken, 60000);
-    log(`  Public LAN ID: ${pubLanId}\n`);
+    let pubLanId;
+    const existPub = byName(allLans.items, `${clusterName}-public`);
+    if (existPub) {
+      pubLanId = parseInt(existPub.id, 10);
+      logFound(`Public LAN ${pubLanId}`);
+    } else {
+      const lan = await ionosPost(`/datacenters/${dcId}/lans`, ionosToken,
+        { properties: { name: `${clusterName}-public`, public: true } });
+      pubLanId = parseInt(lan.id, 10);
+      await ionosWaitAvailable(`/datacenters/${dcId}/lans/${pubLanId}`, ionosToken, 60000);
+      logCreated(`Public LAN ${pubLanId}`);
+    }
     step('Create public LAN (internet access)', 'done');
 
     // 4. Resolve management VM image
@@ -4456,55 +4491,62 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
       resolvedImageId = mgmtImageId;
       log(`  Using selected image: ${mgmtImageName || mgmtImageId}\n`);
     } else {
-      // Fallback: auto-detect Rocky 9 / RHEL 9 / AlmaLinux 9
-      log(`No image pre-selected — searching catalog for Rocky/RHEL/AlmaLinux 9 in "${baseLocation}"...\n`);
+      log(`Searching catalog for Rocky/RHEL/AlmaLinux 9 in "${baseLocation}"...\n`);
       const imgResp = await ionosGet('/images?depth=1', ionosToken);
-      const found   = (imgResp.items || []).find(img => {
-        const imgLoc = (img.properties?.location || '').replace(/\/\d+$/, '');
-        if (imgLoc !== baseLocation)              return false;
-        if (img.properties?.imageType !== 'HDD') return false;
-        const n = (img.properties?.name || '').toLowerCase();
+      const img = (imgResp.items || []).find(i => {
+        const loc = (i.properties?.location || '').replace(/\/\d+$/, '');
+        if (loc !== baseLocation || i.properties?.imageType !== 'HDD') return false;
+        const n = (i.properties?.name || '').toLowerCase();
         return (n.includes('rocky') || n.includes('rhel') || n.includes('red hat') || n.includes('almalinux')) &&
                (/ 9[^0-9]/.test(n) || n.endsWith(' 9') || n.includes('-9') || n.includes(':9'));
       });
-      if (!found) {
-        const hddNames = (imgResp.items || [])
-          .filter(img => (img.properties?.location || '').replace(/\/\d+$/, '') === baseLocation && img.properties?.imageType === 'HDD')
-          .map(img => img.properties?.name).join(', ');
-        fail(`No Rocky/RHEL/AlmaLinux 9 image found for "${baseLocation}". ` +
-             `Go back to step 2 and select a management VM image, or import one in the IONOS DCD. ` +
-             `Available HDD images: ${hddNames || 'none'}.`);
+      if (!img) {
+        const avail = (imgResp.items || [])
+          .filter(i => (i.properties?.location || '').replace(/\/\d+$/, '') === baseLocation && i.properties?.imageType === 'HDD')
+          .map(i => i.properties?.name).join(', ');
+        fail(`No Rocky/RHEL/AlmaLinux 9 image found for "${baseLocation}". Available: ${avail || 'none'}.`);
         return;
       }
-      resolvedImageId = found.id;
-      log(`  Auto-detected: ${found.properties.name}  (${found.id})\n`);
+      resolvedImageId = img.id;
+      log(`  Auto-detected: ${img.properties.name}\n`);
     }
     step('Resolve management VM image', 'done');
 
-    // 5. Create management VM
+    // 5 & 6. Find or create servers (fetch server list once for both checks)
+    const allSrvs = await ionosGet(`/datacenters/${dcId}/servers?depth=1`, ionosToken);
+
     step('Create management VM (2 vCPU, 4 GB RAM)', 'running');
-    const sshKeys = [(mgmtSshPubKey || ocpSshPubKey || '').trim()].filter(Boolean);
-    const mgmtSrv = await ionosPost(`/datacenters/${dcId}/servers`, ionosToken, {
-      properties: { name: `${clusterName}-mgmt`, cores: 2, ram: 4096, type: 'VCPU' },
-      entities: {
-        volumes: { items: [{ properties: {
-          name: `${clusterName}-mgmt-root`, size: 50, type: 'SSD Standard', image: resolvedImageId,
-          ...(sshKeys.length ? { sshKeys } : { imagePassword: 'Temp1OcpInstall!' })
-        }}] },
-        nics: { items: [
-          { properties: { name: 'private', lan: privLanId, dhcp: true } },
-          { properties: { name: 'public',  lan: pubLanId,  dhcp: false, ips: [mgmtPubIp] } },
-        ] }
-      }
-    });
-    log(`  Management VM ID: ${mgmtSrv.id}\n`);
+    let mgmtSrvId;
+    const existMgmt = byName(allSrvs.items, `${clusterName}-mgmt`);
+    if (existMgmt) {
+      mgmtSrvId = existMgmt.id;
+      logFound(`Management VM ${mgmtSrvId}`);
+    } else {
+      const sshKeys = [(mgmtSshPubKey || ocpSshPubKey || '').trim()].filter(Boolean);
+      const srv = await ionosPost(`/datacenters/${dcId}/servers`, ionosToken, {
+        properties: { name: `${clusterName}-mgmt`, cores: 2, ram: 4096, type: 'VCPU' },
+        entities: {
+          volumes: { items: [{ properties: {
+            name: `${clusterName}-mgmt-root`, size: 50, type: 'SSD Standard', image: resolvedImageId,
+            ...(sshKeys.length ? { sshKeys } : { imagePassword: 'Temp1OcpInstall!' })
+          }}] },
+          nics: { items: [
+            { properties: { name: 'private', lan: privLanId, dhcp: true } },
+            { properties: { name: 'public',  lan: pubLanId,  dhcp: false, ips: [mgmtPubIp] } },
+          ] }
+        }
+      });
+      mgmtSrvId = srv.id;
+      logCreated(`Management VM ${mgmtSrvId}`);
+    }
     step('Create management VM (2 vCPU, 4 GB RAM)', 'done');
 
-    // 6. Create 3 control plane VMs
     step(`Create 3 control plane VMs (${controlCores}C / ${controlRamGB} GB / ${controlDiskGB} GB)`, 'running');
-    log(`Creating Dedicated Core control plane VMs (${resolvedCpuFamily})...\n`);
-    const cpSrvs = await Promise.all([0, 1, 2].map(i =>
-      ionosPost(`/datacenters/${dcId}/servers`, ionosToken, {
+    log(`CPU family: ${resolvedCpuFamily}\n`);
+    const cpSrvIds = await Promise.all([0, 1, 2].map(async i => {
+      const ex = byName(allSrvs.items, `${clusterName}-control-${i}`);
+      if (ex) { logFound(`control-${i}: ${ex.id}`); return { id: ex.id }; }
+      const srv = await ionosPost(`/datacenters/${dcId}/servers`, ionosToken, {
         properties: {
           name: `${clusterName}-control-${i}`,
           cores:     parseInt(controlCores, 10),
@@ -4514,23 +4556,20 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
         },
         entities: {
           volumes: { items: [{ properties: {
-            name:        `${clusterName}-control-${i}-root`,
-            size:        parseInt(controlDiskGB, 10),
-            type:        'SSD Premium',
-            licenceType: 'LINUX'
+            name: `${clusterName}-control-${i}-root`, size: parseInt(controlDiskGB, 10),
+            type: 'SSD Premium', licenceType: 'LINUX'
           }}] },
-          nics: { items: [
-            { properties: { name: 'private', lan: privLanId, dhcp: true } }
-          ] }
+          nics: { items: [{ properties: { name: 'private', lan: privLanId, dhcp: true } }] }
         }
-      })
-    ));
-    cpSrvs.forEach((s, i) => log(`  control-${i}: ${s.id}\n`));
+      });
+      logCreated(`control-${i}: ${srv.id}`);
+      return { id: srv.id };
+    }));
     step(`Create 3 control plane VMs (${controlCores}C / ${controlRamGB} GB / ${controlDiskGB} GB)`, 'done');
 
-    // 7. Wait for all VMs to provision (Dedicated Core takes 5–10 min)
+    // 7. Wait for all VMs to be AVAILABLE
     step('Provision VMs (Dedicated Core: 5–10 min)', 'running');
-    log('Waiting — Dedicated Core servers can take 5–10 minutes to provision...\n');
+    log('Waiting for all VMs to reach AVAILABLE state...\n');
     const kaTimer = setInterval(() => log('  Still provisioning...\n'), 30000);
     try {
       await ionosWaitAvailable(`/datacenters/${dcId}`, ionosToken, 900000);
@@ -4538,94 +4577,105 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
     log('  All VMs AVAILABLE\n');
     step('Provision VMs (Dedicated Core: 5–10 min)', 'done');
 
-    // 8. Read NIC IPs + MACs from control plane VMs
+    // 8. Read NIC IPs + MACs
     step('Read control plane IP and MAC addresses', 'running');
-    const cpDetails = await Promise.all(cpSrvs.map(async (s, i) => {
-      const d   = await ionosGet(`/datacenters/${dcId}/servers/${s.id}?depth=3`, ionosToken);
+    const cpDetails = await Promise.all(cpSrvIds.map(async ({ id }, i) => {
+      const d   = await ionosGet(`/datacenters/${dcId}/servers/${id}?depth=3`, ionosToken);
       const nic = (d.entities?.nics?.items || []).find(n => n.properties.lan === privLanId);
-      const ip  = nic?.properties?.ips?.[0]  || null;
+      const ip  = nic?.properties?.ips?.[0] || null;
       const mac = nic?.properties?.mac || null;
       log(`  control-${i}: IP=${ip}  MAC=${mac}\n`);
-      return { id: s.id, ip, mac, name: `control-${i}` };
+      return { id, ip, mac, name: `control-${i}` };
     }));
     if (cpDetails.some(d => !d.ip || !d.mac)) {
-      fail('Could not read IP/MAC from one or more control plane NICs. ' +
-           'The DHCP assignment may not have completed. Wait a moment and retry this phase.');
+      fail('Could not read IP/MAC from one or more control plane NICs. Retry once provisioning completes.');
       return;
     }
     step('Read control plane IP and MAC addresses', 'done');
 
-    // Derive subnet / gateway from first CP IP
     const [a, b, c] = cpDetails[0].ip.split('.');
     const gatewayIp  = `${a}.${b}.${c}.1`;
     const subnetCidr = `${a}.${b}.${c}.0/24`;
     log(`  Subnet: ${subnetCidr}   Gateway: ${gatewayIp}\n`);
 
-    // Management VM private IP
-    const mgmtDet     = await ionosGet(`/datacenters/${dcId}/servers/${mgmtSrv.id}?depth=3`, ionosToken);
-    const mgmtPrivNic = (mgmtDet.entities?.nics?.items || []).find(n => n.properties.lan === privLanId);
-    const mgmtPrivIp  = mgmtPrivNic?.properties?.ips?.[0] || null;
-    log(`  Management VM: private=${mgmtPrivIp}  public=${mgmtPubIp}\n`);
+    // Read mgmt VM actual IPs from NIC (handles case where IP block was deleted+recreated)
+    const mgmtDet        = await ionosGet(`/datacenters/${dcId}/servers/${mgmtSrvId}?depth=3`, ionosToken);
+    const mgmtPrivNic    = (mgmtDet.entities?.nics?.items || []).find(n => n.properties.lan === privLanId);
+    const mgmtPubNic     = (mgmtDet.entities?.nics?.items || []).find(n => n.properties.lan === pubLanId);
+    const mgmtPrivIp     = mgmtPrivNic?.properties?.ips?.[0] || null;
+    const mgmtActualPubIp = mgmtPubNic?.properties?.ips?.[0] || mgmtPubIp;
+    log(`  Management VM: private=${mgmtPrivIp}  public=${mgmtActualPubIp}\n`);
 
-    // 9. Create NAT Gateway + SNAT rule
+    // 9. Find or create NAT Gateway + SNAT rule
     step('Create NAT Gateway', 'running');
-    const natGw = await ionosPost(`/datacenters/${dcId}/natgateways`, ionosToken, {
-      properties: {
-        name:      `${clusterName}-nat-gw`,
-        publicIps: [natPubIp],
-        lans:      [{ id: privLanId, gatewayIps: [`${gatewayIp}/24`] }]
-      }
-    });
-    log(`  NAT Gateway created: ${natGw.id} — waiting for AVAILABLE...\n`);
-    await ionosWaitAvailable(`/datacenters/${dcId}/natgateways/${natGw.id}`, ionosToken, 180000);
-    await ionosPost(`/datacenters/${dcId}/natgateways/${natGw.id}/rules`, ionosToken, {
-      properties: {
-        name: 'snat-private', type: 'SNAT', protocol: 'ALL',
-        sourceSubnet: subnetCidr, publicIp: natPubIp
-      }
-    });
-    await ionosWaitAvailable(`/datacenters/${dcId}/natgateways/${natGw.id}`, ionosToken, 120000);
-    log(`  NAT Gateway AVAILABLE  (${natPubIp} → ${subnetCidr})\n`);
+    const allNats  = await ionosGet(`/datacenters/${dcId}/natgateways?depth=1`, ionosToken);
+    const existNat = byName(allNats.items, `${clusterName}-nat-gw`);
+    let natGwId;
+    if (existNat) {
+      natGwId = existNat.id;
+      logFound(`NAT Gateway ${natGwId}`);
+      if ((existNat.metadata?.state || '') !== 'AVAILABLE')
+        await ionosWaitAvailable(`/datacenters/${dcId}/natgateways/${natGwId}`, ionosToken, 180000);
+    } else {
+      const natGw = await ionosPost(`/datacenters/${dcId}/natgateways`, ionosToken, {
+        properties: { name: `${clusterName}-nat-gw`, publicIps: [natPubIp],
+          lans: [{ id: privLanId, gatewayIps: [`${gatewayIp}/24`] }] }
+      });
+      natGwId = natGw.id;
+      log(`  NAT Gateway created: ${natGwId} — waiting for AVAILABLE...\n`);
+      await ionosWaitAvailable(`/datacenters/${dcId}/natgateways/${natGwId}`, ionosToken, 180000);
+      await ionosPost(`/datacenters/${dcId}/natgateways/${natGwId}/rules`, ionosToken, {
+        properties: { name: 'snat-private', type: 'SNAT', protocol: 'ALL',
+          sourceSubnet: subnetCidr, publicIp: natPubIp }
+      });
+      await ionosWaitAvailable(`/datacenters/${dcId}/natgateways/${natGwId}`, ionosToken, 120000);
+      logCreated(`NAT Gateway ${natGwId}  (${natPubIp} → ${subnetCidr})`);
+    }
     step('Create NAT Gateway', 'done');
 
-    // 10. Create Network Load Balancer + forwarding rules
+    // 10. Find or create NLB + forwarding rules
     step('Create Network Load Balancer', 'running');
-    const nlb = await ionosPost(`/datacenters/${dcId}/networkloadbalancers`, ionosToken, {
-      properties: {
-        name: `${clusterName}-nlb`, listenerLan: pubLanId,
-        targetLan: privLanId,       ips: [nlbPubIp]
-      }
-    });
-    log(`  NLB created: ${nlb.id} — waiting for AVAILABLE...\n`);
-    await ionosWaitAvailable(`/datacenters/${dcId}/networkloadbalancers/${nlb.id}`, ionosToken, 180000);
-
-    for (const { port, name } of [
-      { port: 6443,  name: 'kube-api'      },
-      { port: 22623, name: 'mcs'           },
-      { port: 80,    name: 'http-ingress'  },
-      { port: 443,   name: 'https-ingress' },
-    ]) {
-      await ionosPost(`/datacenters/${dcId}/networkloadbalancers/${nlb.id}/forwardingrules`, ionosToken, {
-        properties: {
-          name: `${clusterName}-${name}`, algorithm: 'ROUND_ROBIN', protocol: 'TCP',
-          listenerIp: nlbPubIp, listenerPort: port,
-          targets: cpDetails.map(d => ({ ip: d.ip, port, weight: 1 }))
-        }
+    const allNlbs  = await ionosGet(`/datacenters/${dcId}/networkloadbalancers?depth=1`, ionosToken);
+    const existNlb = byName(allNlbs.items, `${clusterName}-nlb`);
+    let nlbId;
+    if (existNlb) {
+      nlbId = existNlb.id;
+      logFound(`NLB ${nlbId}`);
+      if ((existNlb.metadata?.state || '') !== 'AVAILABLE')
+        await ionosWaitAvailable(`/datacenters/${dcId}/networkloadbalancers/${nlbId}`, ionosToken, 180000);
+    } else {
+      const nlb = await ionosPost(`/datacenters/${dcId}/networkloadbalancers`, ionosToken, {
+        properties: { name: `${clusterName}-nlb`, listenerLan: pubLanId,
+          targetLan: privLanId, ips: [nlbPubIp] }
       });
-      // NLB goes BUSY after each rule — wait before adding the next
-      await ionosWaitAvailable(`/datacenters/${dcId}/networkloadbalancers/${nlb.id}`, ionosToken, 120000);
-      log(`  NLB rule added: ${port}/TCP → [${cpDetails.map(d => d.ip).join(', ')}]\n`);
+      nlbId = nlb.id;
+      log(`  NLB created: ${nlbId} — waiting for AVAILABLE...\n`);
+      await ionosWaitAvailable(`/datacenters/${dcId}/networkloadbalancers/${nlbId}`, ionosToken, 180000);
+      for (const { port, name } of [
+        { port: 6443,  name: 'kube-api'      },
+        { port: 22623, name: 'mcs'           },
+        { port: 80,    name: 'http-ingress'  },
+        { port: 443,   name: 'https-ingress' },
+      ]) {
+        await ionosPost(`/datacenters/${dcId}/networkloadbalancers/${nlbId}/forwardingrules`, ionosToken, {
+          properties: { name: `${clusterName}-${name}`, algorithm: 'ROUND_ROBIN', protocol: 'TCP',
+            listenerIp: nlbPubIp, listenerPort: port,
+            targets: cpDetails.map(d => ({ ip: d.ip, port, weight: 1 })) }
+        });
+        await ionosWaitAvailable(`/datacenters/${dcId}/networkloadbalancers/${nlbId}`, ionosToken, 120000);
+        log(`  NLB rule: ${port}/TCP\n`);
+      }
+      logCreated(`NLB ${nlbId}  (${nlbPubIp})`);
     }
-    log(`  NLB AVAILABLE  (${nlbPubIp})\n`);
     step('Create Network Load Balancer', 'done');
 
     const infra = {
       dcId, privLanId, pubLanId,
-      mgmtSrvId: mgmtSrv.id, mgmtPubIp, mgmtPrivIp,
-      natGwId: natGw.id, natPubIp,
-      nlbId: nlb.id, nlbPubIp,
+      mgmtSrvId, mgmtPubIp: mgmtActualPubIp, mgmtPrivIp,
+      natGwId, natPubIp,
+      nlbId, nlbPubIp,
       cpDetails, gatewayIp, subnetCidr,
-      ipBlockIds: [mgmtIpBlk.id, nlbIpBlk.id, natIpBlk.id]
+      ipBlockIds: [mgmtIpRes.id, nlbIpRes.id, natIpRes.id]
     };
     clusterInstallState.set(clusterName, { ...req.body, infra });
     done('Infrastructure created successfully', infra);
