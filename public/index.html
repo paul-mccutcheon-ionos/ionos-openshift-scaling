@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.1.21</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.1.22</span>
   </div>
 
   <div class="banner-actions">
@@ -2562,9 +2562,22 @@
           case 'OCP_MGMT_HOST_SSH_KEY':    document.getElementById('ssh-key').value           = decodeKey(val); break;
           case 'OCP_WORKER_SSH_KEY':       document.getElementById('worker-ssh-key').value    = decodeKey(val); break;
           case 'OCP_WORKER_NAME_PREFIX':   document.getElementById('worker-name').value       = val; break;
-          case 'IONOS_API_TOKEN':          document.getElementById('ionos-token').value       = val; break;
-          case 'IONOS_FTP_USER':           document.getElementById('rhcos-ftp-user').value    = val; break;
-          case 'IONOS_FTP_PASS':           document.getElementById('rhcos-ftp-pass').value    = val; break;
+          case 'IONOS_API_TOKEN': {
+            const el = document.getElementById('ionos-token'); if (el) el.value = val;
+            const w = document.getElementById('ncw-ionos-token'); if (w && !w.value.trim()) w.value = val;
+            break;
+          }
+          case 'IONOS_FTP_USER': {
+            const el = document.getElementById('rhcos-ftp-user'); if (el) el.value = val;
+            const w = document.getElementById('ncw-ftp-user'); if (w && !w.value.trim()) w.value = val;
+            break;
+          }
+          case 'IONOS_FTP_PASS': {
+            const el = document.getElementById('rhcos-ftp-pass'); if (el) el.value = val;
+            const w = document.getElementById('ncw-ftp-pass'); if (w && !w.value.trim()) w.value = val;
+            break;
+          }
+          case 'RH_PULL_SECRET': { const w = document.getElementById('ncw-pull-secret'); if (w && !w.value.trim()) w.value = val; break; }
           case 'OCP_BOOTSTRAP_GATEWAY':    document.getElementById('rhcos-gateway').value     = val; break;
           case 'OCP_BOOTSTRAP_DNS':        document.getElementById('rhcos-dns').value         = val; break;
           case 'REGISTRY_TYPE': {
@@ -4959,22 +4972,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
             `<option value="4.17.x">4.17 (latest)</option>`;
         });
 
-      // Pre-fill step 1 from server .env (IONOS token, FTP creds, pull secret)
-      fetch('/api/env-prefill')
-        .then(r => r.ok ? r.json() : null)
-        .then(env => {
-          if (!env) return;
-          const setIfEmpty = (id, val) => {
-            if (!val) return;
-            const el = document.getElementById(id);
-            if (el && !el.value.trim()) el.value = val;
-          };
-          setIfEmpty('ncw-ionos-token',  env.ionosToken);
-          setIfEmpty('ncw-ftp-user',     env.ionosFtpUser);
-          setIfEmpty('ncw-ftp-pass',     env.ionosFtpPass);
-          setIfEmpty('ncw-pull-secret',  env.rhPullSecret);
-        })
-        .catch(() => {});  // silent — fields stay blank if .env has no values
+      // Step 1 fields are populated by the .env file upload handler (banner button)
     }
   };
 
