@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.1.26</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.1.29</span>
   </div>
 
   <div class="banner-actions">
@@ -657,12 +657,12 @@
         </div>
         <div class="form-group" style="align-self:flex-end">
           <button type="button" class="btn btn-sm" id="browse-dc-btn" style="height:2.5rem">
-            <span id="browse-dc-label">Browse VDCs</span>
+            <span id="browse-dc-label">1. Connect to IONOS Cloud</span>
             <span class="spinner hidden" id="browse-dc-spinner"></span>
           </button>
         </div>
         <div class="form-group">
-          <label for="datacenter-select">VDC / Datacenter</label>
+          <label for="datacenter-select">2. Browse VDCs and select OpenShift Cluster VDC</label>
           <select id="datacenter-select">
             <option value="">— enter IONOS token then Browse —</option>
           </select>
@@ -670,7 +670,7 @@
       </div>
 
       <button class="btn btn-primary btn-full" id="connect-btn">
-        <span id="connect-label">Connect to Cluster</span>
+        <span id="connect-label">3. Connect to OpenShift Cluster</span>
         <span class="spinner hidden" id="connect-spinner"></span>
       </button>
       <div class="error-box" id="connect-error"></div>
@@ -2721,7 +2721,7 @@
     } catch (err) {
       alert('Failed to load VDCs: ' + err.message);
     } finally {
-      setLoading('browse-dc-label', 'browse-dc-spinner', 'browse-dc-btn', false, 'Browse VDCs');
+      setLoading('browse-dc-label', 'browse-dc-spinner', 'browse-dc-btn', false, '1. Connect to IONOS Cloud');
     }
   });
 
@@ -2872,7 +2872,7 @@
     } catch (err) {
       showError('connect-error', err.message);
     } finally {
-      setLoading('connect-label', 'connect-spinner', 'connect-btn', false, 'Connect to Cluster');
+      setLoading('connect-label', 'connect-spinner', 'connect-btn', false, '3. Connect to OpenShift Cluster');
     }
   });
 

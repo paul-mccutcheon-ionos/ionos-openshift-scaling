@@ -4543,28 +4543,37 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
 
     step(`Create 3 control plane VMs (${controlCores}C / ${controlRamGB} GB / ${controlDiskGB} GB)`, 'running');
     log(`CPU family: ${resolvedCpuFamily}\n`);
-    const cpSrvIds = await Promise.all([0, 1, 2].map(async i => {
-      const ex = byName(allSrvs.items, `${clusterName}-control-${i}`);
-      if (ex) { logFound(`control-${i}: ${ex.id}`); return { id: ex.id }; }
-      const srv = await ionosPost(`/datacenters/${dcId}/servers`, ionosToken, {
-        properties: {
-          name: `${clusterName}-control-${i}`,
-          cores:     parseInt(controlCores, 10),
-          ram:       parseInt(controlRamGB, 10) * 1024,
-          cpuFamily: resolvedCpuFamily,
-          type:      'DEDICATED_CORE'
-        },
-        entities: {
-          volumes: { items: [{ properties: {
-            name: `${clusterName}-control-${i}-root`, size: parseInt(controlDiskGB, 10),
-            type: 'SSD Premium', licenceType: 'LINUX'
-          }}] },
-          nics: { items: [{ properties: { name: 'private', lan: privLanId, dhcp: true } }] }
+    const cpKaTimer = setInterval(() => log('  Still waiting on IONOS Cloud API...\n'), 15000);
+    let cpSrvIds;
+    try {
+      cpSrvIds = await Promise.all([0, 1, 2].map(async i => {
+        const ex = byName(allSrvs.items, `${clusterName}-control-${i}`);
+        if (ex) { logFound(`control-${i}: ${ex.id}`); return { id: ex.id }; }
+        try {
+          const srv = await ionosPost(`/datacenters/${dcId}/servers`, ionosToken, {
+            properties: {
+              name: `${clusterName}-control-${i}`,
+              cores:     parseInt(controlCores, 10),
+              ram:       parseInt(controlRamGB, 10) * 1024,
+              cpuFamily: resolvedCpuFamily,
+              type:      'ENTERPRISE'
+            },
+            entities: {
+              volumes: { items: [{ properties: {
+                name: `${clusterName}-control-${i}-root`, size: parseInt(controlDiskGB, 10),
+                type: 'SSD Premium', licenceType: 'LINUX'
+              }}] },
+              nics: { items: [{ properties: { name: 'private', lan: privLanId, dhcp: true } }] }
+            }
+          });
+          logCreated(`control-${i}: ${srv.id}`);
+          return { id: srv.id };
+        } catch (e) {
+          log(`  control-${i} creation FAILED: ${e.message}\n`);
+          throw e;
         }
-      });
-      logCreated(`control-${i}: ${srv.id}`);
-      return { id: srv.id };
-    }));
+      }));
+    } finally { clearInterval(cpKaTimer); }
     step(`Create 3 control plane VMs (${controlCores}C / ${controlRamGB} GB / ${controlDiskGB} GB)`, 'done');
 
     // 7. Wait for all VMs to be AVAILABLE
@@ -4680,6 +4689,7 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
     clusterInstallState.set(clusterName, { ...req.body, infra });
     done('Infrastructure created successfully', infra);
   } catch (e) {
+    console.error('[create-infra] Failed:', e.stack || e.message);
     fail(`Infrastructure creation failed: ${e.message}`);
   }
 });
