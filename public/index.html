@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.3.1</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.3.2</span>
   </div>
 
   <div class="banner-actions">
@@ -5410,20 +5410,33 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     }
   });
 
+  const OPCT_STATUS_BADGES = {
+    running:          { color: '#93c5fd', icon: '&#8635;', text: 'Running' },
+    'ready-to-collect': { color: '#86efac', icon: '&#10003;', text: 'Finished — ready to collect' },
+    collected:        { color: '#86efac', icon: '&#10003;', text: 'Collected' },
+    'awaiting-pods':  { color: '#fbbf24', icon: '&#8987;',  text: 'Submitted — waiting for pods' },
+    unknown:          { color: '#94a3b8', icon: '&#8226;',  text: 'Unknown (connect to cluster to check)' }
+  };
+
   async function opctRefreshStatus() {
     const summaryEl = document.getElementById('opct-status-summary');
     const logEl     = document.getElementById('opct-status-log');
     try {
-      const r = await fetch('/api/compliance/status');
+      const apiUrl   = document.getElementById('api-url').value.trim();
+      const ocpToken = document.getElementById('ocp-token').value.trim();
+      const qs = new URLSearchParams({ ...(apiUrl ? { apiUrl } : {}), ...(ocpToken ? { ocpToken } : {}) });
+      const r = await fetch(`/api/compliance/status?${qs}`);
       const s = await r.json();
       if (s.status === 'idle') { summaryEl.textContent = 'No OPCT run has been started yet.'; return; }
       if (s.status === 'error') { summaryEl.innerHTML = `<span style="color:#f87171">Status check failed: ${escHtml(s.error || '')}</span>`; return; }
 
       const startedStr = s.startedAt ? new Date(s.startedAt).toLocaleString() : '-';
-      const badge = s.running
-        ? `<span style="color:#93c5fd">&#8635; Running</span>`
-        : (s.hasReport ? `<span style="color:#86efac">&#10003; Collected</span>` : `<span style="color:#fca5a5">&#9632; Stopped</span>`);
-      summaryEl.innerHTML = `${badge} &nbsp;&middot;&nbsp; Host: ${escHtml(s.mgmtHost || '')} &nbsp;&middot;&nbsp; Started: ${escHtml(startedStr)}`;
+      const b = OPCT_STATUS_BADGES[s.status] || { color: '#94a3b8', icon: '&#8226;', text: s.status };
+      const podsStr = s.pods ? ` &nbsp;&middot;&nbsp; Pods: ${s.pods.active} active / ${s.pods.total} total` : '';
+      summaryEl.innerHTML = `<span style="color:${b.color}">${b.icon} ${b.text}</span> &nbsp;&middot;&nbsp; Host: ${escHtml(s.mgmtHost || '')} &nbsp;&middot;&nbsp; Started: ${escHtml(startedStr)}${podsStr}`;
+      if (s.status === 'unknown') {
+        summaryEl.innerHTML += `<div style="font-size:0.76rem;color:#64748b;margin-top:0.35rem">opct submits the run as pods in the cluster and exits immediately — connect on the Cluster Connection tab so this can check real pod status instead of the (already-exited) local process.</div>`;
+      }
       logEl.textContent = s.logTail || '(no log output yet)';
       logEl.scrollTop = logEl.scrollHeight;
 

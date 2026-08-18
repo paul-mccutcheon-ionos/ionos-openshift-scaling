@@ -5652,34 +5652,69 @@ echo $!`);
 });
 
 // GET /api/compliance/status — lightweight JSON poll of the background run.
+//
+// `opct run` submits the conformance suite as pods in the cluster's "opct"
+// namespace and then EXITS by default (it only blocks in the foreground if
+// launched with --watch, which this app doesn't use). So the management-host
+// process being gone is normal, not a failure — the real signal of whether
+// the run is still going is the state of those pods in the cluster, which is
+// what this checks first. The SSH log tail is kept only as supplementary
+// "what opct printed at submission time" context, not as the status source.
 app.get('/api/compliance/status', async (req, res) => {
   if (!opctState || !opctState.mgmtHost) return res.json({ status: 'idle' });
+  const { apiUrl, ocpToken } = req.query;
 
-  let conn;
-  try {
-    conn = await sshConnect(opctState.mgmtHost, 'root', opctState.sshKey, opctState.sshPassphrase);
-    const check = await sshRunScript(conn,
-      `if [ -n "${opctState.pid}" ] && kill -0 ${opctState.pid} 2>/dev/null; then echo __RUNNING__; else echo __STOPPED__; fi
-echo __TAIL__
-tail -n 80 "${opctState.logFile}" 2>/dev/null || echo "(log file not found)"`);
-    const [statusPart, tailPart] = check.stdout.split('__TAIL__');
-    const running = /__RUNNING__/.test(statusPart);
-    opctState.status = running ? 'running' : (opctState.reportRaw ? 'collected' : 'stopped');
-    saveOpctState(opctState);
-    res.json({
-      status:      opctState.status,
-      running,
-      mgmtHost:    opctState.mgmtHost,
-      startedAt:   opctState.startedAt,
-      collectedAt: opctState.collectedAt,
-      logTail:     (tailPart || '').trim(),
-      hasReport:   !!opctState.reportRaw
-    });
-  } catch (e) {
-    res.status(502).json({ status: 'error', error: e.message });
-  } finally {
-    if (conn) try { conn.end(); } catch (_) {}
+  let podSummary = null;
+  let podError   = null;
+  if (apiUrl && ocpToken) {
+    try {
+      const pods = await ocpGet(apiUrl, '/api/v1/namespaces/opct/pods?labelSelector=component=sonobuoy', ocpToken);
+      const items = pods.items || [];
+      const byPhase = {};
+      items.forEach(p => { const ph = p.status?.phase || 'Unknown'; byPhase[ph] = (byPhase[ph] || 0) + 1; });
+      const active = (byPhase.Running || 0) + (byPhase.Pending || 0);
+      podSummary = { total: items.length, byPhase, active };
+    } catch (e) {
+      // 404 = namespace doesn't exist: either never started, or opct already cleaned it up post-retrieve.
+      if (e.status !== 404) podError = e.message;
+    }
   }
+
+  let logTail = '';
+  try {
+    const conn = await sshConnect(opctState.mgmtHost, 'root', opctState.sshKey, opctState.sshPassphrase);
+    try {
+      const tail = await sshRunScript(conn, `tail -n 80 "${opctState.logFile}" 2>/dev/null || echo "(log file not found)"`);
+      logTail = tail.stdout.trim();
+    } finally { conn.end(); }
+  } catch (e) {
+    logTail = `(could not read log: ${e.message})`;
+  }
+
+  let status;
+  if (podSummary) {
+    status = podSummary.total === 0
+      ? (opctState.reportRaw ? 'collected' : 'awaiting-pods')
+      : (podSummary.active > 0 ? 'running' : 'ready-to-collect');
+  } else if (opctState.reportRaw) {
+    status = 'collected';
+  } else {
+    status = 'unknown'; // couldn't reach the cluster API to check pods (no apiUrl/ocpToken passed, or an error)
+  }
+  opctState.status = status;
+  saveOpctState(opctState);
+
+  res.json({
+    status,
+    running:     status === 'running',
+    mgmtHost:    opctState.mgmtHost,
+    startedAt:   opctState.startedAt,
+    collectedAt: opctState.collectedAt,
+    logTail,
+    hasReport:   !!opctState.reportRaw,
+    pods:        podSummary,
+    podError
+  });
 });
 
 // POST /api/compliance/collect — SSE. Retrieves the results archive and runs
