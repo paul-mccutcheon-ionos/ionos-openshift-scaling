@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.1.29</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.2.0</span>
   </div>
 
   <div class="banner-actions">
@@ -564,6 +564,10 @@
     <div class="nav-item" data-section="healthchecks">
       <span class="nav-item-icon">&#129657;</span>
       Machine Health Checks
+    </div>
+    <div class="nav-item" data-section="compliance">
+      <span class="nav-item-icon">&#128203;</span>
+      Compliance Report
     </div>
   </nav>
 
@@ -1747,6 +1751,98 @@
     <div class="error-box hidden" id="mhc-apply-error"></div>
   </div>
 
+  <!-- ══════════════════════════════════════════════════════════════════════
+       Compliance Report (OPCT) section
+       ══════════════════════════════════════════════════════════════════════ -->
+
+  <!-- ── Card: Configure & Start Run ─────────────────────────────────────── -->
+  <div class="card" id="opct-start-card" style="display:none;max-width:860px">
+    <h2 style="margin-bottom:0.25rem">&#128203; OPCT Compliance Report</h2>
+    <p style="font-size:0.85rem;color:#94a3b8;margin-bottom:1.25rem;line-height:1.6">
+      Runs the official Red Hat <strong style="color:#e2e8f0">OpenShift Provider Compatibility Tool (opct)</strong>
+      conformance suite against this cluster via the management host, then generates a formatted results
+      table and a downloadable branded PDF. A full run typically takes
+      <strong style="color:#e2e8f0">2–5+ hours</strong> — this page kicks it off in the background so you can
+      come back later to collect the report.
+    </p>
+
+    <div class="form-grid">
+      <div class="form-group full-width">
+        <label for="opct-mgmt-host">Management Host</label>
+        <input type="text" id="opct-mgmt-host" placeholder="e.g. 87.106.115.43" style="width:100%" />
+      </div>
+      <div class="form-group full-width">
+        <label for="opct-ssh-key">SSH Private Key (PEM)</label>
+        <textarea id="opct-ssh-key" rows="5" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----"></textarea>
+      </div>
+      <div class="form-group">
+        <label for="opct-ssh-passphrase">Key Passphrase <span style="color:#4b5563;font-weight:400">(if any)</span></label>
+        <input type="password" id="opct-ssh-passphrase" placeholder="Leave blank if key is not password-protected" autocomplete="off" style="width:100%" />
+      </div>
+      <div class="form-group">
+        <label for="opct-kubeconfig-path">Kubeconfig Path on Management Host</label>
+        <input type="text" id="opct-kubeconfig-path" value="/root/.kube/config" style="width:100%" />
+      </div>
+    </div>
+
+    <button class="btn btn-primary btn-full" id="opct-start-btn">
+      <span id="opct-start-label">&#9654; Start OPCT Run</span>
+      <span class="spinner hidden" id="opct-start-spinner"></span>
+    </button>
+    <div id="opct-start-steps" style="display:flex;flex-direction:column;gap:0.3rem;margin-top:1rem;font-size:0.82rem"></div>
+    <pre id="opct-start-log" class="hidden" style="background:#0a0c12;border:1px solid #1e2333;border-radius:6px;padding:0.75rem 1rem;font-size:0.78rem;color:#94a3b8;max-height:220px;overflow:auto;margin-top:0.75rem;white-space:pre-wrap"></pre>
+    <div class="error-box hidden" id="opct-start-error"></div>
+  </div>
+
+  <!-- ── Card: Run Status & Collect Report ───────────────────────────────── -->
+  <div class="card hidden" id="opct-status-card" style="max-width:860px">
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.75rem;margin-bottom:0.75rem">
+      <h2 style="margin:0">&#8987; Run Status</h2>
+      <button id="opct-status-refresh-btn" style="background:#0f2035;color:#60a5fa;border:1px solid #1e3a5f;border-radius:6px;padding:0.4rem 0.9rem;font-size:0.82rem;cursor:pointer">
+        &#8635; Refresh
+      </button>
+    </div>
+    <div id="opct-status-summary" style="font-size:0.88rem;color:#cbd5e1;margin-bottom:0.75rem"></div>
+    <pre id="opct-status-log" style="background:#0a0c12;border:1px solid #1e2333;border-radius:6px;padding:0.75rem 1rem;font-size:0.78rem;color:#94a3b8;max-height:260px;overflow:auto;white-space:pre-wrap"></pre>
+
+    <button class="btn btn-primary btn-full" id="opct-collect-btn" style="margin-top:1rem">
+      <span id="opct-collect-label">&#128229; Collect &amp; Generate Report</span>
+      <span class="spinner hidden" id="opct-collect-spinner"></span>
+    </button>
+    <div id="opct-collect-steps" style="display:flex;flex-direction:column;gap:0.3rem;margin-top:1rem;font-size:0.82rem"></div>
+    <pre id="opct-collect-log" class="hidden" style="background:#0a0c12;border:1px solid #1e2333;border-radius:6px;padding:0.75rem 1rem;font-size:0.78rem;color:#94a3b8;max-height:220px;overflow:auto;margin-top:0.75rem;white-space:pre-wrap"></pre>
+    <div class="error-box hidden" id="opct-collect-error"></div>
+  </div>
+
+  <!-- ── Card: Results ────────────────────────────────────────────────────── -->
+  <div class="card hidden" id="opct-report-card">
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.75rem;margin-bottom:1rem">
+      <h2 style="margin:0">&#9989; Compliance Results</h2>
+      <div style="display:flex;gap:0.6rem;flex-wrap:wrap">
+        <button id="opct-download-raw-btn" style="background:#0f2035;color:#94a3b8;border:1px solid #2d3348;border-radius:6px;padding:0.5rem 1.1rem;font-size:0.88rem;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:0.5rem">
+          &#128221; Download Raw Report (.txt)
+        </button>
+        <button id="opct-download-pdf-btn" style="background:#1a3a5c;color:#93c5fd;border:1px solid #1e3a5f;border-radius:6px;padding:0.5rem 1.1rem;font-size:0.88rem;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:0.5rem">
+          &#128196; Download PDF Report
+        </button>
+      </div>
+    </div>
+    <p style="font-size:0.78rem;color:#64748b;margin:-0.5rem 0 1rem">
+      The raw report is the untouched <code style="background:#1e2333;padding:0.1rem 0.35rem;border-radius:3px">opct report -s</code> output — use this one for Red Hat provider certification submissions. The PDF is a branded summary for internal/stakeholder use.
+    </p>
+    <div id="opct-report-summary" style="font-size:0.85rem;color:#94a3b8;margin-bottom:1.25rem;line-height:1.7"></div>
+    <div class="table-wrapper">
+      <table id="opct-report-table">
+        <thead><tr id="opct-report-thead"></tr></thead>
+        <tbody id="opct-report-tbody"></tbody>
+      </table>
+    </div>
+    <details style="margin-top:1.25rem">
+      <summary style="cursor:pointer;color:#60a5fa;font-size:0.85rem">Show raw opct output</summary>
+      <pre id="opct-report-raw" style="background:#0a0c12;border:1px solid #1e2333;border-radius:6px;padding:0.75rem 1rem;font-size:0.78rem;color:#94a3b8;max-height:400px;overflow:auto;margin-top:0.75rem;white-space:pre-wrap"></pre>
+    </details>
+  </div>
+
   <!-- ══ Install New Cluster section ══════════════════════════════════════ -->
 
   <div class="card" id="new-cluster-card" style="display:none;max-width:860px">
@@ -2159,6 +2255,7 @@
     autoscaling:  ['autoscaling-connect-hint', 'machine-api-status-card', 'autoscale-card'],
     healthchecks:    ['healthchecks-connect-hint', 'mhc-list-card', 'mhc-create-card'],
     'install-cluster': ['new-cluster-card'],
+    compliance:      ['opct-start-card', 'opct-status-card', 'opct-report-card'],
   };
   let currentNav = 'connection';
 
@@ -2222,6 +2319,8 @@
     if (env.ionosToken)       document.getElementById('ionos-token').value        = env.ionosToken;
     if (env.mgmtHost)         document.getElementById('mgmt-host').value          = env.mgmtHost;
     if (env.sshKey)           document.getElementById('ssh-key').value            = env.sshKey;
+    if (env.mgmtHost)         document.getElementById('opct-mgmt-host').value     = env.mgmtHost;
+    if (env.sshKey)           document.getElementById('opct-ssh-key').value       = env.sshKey;
     if (env.workerSshKey)     document.getElementById('worker-ssh-key').value     = env.workerSshKey;
     if (env.workerNamePrefix) document.getElementById('worker-name').value        = env.workerNamePrefix;
     window._workerNamePrefix = env.workerNamePrefix || '';
@@ -5065,6 +5164,230 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
   document.getElementById('ncw-vdc-location').addEventListener('change', () => {
     const token = document.getElementById('ncw-ionos-token').value.trim() || ncwConfig.ionosToken || '';
     if (token) { ncwLoadMgmtImages(); ncwLoadCpuFamilies(); }
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // Compliance Report (OPCT)
+  // ═══════════════════════════════════════════════════════════════════════
+
+  // Reads an SSE stream from a POST endpoint, driving a step checklist + log
+  // panel. Mirrors the pattern used by the Install New Cluster wizard.
+  async function opctRunSse(endpoint, body, { stepsEl, logEl, errEl, onDone }) {
+    stepsEl.innerHTML = '';
+    logEl.textContent = '';
+    logEl.classList.add('hidden');
+    errEl.classList.add('hidden');
+    const stepMap = {};
+
+    function addOrUpdateStep(label, status) {
+      const icon = status === 'done' ? '&#10003;' : status === 'running' ? '&#8635;' : '&#10007;';
+      const col  = status === 'done' ? '#86efac'  : status === 'running' ? '#93c5fd'  : '#fca5a5';
+      if (stepMap[label]) {
+        stepMap[label].innerHTML = `<span style="color:${col}">${icon}</span> ${escHtml(label)}`;
+      } else {
+        const el = document.createElement('div');
+        el.innerHTML = `<span style="color:${col}">${icon}</span> ${escHtml(label)}`;
+        stepsEl.appendChild(el);
+        stepMap[label] = el;
+      }
+    }
+
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (!resp.ok) {
+      const d = await resp.json().catch(() => ({}));
+      throw new Error(d.error || `HTTP ${resp.status}`);
+    }
+
+    const reader = resp.body.getReader();
+    const dec    = new TextDecoder();
+    let buf = '', doneData = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const parts = buf.split('\n\n');
+      buf = parts.pop();
+      for (const part of parts) {
+        const dl = part.split('\n').find(l => l.startsWith('data:'));
+        if (!dl) continue;
+        let ev;
+        try { ev = JSON.parse(dl.slice(5)); } catch { continue; }
+
+        if (ev.type === 'step') {
+          addOrUpdateStep(ev.label, ev.status);
+        } else if (ev.type === 'log') {
+          logEl.classList.remove('hidden');
+          logEl.textContent += ev.text;
+          logEl.scrollTop = logEl.scrollHeight;
+        } else if (ev.type === 'done') {
+          doneData = ev;
+        } else if (ev.type === 'error') {
+          throw new Error(ev.message);
+        }
+      }
+    }
+    if (onDone) onDone(doneData);
+    return doneData;
+  }
+
+  document.getElementById('opct-start-btn').addEventListener('click', async () => {
+    const btn   = document.getElementById('opct-start-btn');
+    const label = document.getElementById('opct-start-label');
+    const spin  = document.getElementById('opct-start-spinner');
+    const errEl = document.getElementById('opct-start-error');
+    btn.disabled = true; label.textContent = 'Starting…'; spin.classList.remove('hidden');
+    try {
+      await opctRunSse('/api/compliance/start', {
+        mgmtHost:       document.getElementById('opct-mgmt-host').value.trim(),
+        sshKey:         document.getElementById('opct-ssh-key').value.trim(),
+        sshPassphrase:  document.getElementById('opct-ssh-passphrase').value,
+        kubeconfigPath: document.getElementById('opct-kubeconfig-path').value.trim()
+      }, {
+        stepsEl: document.getElementById('opct-start-steps'),
+        logEl:   document.getElementById('opct-start-log'),
+        errEl
+      });
+      document.getElementById('opct-status-card').classList.remove('hidden');
+      opctRefreshStatus();
+    } catch (e) {
+      errEl.textContent = e.message;
+      errEl.classList.remove('hidden');
+    } finally {
+      btn.disabled = false; label.textContent = '▶ Start OPCT Run'; spin.classList.add('hidden');
+    }
+  });
+
+  async function opctRefreshStatus() {
+    const summaryEl = document.getElementById('opct-status-summary');
+    const logEl     = document.getElementById('opct-status-log');
+    try {
+      const r = await fetch('/api/compliance/status');
+      const s = await r.json();
+      if (s.status === 'idle') { summaryEl.textContent = 'No OPCT run has been started yet.'; return; }
+      if (s.status === 'error') { summaryEl.innerHTML = `<span style="color:#f87171">Status check failed: ${escHtml(s.error || '')}</span>`; return; }
+
+      const startedStr = s.startedAt ? new Date(s.startedAt).toLocaleString() : '-';
+      const badge = s.running
+        ? `<span style="color:#93c5fd">&#8635; Running</span>`
+        : (s.hasReport ? `<span style="color:#86efac">&#10003; Collected</span>` : `<span style="color:#fca5a5">&#9632; Stopped</span>`);
+      summaryEl.innerHTML = `${badge} &nbsp;&middot;&nbsp; Host: ${escHtml(s.mgmtHost || '')} &nbsp;&middot;&nbsp; Started: ${escHtml(startedStr)}`;
+      logEl.textContent = s.logTail || '(no log output yet)';
+      logEl.scrollTop = logEl.scrollHeight;
+
+      if (s.hasReport) opctLoadReport();
+    } catch (e) {
+      summaryEl.innerHTML = `<span style="color:#f87171">Status check failed: ${escHtml(e.message)}</span>`;
+    }
+  }
+  document.getElementById('opct-status-refresh-btn').addEventListener('click', opctRefreshStatus);
+
+  document.getElementById('opct-collect-btn').addEventListener('click', async () => {
+    const btn   = document.getElementById('opct-collect-btn');
+    const label = document.getElementById('opct-collect-label');
+    const spin  = document.getElementById('opct-collect-spinner');
+    const errEl = document.getElementById('opct-collect-error');
+    btn.disabled = true; label.textContent = 'Collecting…'; spin.classList.remove('hidden');
+    try {
+      await opctRunSse('/api/compliance/collect', {}, {
+        stepsEl: document.getElementById('opct-collect-steps'),
+        logEl:   document.getElementById('opct-collect-log'),
+        errEl
+      });
+      await opctLoadReport();
+      opctRefreshStatus();
+    } catch (e) {
+      errEl.textContent = e.message;
+      errEl.classList.remove('hidden');
+    } finally {
+      btn.disabled = false; label.textContent = '📥 Collect & Generate Report'; spin.classList.add('hidden');
+    }
+  });
+
+  async function opctLoadReport() {
+    try {
+      const r = await fetch('/api/compliance/report');
+      if (!r.ok) return;
+      const rep = await r.json();
+
+      document.getElementById('opct-report-card').classList.remove('hidden');
+      document.getElementById('opct-report-summary').innerHTML = `
+        <div><strong style="color:#e2e8f0">Management host:</strong> ${escHtml(rep.mgmtHost || '-')}</div>
+        <div><strong style="color:#e2e8f0">OPCT version:</strong> ${escHtml(rep.opctVersion || '-')}</div>
+        <div><strong style="color:#e2e8f0">Grade:</strong> ${escHtml(rep.grade || 'n/a')}</div>
+        <div><strong style="color:#e2e8f0">Collected:</strong> ${rep.collectedAt ? escHtml(new Date(rep.collectedAt).toLocaleString()) : '-'}</div>
+        <div><strong style="color:#e2e8f0">Results archive:</strong> ${escHtml(rep.tarballPath || '-')}</div>
+      `;
+
+      const thead = document.getElementById('opct-report-thead');
+      const tbody = document.getElementById('opct-report-tbody');
+      thead.innerHTML = ''; tbody.innerHTML = '';
+      if (rep.table && rep.table.rows && rep.table.rows.length) {
+        const headers = rep.table.header || rep.table.rows[0].map((_, i) => `Col ${i + 1}`);
+        thead.innerHTML = headers.map(h => `<th>${escHtml(h)}</th>`).join('');
+        tbody.innerHTML = rep.table.rows.map(row =>
+          `<tr>${row.map(c => `<td>${escHtml(c)}</td>`).join('')}</tr>`
+        ).join('');
+      } else {
+        thead.innerHTML = '<th>Results</th>';
+        tbody.innerHTML = '<tr><td style="color:#64748b">No structured table detected — see raw output below.</td></tr>';
+      }
+
+      document.getElementById('opct-report-raw').textContent = rep.raw || '';
+    } catch (_) { /* no report yet */ }
+  }
+
+  document.getElementById('opct-download-raw-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('opct-download-raw-btn');
+    btn.disabled = true;
+    try {
+      const resp = await fetch('/api/compliance/report/raw.txt');
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const blob = await resp.blob();
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href = url; a.download = 'opct-report.txt'; a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert('Failed to download raw report: ' + e.message);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  document.getElementById('opct-download-pdf-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('opct-download-pdf-btn');
+    btn.disabled = true;
+    try {
+      const resp = await fetch('/api/compliance/report.pdf');
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const blob = await resp.blob();
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href = url; a.download = 'opct-compliance-report.pdf'; a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert('Failed to download PDF: ' + e.message);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // Check for an in-progress or already-collected run whenever this tab opens
+  let opctStatusCheckedOnce = false;
+  document.querySelector('.nav-item[data-section="compliance"]').addEventListener('click', () => {
+    if (opctStatusCheckedOnce) return;
+    opctStatusCheckedOnce = true;
+    fetch('/api/compliance/status').then(r => r.json()).then(s => {
+      if (s.status && s.status !== 'idle') {
+        document.getElementById('opct-status-card').classList.remove('hidden');
+        opctRefreshStatus();
+      }
+    }).catch(() => {});
   });
 
 </script>

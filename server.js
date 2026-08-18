@@ -3,9 +3,11 @@ const express         = require('express');
 const fetch           = require('node-fetch');
 const https           = require('https');
 const path            = require('path');
+const fs              = require('fs');
 const dotenv          = require('dotenv');
 const bcrypt          = require('bcryptjs');
 const { Client: Ssh } = require('ssh2');
+const PDFDocument     = require('pdfkit');
 
 const app      = express();
 const PORT     = process.env.PORT || 3000;
@@ -4617,65 +4619,71 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
 
     // 9. Find or create NAT Gateway + SNAT rule
     step('Create NAT Gateway', 'running');
-    const allNats  = await ionosGet(`/datacenters/${dcId}/natgateways?depth=1`, ionosToken);
-    const existNat = byName(allNats.items, `${clusterName}-nat-gw`);
+    const natKaTimer = setInterval(() => log('  Still waiting on IONOS Cloud API...\n'), 15000);
     let natGwId;
-    if (existNat) {
-      natGwId = existNat.id;
-      logFound(`NAT Gateway ${natGwId}`);
-      if ((existNat.metadata?.state || '') !== 'AVAILABLE')
+    try {
+      const allNats  = await ionosGet(`/datacenters/${dcId}/natgateways?depth=1`, ionosToken);
+      const existNat = byName(allNats.items, `${clusterName}-nat-gw`);
+      if (existNat) {
+        natGwId = existNat.id;
+        logFound(`NAT Gateway ${natGwId}`);
+        if ((existNat.metadata?.state || '') !== 'AVAILABLE')
+          await ionosWaitAvailable(`/datacenters/${dcId}/natgateways/${natGwId}`, ionosToken, 180000);
+      } else {
+        const natGw = await ionosPost(`/datacenters/${dcId}/natgateways`, ionosToken, {
+          properties: { name: `${clusterName}-nat-gw`, publicIps: [natPubIp],
+            lans: [{ id: privLanId, gatewayIps: [`${gatewayIp}/24`] }] }
+        });
+        natGwId = natGw.id;
+        log(`  NAT Gateway created: ${natGwId} — waiting for AVAILABLE...\n`);
         await ionosWaitAvailable(`/datacenters/${dcId}/natgateways/${natGwId}`, ionosToken, 180000);
-    } else {
-      const natGw = await ionosPost(`/datacenters/${dcId}/natgateways`, ionosToken, {
-        properties: { name: `${clusterName}-nat-gw`, publicIps: [natPubIp],
-          lans: [{ id: privLanId, gatewayIps: [`${gatewayIp}/24`] }] }
-      });
-      natGwId = natGw.id;
-      log(`  NAT Gateway created: ${natGwId} — waiting for AVAILABLE...\n`);
-      await ionosWaitAvailable(`/datacenters/${dcId}/natgateways/${natGwId}`, ionosToken, 180000);
-      await ionosPost(`/datacenters/${dcId}/natgateways/${natGwId}/rules`, ionosToken, {
-        properties: { name: 'snat-private', type: 'SNAT', protocol: 'ALL',
-          sourceSubnet: subnetCidr, publicIp: natPubIp }
-      });
-      await ionosWaitAvailable(`/datacenters/${dcId}/natgateways/${natGwId}`, ionosToken, 120000);
-      logCreated(`NAT Gateway ${natGwId}  (${natPubIp} → ${subnetCidr})`);
-    }
+        await ionosPost(`/datacenters/${dcId}/natgateways/${natGwId}/rules`, ionosToken, {
+          properties: { name: 'snat-private', type: 'SNAT', protocol: 'ALL',
+            sourceSubnet: subnetCidr, publicIp: natPubIp }
+        });
+        await ionosWaitAvailable(`/datacenters/${dcId}/natgateways/${natGwId}`, ionosToken, 120000);
+        logCreated(`NAT Gateway ${natGwId}  (${natPubIp} → ${subnetCidr})`);
+      }
+    } finally { clearInterval(natKaTimer); }
     step('Create NAT Gateway', 'done');
 
     // 10. Find or create NLB + forwarding rules
     step('Create Network Load Balancer', 'running');
-    const allNlbs  = await ionosGet(`/datacenters/${dcId}/networkloadbalancers?depth=1`, ionosToken);
-    const existNlb = byName(allNlbs.items, `${clusterName}-nlb`);
+    const nlbKaTimer = setInterval(() => log('  Still waiting on IONOS Cloud API...\n'), 15000);
     let nlbId;
-    if (existNlb) {
-      nlbId = existNlb.id;
-      logFound(`NLB ${nlbId}`);
-      if ((existNlb.metadata?.state || '') !== 'AVAILABLE')
-        await ionosWaitAvailable(`/datacenters/${dcId}/networkloadbalancers/${nlbId}`, ionosToken, 180000);
-    } else {
-      const nlb = await ionosPost(`/datacenters/${dcId}/networkloadbalancers`, ionosToken, {
-        properties: { name: `${clusterName}-nlb`, listenerLan: pubLanId,
-          targetLan: privLanId, ips: [nlbPubIp] }
-      });
-      nlbId = nlb.id;
-      log(`  NLB created: ${nlbId} — waiting for AVAILABLE...\n`);
-      await ionosWaitAvailable(`/datacenters/${dcId}/networkloadbalancers/${nlbId}`, ionosToken, 180000);
-      for (const { port, name } of [
-        { port: 6443,  name: 'kube-api'      },
-        { port: 22623, name: 'mcs'           },
-        { port: 80,    name: 'http-ingress'  },
-        { port: 443,   name: 'https-ingress' },
-      ]) {
-        await ionosPost(`/datacenters/${dcId}/networkloadbalancers/${nlbId}/forwardingrules`, ionosToken, {
-          properties: { name: `${clusterName}-${name}`, algorithm: 'ROUND_ROBIN', protocol: 'TCP',
-            listenerIp: nlbPubIp, listenerPort: port,
-            targets: cpDetails.map(d => ({ ip: d.ip, port, weight: 1 })) }
+    try {
+      const allNlbs  = await ionosGet(`/datacenters/${dcId}/networkloadbalancers?depth=1`, ionosToken);
+      const existNlb = byName(allNlbs.items, `${clusterName}-nlb`);
+      if (existNlb) {
+        nlbId = existNlb.id;
+        logFound(`NLB ${nlbId}`);
+        if ((existNlb.metadata?.state || '') !== 'AVAILABLE')
+          await ionosWaitAvailable(`/datacenters/${dcId}/networkloadbalancers/${nlbId}`, ionosToken, 180000);
+      } else {
+        const nlb = await ionosPost(`/datacenters/${dcId}/networkloadbalancers`, ionosToken, {
+          properties: { name: `${clusterName}-nlb`, listenerLan: pubLanId,
+            targetLan: privLanId, ips: [nlbPubIp] }
         });
-        await ionosWaitAvailable(`/datacenters/${dcId}/networkloadbalancers/${nlbId}`, ionosToken, 120000);
-        log(`  NLB rule: ${port}/TCP\n`);
+        nlbId = nlb.id;
+        log(`  NLB created: ${nlbId} — waiting for AVAILABLE...\n`);
+        await ionosWaitAvailable(`/datacenters/${dcId}/networkloadbalancers/${nlbId}`, ionosToken, 180000);
+        for (const { port, name } of [
+          { port: 6443,  name: 'kube-api'      },
+          { port: 22623, name: 'mcs'           },
+          { port: 80,    name: 'http-ingress'  },
+          { port: 443,   name: 'https-ingress' },
+        ]) {
+          await ionosPost(`/datacenters/${dcId}/networkloadbalancers/${nlbId}/forwardingrules`, ionosToken, {
+            properties: { name: `${clusterName}-${name}`, algorithm: 'ROUND_ROBIN', protocol: 'TCP',
+              listenerIp: nlbPubIp, listenerPort: port,
+              targets: cpDetails.map(d => ({ ip: d.ip, port, weight: 1 })) }
+          });
+          await ionosWaitAvailable(`/datacenters/${dcId}/networkloadbalancers/${nlbId}`, ionosToken, 120000);
+          log(`  NLB rule: ${port}/TCP\n`);
+        }
+        logCreated(`NLB ${nlbId}  (${nlbPubIp})`);
       }
-      logCreated(`NLB ${nlbId}  (${nlbPubIp})`);
-    }
+    } finally { clearInterval(nlbKaTimer); }
     step('Create Network Load Balancer', 'done');
 
     const infra = {
@@ -5102,6 +5110,336 @@ app.get('/api/new-cluster/state/:clusterName', (req, res) => {
   // Return safe subset (omit private key, pull secret, tokens)
   const { mgmtSshPrivKey: _k, pullSecret: _p, ionosToken: _t, ionosFtpPass: _f, ...safe } = saved;
   res.json(safe);
+});
+
+// ── OPCT Compliance Report ──────────────────────────────────────────────────
+// Runs the Red Hat OpenShift Provider Compatibility Tool (opct) against the
+// cluster via the management host, retrieves the results, and renders a
+// branded PDF report.
+
+const OPCT_STATE_FILE = path.join(__dirname, 'data', 'opct-state.json');
+
+function loadOpctState() {
+  try { return JSON.parse(fs.readFileSync(OPCT_STATE_FILE, 'utf8')); }
+  catch (_) { return {}; }
+}
+function saveOpctState(state) {
+  try {
+    fs.mkdirSync(path.dirname(OPCT_STATE_FILE), { recursive: true });
+    fs.writeFileSync(OPCT_STATE_FILE, JSON.stringify(state, null, 2));
+  } catch (e) { console.error('[opct] Failed to persist state:', e.message); }
+}
+let opctState = loadOpctState();
+
+// Best-effort parser for `opct report -s <tarball>` text output. The exact
+// column layout isn't guaranteed across opct versions, so this looks for
+// whitespace-aligned tabular blocks and picks the largest one; the raw text
+// is always kept as the source of truth alongside it.
+function parseOpctReport(raw) {
+  const lines = String(raw || '').split(/\r?\n/);
+  const tables = [];
+  let current = null;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) { if (current) { tables.push(current); current = null; } continue; }
+    const cols = trimmed.split(/\s{2,}/).map(s => s.trim()).filter(Boolean);
+    if (cols.length >= 2) {
+      if (!current) current = { header: null, rows: [] };
+      if (!current.header) current.header = cols;
+      else current.rows.push(cols);
+    } else if (current) {
+      tables.push(current);
+      current = null;
+    }
+  }
+  if (current) tables.push(current);
+  const main = tables.filter(t => t.rows.length).sort((a, b) => b.rows.length - a.rows.length)[0] || null;
+  const gradeMatch = raw.match(/Grade[:\s]+([A-Za-z0-9+\-]+)/i);
+  return { main, grade: gradeMatch ? gradeMatch[1] : null };
+}
+
+const OPCT_FONT_DIR      = path.join(__dirname, 'fonts');
+const OPCT_FONT_REGULAR  = path.join(OPCT_FONT_DIR, 'Overpass-Regular.ttf');
+const OPCT_FONT_BOLD     = path.join(OPCT_FONT_DIR, 'Overpass-Bold.ttf');
+const OPCT_FONT_SEMIBOLD = path.join(OPCT_FONT_DIR, 'Overpass-SemiBold.ttf');
+const OPCT_LOGO_PATH     = path.join(__dirname, 'public', 'ionos-cloud-logo.png');
+// Logo is 913x121px — pdfkit's proportional auto-scale (passing only `height`)
+// mis-renders at natural size when a text flow follows in the same content
+// stream, so the width is computed and passed explicitly to force correct scaling.
+const OPCT_LOGO_HEIGHT   = 32;
+const OPCT_LOGO_WIDTH    = Math.round(OPCT_LOGO_HEIGHT * (913 / 121));
+
+function renderOpctPdf(doc, state) {
+  doc.registerFont('Overpass',          OPCT_FONT_REGULAR);
+  doc.registerFont('Overpass-Bold',     OPCT_FONT_BOLD);
+  doc.registerFont('Overpass-SemiBold', OPCT_FONT_SEMIBOLD);
+
+  const pageWidth  = doc.page.width;
+  const bannerH    = 86;
+  const marginX    = 40;
+  const titleX     = marginX + OPCT_LOGO_WIDTH + 20;
+  const titleWidth = pageWidth - titleX - marginX;
+  const TITLE      = 'OpenShift Compliance Report';
+  const SUBTITLE   = 'OPCT — OpenShift Provider Compatibility Tool';
+
+  function drawBanner() {
+    doc.rect(0, 0, pageWidth, bannerH).fill('#0b1e45');
+    try {
+      doc.image(OPCT_LOGO_PATH, marginX, (bannerH - OPCT_LOGO_HEIGHT) / 2,
+        { width: OPCT_LOGO_WIDTH, height: OPCT_LOGO_HEIGHT });
+    } catch (_) {}
+    doc.font('Overpass-Bold').fontSize(15);
+    const titleH = doc.heightOfString(TITLE, { width: titleWidth });
+    const blockTop = (bannerH - (titleH + 14)) / 2;
+    doc.fillColor('#ffffff').text(TITLE, titleX, blockTop, { width: titleWidth });
+    doc.font('Overpass').fontSize(8.5).fillColor('#93c5fd')
+      .text(SUBTITLE, titleX, blockTop + titleH + 4, { width: titleWidth });
+    doc.y = bannerH + 24;
+    doc.x = marginX;
+  }
+
+  drawBanner();
+  doc.on('pageAdded', drawBanner);
+
+  doc.font('Overpass-SemiBold').fontSize(13).fillColor('#0b1e45').text('Summary');
+  doc.moveDown(0.4);
+  const summaryRows = [
+    ['Management host',   state.mgmtHost || '-'],
+    ['OPCT version',      state.opctVersion || '-'],
+    ['Run started',       state.startedAt ? new Date(state.startedAt).toLocaleString() : '-'],
+    ['Report collected',  state.collectedAt ? new Date(state.collectedAt).toLocaleString() : '-'],
+    ['Grade',             state.grade || 'n/a'],
+    ['Results archive',   state.tarballPath || '-'],
+  ];
+  summaryRows.forEach(([k, v]) => {
+    doc.font('Overpass-SemiBold').fontSize(9.5).fillColor('#374151').text(`${k}:  `, { continued: true });
+    doc.font('Overpass').fontSize(9.5).fillColor('#111827').text(String(v));
+  });
+  doc.moveDown(1);
+
+  const table = state.reportTable;
+  doc.font('Overpass-SemiBold').fontSize(13).fillColor('#0b1e45').text('Results');
+  doc.moveDown(0.4);
+
+  if (table && table.rows && table.rows.length) {
+    const headers     = table.header || table.rows[0].map((_, i) => `Col ${i + 1}`);
+    const colCount    = headers.length;
+    const tableWidth  = pageWidth - marginX * 2;
+    const colWidth    = tableWidth / colCount;
+
+    function drawRow(cols, bold) {
+      if (doc.y > doc.page.height - 90) doc.addPage();
+      const rowY = doc.y;
+      cols.forEach((c, i) => {
+        doc.font(bold ? 'Overpass-Bold' : 'Overpass').fontSize(8.5)
+          .fillColor(bold ? '#0b1e45' : '#1f2937')
+          .text(String(c ?? ''), marginX + i * colWidth, rowY, { width: colWidth - 6 });
+      });
+      doc.y = rowY + 16;
+      doc.x = marginX;
+      doc.moveTo(marginX, doc.y).lineTo(marginX + tableWidth, doc.y)
+        .strokeColor(bold ? '#0b1e45' : '#e5e7eb').lineWidth(bold ? 1 : 0.5).stroke();
+      doc.y += 4;
+    }
+
+    drawRow(headers, true);
+    table.rows.forEach(r => drawRow(r, false));
+  } else {
+    doc.font('Overpass').fontSize(9).fillColor('#6b7280')
+      .text('A structured results table could not be detected in the opct output — see the raw output below.');
+  }
+
+  doc.moveDown(1.2);
+  doc.font('Overpass-SemiBold').fontSize(13).fillColor('#0b1e45').text('Raw opct report output');
+  doc.moveDown(0.4);
+  doc.font('Overpass').fontSize(7.5).fillColor('#111827')
+    .text(state.reportRaw || '(no output)', { width: pageWidth - marginX * 2 });
+}
+
+// POST /api/compliance/start — SSE. Connects to the management host, installs
+// opct if needed, and launches the conformance run in the background (it can
+// take 2-5+ hours, so this only kicks it off and returns).
+app.post('/api/compliance/start', async (req, res) => {
+  const { mgmtHost, sshKey, sshPassphrase, kubeconfigPath } = req.body;
+  const { step, log, done, fail } = makeSseHelpers(res);
+  const kubeconfig = (kubeconfigPath || '/root/.kube/config').trim();
+
+  if (!mgmtHost || !sshKey) { fail('Management host and SSH private key are required.'); return; }
+
+  let conn;
+  try {
+    step('Connect to management host via SSH', 'running');
+    conn = await sshConnect(mgmtHost, 'root', sshKey, sshPassphrase);
+    step('Connect to management host via SSH', 'done');
+
+    step('Check / install opct CLI', 'running');
+    const kaTimer1 = setInterval(() => log('  Still working...\n'), 15000);
+    let opctVersion;
+    try {
+      const check = await sshRunScript(conn, `opct version 2>&1 || echo __OPCT_NOTFOUND__`);
+      if (/__OPCT_NOTFOUND__/.test(check.stdout)) {
+        log('  opct not found — installing latest release...\n');
+        await sshRunScriptStreaming(conn, `set -e
+curl -sL -o /usr/local/bin/opct https://github.com/redhat-openshift-ecosystem/provider-certification-tool/releases/latest/download/opct-linux-amd64
+chmod +x /usr/local/bin/opct
+opct version`, chunk => log(chunk));
+        const recheck = await sshRunScript(conn, `opct version 2>&1`);
+        opctVersion = recheck.stdout.trim();
+      } else {
+        opctVersion = check.stdout.trim();
+        log(`  Found: ${opctVersion}\n`);
+      }
+    } finally { clearInterval(kaTimer1); }
+    step('Check / install opct CLI', 'done');
+
+    step('Launch OPCT conformance run (background, 2-5+ hours)', 'running');
+    const logFile = `/root/opct-run-${Date.now()}.log`;
+    const launch = await sshRunScript(conn,
+      `export KUBECONFIG="${kubeconfig}"
+nohup opct run > "${logFile}" 2>&1 < /dev/null &
+echo $!`);
+    const pid = launch.stdout.trim().split('\n').pop().trim();
+    log(`  Started opct run — PID ${pid}\n  Log file: ${logFile}\n`);
+    step('Launch OPCT conformance run (background, 2-5+ hours)', 'done');
+
+    opctState = {
+      mgmtHost, sshKey, sshPassphrase: sshPassphrase || '', kubeconfigPath: kubeconfig,
+      pid, logFile, opctVersion,
+      startedAt: Date.now(), status: 'running',
+      collectedAt: null, tarballPath: null, reportRaw: null, reportTable: null, grade: null
+    };
+    saveOpctState(opctState);
+
+    done('OPCT run started. This runs for several hours — check status periodically.', { pid, logFile });
+  } catch (e) {
+    console.error('[compliance/start] Failed:', e.stack || e.message);
+    fail(`Failed to start OPCT run: ${e.message}`);
+  } finally {
+    if (conn) try { conn.end(); } catch (_) {}
+  }
+});
+
+// GET /api/compliance/status — lightweight JSON poll of the background run.
+app.get('/api/compliance/status', async (req, res) => {
+  if (!opctState || !opctState.mgmtHost) return res.json({ status: 'idle' });
+
+  let conn;
+  try {
+    conn = await sshConnect(opctState.mgmtHost, 'root', opctState.sshKey, opctState.sshPassphrase);
+    const check = await sshRunScript(conn,
+      `if [ -n "${opctState.pid}" ] && kill -0 ${opctState.pid} 2>/dev/null; then echo __RUNNING__; else echo __STOPPED__; fi
+echo __TAIL__
+tail -n 80 "${opctState.logFile}" 2>/dev/null || echo "(log file not found)"`);
+    const [statusPart, tailPart] = check.stdout.split('__TAIL__');
+    const running = /__RUNNING__/.test(statusPart);
+    opctState.status = running ? 'running' : (opctState.reportRaw ? 'collected' : 'stopped');
+    saveOpctState(opctState);
+    res.json({
+      status:      opctState.status,
+      running,
+      mgmtHost:    opctState.mgmtHost,
+      startedAt:   opctState.startedAt,
+      collectedAt: opctState.collectedAt,
+      logTail:     (tailPart || '').trim(),
+      hasReport:   !!opctState.reportRaw
+    });
+  } catch (e) {
+    res.status(502).json({ status: 'error', error: e.message });
+  } finally {
+    if (conn) try { conn.end(); } catch (_) {}
+  }
+});
+
+// POST /api/compliance/collect — SSE. Retrieves the results archive and runs
+// `opct report -s` on the management host, then parses + stores the output.
+app.post('/api/compliance/collect', async (req, res) => {
+  const { step, log, done, fail } = makeSseHelpers(res);
+  if (!opctState || !opctState.mgmtHost) { fail('No OPCT run has been started yet.'); return; }
+
+  let conn;
+  try {
+    conn = await sshConnect(opctState.mgmtHost, 'root', opctState.sshKey, opctState.sshPassphrase);
+    const kaTimer = setInterval(() => log('  Still waiting on management host...\n'), 15000);
+    let tarballPath, reportRaw;
+    try {
+      step('Retrieve OPCT results archive', 'running');
+      await sshRunScriptStreaming(conn,
+        `set -e
+mkdir -p /root/opct-results
+cd /root/opct-results
+export KUBECONFIG="${opctState.kubeconfigPath}"
+opct retrieve .`, chunk => log(chunk));
+      const find = await sshRunScript(conn, `ls -t /root/opct-results/*.tar.gz 2>/dev/null | head -1`);
+      tarballPath = find.stdout.trim();
+      if (!tarballPath) throw new Error('No results archive (.tar.gz) found after opct retrieve — has the run finished?');
+      log(`  Archive: ${tarballPath}\n`);
+      step('Retrieve OPCT results archive', 'done');
+
+      step('Generate report (opct report -s)', 'running');
+      const rep = await sshRunScript(conn, `opct report -s "${tarballPath}" 2>&1`);
+      reportRaw = rep.stdout;
+      step('Generate report (opct report -s)', 'done');
+    } finally { clearInterval(kaTimer); }
+
+    const parsed = parseOpctReport(reportRaw);
+    opctState.tarballPath = tarballPath;
+    opctState.reportRaw   = reportRaw;
+    opctState.reportTable = parsed.main;
+    opctState.grade       = parsed.grade;
+    opctState.collectedAt = Date.now();
+    opctState.status      = 'collected';
+    saveOpctState(opctState);
+
+    done('Report collected.', { grade: parsed.grade, rows: parsed.main?.rows?.length || 0 });
+  } catch (e) {
+    console.error('[compliance/collect] Failed:', e.stack || e.message);
+    fail(`Failed to collect report: ${e.message}`);
+  } finally {
+    if (conn) try { conn.end(); } catch (_) {}
+  }
+});
+
+// GET /api/compliance/report — JSON of the last collected report
+app.get('/api/compliance/report', (req, res) => {
+  if (!opctState || !opctState.reportRaw) return res.status(404).json({ error: 'No report collected yet.' });
+  res.json({
+    mgmtHost:    opctState.mgmtHost,
+    startedAt:   opctState.startedAt,
+    collectedAt: opctState.collectedAt,
+    opctVersion: opctState.opctVersion,
+    tarballPath: opctState.tarballPath,
+    grade:       opctState.grade,
+    table:       opctState.reportTable,
+    raw:         opctState.reportRaw
+  });
+});
+
+// GET /api/compliance/report/raw.txt — untouched `opct report -s` output, suitable
+// for submission to Red Hat for provider certification (unmodified, no branding).
+app.get('/api/compliance/report/raw.txt', (req, res) => {
+  if (!opctState || !opctState.reportRaw) return res.status(404).send('No report collected yet.');
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="opct-report.txt"');
+  res.send(opctState.reportRaw);
+});
+
+// GET /api/compliance/report.pdf — branded PDF (IONOS banner + Overpass font)
+app.get('/api/compliance/report.pdf', (req, res) => {
+  if (!opctState || !opctState.reportRaw) return res.status(404).send('No report collected yet.');
+  try {
+    const buffers = [];
+    const doc = new PDFDocument({ size: 'A4', margin: 40, bufferPages: true });
+    doc.on('data', b => buffers.push(b));
+    doc.on('end', () => {
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', 'attachment; filename="opct-compliance-report.pdf"');
+      res.send(Buffer.concat(buffers));
+    });
+    renderOpctPdf(doc, opctState);
+    doc.end();
+  } catch (e) {
+    res.status(500).send('Failed to generate PDF: ' + e.message);
+  }
 });
 
 app.listen(PORT, () => {
