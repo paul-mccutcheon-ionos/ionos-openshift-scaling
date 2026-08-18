@@ -1851,7 +1851,9 @@ echo "ALT_WRITE_OK"
               // topology.kubernetes.io/zone here propagates to the Node when the Machine
               // joins — required by OPCT (and any topology-spread-aware workload); without
               // it, pods like the image registry can fail to schedule (see OPCT preflight).
-              metadata: { labels: { [OPCT_ZONE_LABEL]: 'fra1', ...(frankfurtDiversity ? { 'ionos-site': 'fra1' } : {}) } },
+              // Frankfurt diversity nodes live in the *other* physical DC site (reached via
+              // PCC), so they get their own zone value — never collapsed into the primary site's.
+              metadata: { labels: { [OPCT_ZONE_LABEL]: ionosZoneFromLocation(effectiveRegion), ...(frankfurtDiversity ? { 'ionos-site': 'fra1' } : {}) } },
               providerSpec: { value: providerSpec },
               taints: []
             }
@@ -1960,12 +1962,14 @@ echo "ALT_WRITE_OK"
       if (clone.spec.selector?.matchLabels)              clone.spec.selector.matchLabels[msLabelKey]             = targetMsName;
       if (clone.spec.template?.metadata?.labels)         clone.spec.template.metadata.labels[msLabelKey]         = targetMsName;
       // Carry forward (or add) the zone label so nodes from the clone keep auto-labeling too.
+      // Prefer whatever zone the source MachineSet already declares (it may target either
+      // DC site) — only fall back to the request's `region` if the source has none set.
       if (!clone.spec.template) clone.spec.template = {};
       if (!clone.spec.template.spec) clone.spec.template.spec = {};
       if (!clone.spec.template.spec.metadata) clone.spec.template.spec.metadata = {};
       clone.spec.template.spec.metadata.labels = {
         ...(clone.spec.template.spec.metadata.labels || {}),
-        [OPCT_ZONE_LABEL]: clone.spec.template.spec.metadata.labels?.[OPCT_ZONE_LABEL] || 'fra1'
+        [OPCT_ZONE_LABEL]: clone.spec.template.spec.metadata.labels?.[OPCT_ZONE_LABEL] || ionosZoneFromLocation(region)
       };
       await ocpApply(msApiBase, targetMsName, clone);
       log(`MachineSet "${targetMsName}" cloned from "${msSource}" (${clone.spec.replicas} replicas)\n`);
@@ -4286,6 +4290,19 @@ function ftpHostForLoc(loc) {
   return zone ? `ftp-${city}-${zone}.ionos.com` : `ftp-${city}.ionos.com`;
 }
 
+// topology.kubernetes.io/zone value for a node in a given IONOS location.
+// Accepts either slash form (de/fra, de/fra/2) or the Machine API dash form
+// already used for cross-site Frankfurt diversity (de-fra-1, de-fra-2) — the
+// two physical DC sites reachable via PCC must map to distinct zones so
+// topology-spread-aware workloads (and OPCT) see them as separate failure
+// domains, not one merged zone.
+function ionosZoneFromLocation(loc) {
+  if (!loc) return 'de-fra-1';
+  if (!loc.includes('/')) return loc; // already dash form, e.g. de-fra-2
+  const known = { 'de/fra': 'de-fra-1', 'de/fra/2': 'de-fra-2' };
+  return known[loc] || loc.replace(/\//g, '-');
+}
+
 // SSE helper factory
 function makeSseHelpers(res) {
   res.setHeader('Content-Type',  'text/event-stream');
@@ -5402,30 +5419,60 @@ app.post('/api/compliance/preflight/fix-registry', async (req, res) => {
   }
 });
 
+// Best-effort zone for a MachineSet: prefer its IONOS providerSpec (region,
+// falling back to datacenterID as an opaque-but-stable per-site value) so
+// MachineSets pointed at the two different DC sites (reached via PCC for
+// Frankfurt diversity) resolve to two different zones, never one merged value.
+function zoneForMachineSet(ms) {
+  const spec = ms.spec?.template?.spec;
+  const existing = spec?.metadata?.labels?.[OPCT_ZONE_LABEL];
+  if (existing) return existing;
+  const provider = spec?.providerSpec?.value;
+  if (provider?.region) return ionosZoneFromLocation(provider.region);
+  if (provider?.datacenterID) return `dc-${provider.datacenterID.slice(0, 8)}`;
+  return ionosZoneFromLocation();
+}
+
 // POST /api/compliance/preflight/fix-zone-labels — SSE. Labels existing worker
 // nodes that are missing the zone label (needed by OPCT's registry pod / any
-// topology-spread-aware workload right now, not just future nodes).
+// topology-spread-aware workload right now, not just future nodes). Each
+// node's zone is resolved via its owning Machine → MachineSet, so nodes in
+// the two different Frankfurt DC sites get distinct values, not one blanket zone.
 app.post('/api/compliance/preflight/fix-zone-labels', async (req, res) => {
-  const { apiUrl, ocpToken, zoneValue } = req.body;
+  const { apiUrl, ocpToken } = req.body;
   const { step, log, done, fail } = makeSseHelpers(res);
   if (!apiUrl || !ocpToken) { fail('apiUrl and ocpToken are required.'); return; }
-  const zone = (zoneValue || 'fra1').trim();
+  const msLabelKey = 'machine.openshift.io/cluster-api-machineset';
 
   try {
     step('Label worker nodes', 'running');
-    const nodes = await ocpGet(apiUrl, '/api/v1/nodes?labelSelector=node-role.kubernetes.io/worker', ocpToken);
-    const missing = (nodes.items || []).filter(n => !n.metadata?.labels?.[OPCT_ZONE_LABEL]);
+    const [nodesResp, machinesResp, machinesetsResp] = await Promise.all([
+      ocpGet(apiUrl, '/api/v1/nodes?labelSelector=node-role.kubernetes.io/worker', ocpToken),
+      ocpGet(apiUrl, '/apis/machine.openshift.io/v1beta1/namespaces/openshift-machine-api/machines', ocpToken),
+      ocpGet(apiUrl, OPCT_MACHINESETS_PATH, ocpToken)
+    ]);
+    const missing = (nodesResp.items || []).filter(n => !n.metadata?.labels?.[OPCT_ZONE_LABEL]);
     if (!missing.length) {
       log('  All worker nodes already have the zone label.\n');
     } else {
+      const zoneByMachineSet = {};
+      (machinesetsResp.items || []).forEach(ms => { zoneByMachineSet[ms.metadata.name] = zoneForMachineSet(ms); });
+      const zoneByNodeName = {};
+      (machinesResp.items || []).forEach(m => {
+        const nodeName = m.status?.nodeRef?.name;
+        const msName   = m.metadata?.labels?.[msLabelKey];
+        if (nodeName && msName && zoneByMachineSet[msName]) zoneByNodeName[nodeName] = zoneByMachineSet[msName];
+      });
+      const fallbackZone = ionosZoneFromLocation();
       for (const n of missing) {
+        const zone = zoneByNodeName[n.metadata.name] || fallbackZone;
         await ocpPatch(apiUrl, `/api/v1/nodes/${encodeURIComponent(n.metadata.name)}`, ocpToken,
           { metadata: { labels: { [OPCT_ZONE_LABEL]: zone } } });
-        log(`  Labeled ${n.metadata.name}: ${OPCT_ZONE_LABEL}=${zone}\n`);
+        log(`  Labeled ${n.metadata.name}: ${OPCT_ZONE_LABEL}=${zone}${zoneByNodeName[n.metadata.name] ? '' : ' (fallback — no owning MachineSet found)'}\n`);
       }
     }
     step('Label worker nodes', 'done');
-    done(`Labeled ${missing.length} node(s) with ${OPCT_ZONE_LABEL}=${zone}.`);
+    done(`Labeled ${missing.length} node(s).`);
   } catch (e) {
     fail(`Failed to label worker nodes: ${e.message}`);
   }
@@ -5433,13 +5480,14 @@ app.post('/api/compliance/preflight/fix-zone-labels', async (req, res) => {
 
 // POST /api/compliance/preflight/fix-machineset-labels — SSE. Patches every
 // MachineSet's pod/node template so any node it creates from now on — via
-// manual scaling or the cluster autoscaler — automatically carries the zone
-// label. This is what makes labeling "automatic" going forward.
+// manual scaling or the cluster autoscaler — automatically carries a zone
+// label matching its own IONOS site. This is what makes labeling "automatic"
+// going forward, including for nodes created in the secondary Frankfurt DC
+// site over PCC, which must not share a zone with the primary site.
 app.post('/api/compliance/preflight/fix-machineset-labels', async (req, res) => {
-  const { apiUrl, ocpToken, zoneValue } = req.body;
+  const { apiUrl, ocpToken } = req.body;
   const { step, log, done, fail } = makeSseHelpers(res);
   if (!apiUrl || !ocpToken) { fail('apiUrl and ocpToken are required.'); return; }
-  const zone = (zoneValue || 'fra1').trim();
 
   try {
     step('Patch MachineSet templates', 'running');
@@ -5450,13 +5498,14 @@ app.post('/api/compliance/preflight/fix-machineset-labels', async (req, res) => 
       log('  All MachineSets already configured.\n');
     } else {
       for (const s of missing) {
+        const zone = zoneForMachineSet(s);
         await ocpPatch(apiUrl, `/apis/machine.openshift.io/v1beta1/namespaces/openshift-machine-api/machinesets/${encodeURIComponent(s.metadata.name)}`, ocpToken,
           { spec: { template: { spec: { metadata: { labels: { [OPCT_ZONE_LABEL]: zone } } } } } });
-        log(`  Patched MachineSet "${s.metadata.name}"\n`);
+        log(`  Patched MachineSet "${s.metadata.name}": ${OPCT_ZONE_LABEL}=${zone}\n`);
       }
     }
     step('Patch MachineSet templates', 'done');
-    done(`New nodes from ${missing.length} MachineSet(s) will now auto-carry ${OPCT_ZONE_LABEL}=${zone}.`);
+    done(`New nodes from ${missing.length} MachineSet(s) will now auto-carry their site's zone label.`);
   } catch (e) {
     fail(`Failed to patch MachineSets: ${e.message}`);
   }
