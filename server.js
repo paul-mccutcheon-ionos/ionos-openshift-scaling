@@ -5666,6 +5666,7 @@ app.get('/api/compliance/status', async (req, res) => {
 
   let podSummary = null;
   let podError   = null;
+  let plugins    = null;
   if (apiUrl && ocpToken) {
     try {
       const pods = await ocpGet(apiUrl, '/api/v1/namespaces/opct/pods?labelSelector=component=sonobuoy', ocpToken);
@@ -5674,6 +5675,15 @@ app.get('/api/compliance/status', async (req, res) => {
       items.forEach(p => { const ph = p.status?.phase || 'Unknown'; byPhase[ph] = (byPhase[ph] || 0) + 1; });
       const active = (byPhase.Running || 0) + (byPhase.Pending || 0);
       podSummary = { total: items.length, byPhase, active };
+
+      // Each conformance suite runs as its own labeled job pod (e.g.
+      // "20-openshift-conformance-validated") — the main "sonobuoy" aggregator
+      // pod carries no such label and is excluded. This is what drives the
+      // progress bar: N of these finished (Succeeded/Failed) vs still active.
+      plugins = items
+        .filter(p => p.metadata?.labels?.['sonobuoy-plugin'])
+        .map(p => ({ name: p.metadata.labels['sonobuoy-plugin'], phase: p.status?.phase || 'Unknown' }))
+        .sort((a, b) => a.name.localeCompare(b.name));
     } catch (e) {
       // 404 = namespace doesn't exist: either never started, or opct already cleaned it up post-retrieve.
       if (e.status !== 404) podError = e.message;
@@ -5713,6 +5723,7 @@ app.get('/api/compliance/status', async (req, res) => {
     logTail,
     hasReport:   !!opctState.reportRaw,
     pods:        podSummary,
+    plugins,
     podError
   });
 });

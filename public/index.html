@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.3.3</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.4.0</span>
   </div>
 
   <div class="banner-actions">
@@ -1821,6 +1821,18 @@
       </button>
     </div>
     <div id="opct-status-summary" style="font-size:0.88rem;color:#cbd5e1;margin-bottom:0.75rem"></div>
+
+    <div id="opct-progress-wrap" class="hidden" style="margin-bottom:1rem">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.35rem">
+        <span style="font-size:0.78rem;color:#94a3b8">Conformance suites</span>
+        <span id="opct-progress-fraction" style="font-size:0.78rem;color:#94a3b8"></span>
+      </div>
+      <div style="background:#0f1117;border:1px solid #1e2333;border-radius:999px;height:10px;overflow:hidden">
+        <div id="opct-progress-bar" style="background:linear-gradient(90deg,#38bdf8,#86efac);height:100%;width:0%;transition:width 0.4s ease"></div>
+      </div>
+      <div id="opct-progress-plugins" style="display:flex;flex-direction:column;gap:0.3rem;margin-top:0.6rem"></div>
+    </div>
+
     <pre id="opct-status-log" style="background:#0a0c12;border:1px solid #1e2333;border-radius:6px;padding:0.75rem 1rem;font-size:0.78rem;color:#94a3b8;max-height:260px;overflow:auto;white-space:pre-wrap"></pre>
 
     <button class="btn btn-primary btn-full" id="opct-collect-btn" style="margin-top:1rem" disabled>
@@ -5436,6 +5448,37 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     hint.textContent = hints[status] || 'Waiting for the run to finish — check status above.';
   }
 
+  const OPCT_PLUGIN_PHASE_STYLE = {
+    Succeeded: { color: '#86efac', icon: '&#10003;' },
+    Failed:    { color: '#fca5a5', icon: '&#10007;' },
+    Running:   { color: '#93c5fd', icon: '&#8635;'  },
+    Pending:   { color: '#fbbf24', icon: '&#8987;'  }
+  };
+  const OPCT_FINISHED_PHASES = { Succeeded: 1, Failed: 1 };
+
+  function renderOpctProgress(plugins) {
+    const wrap    = document.getElementById('opct-progress-wrap');
+    const barEl   = document.getElementById('opct-progress-bar');
+    const fracEl  = document.getElementById('opct-progress-fraction');
+    const listEl  = document.getElementById('opct-progress-plugins');
+    if (!plugins || !plugins.length) { wrap.classList.add('hidden'); return; }
+    wrap.classList.remove('hidden');
+
+    const done = plugins.filter(p => OPCT_FINISHED_PHASES[p.phase]).length;
+    const pct  = Math.round((done / plugins.length) * 100);
+    barEl.style.width = `${pct}%`;
+    fracEl.textContent = `${done} / ${plugins.length} finished (${pct}%)`;
+
+    listEl.innerHTML = plugins.map(p => {
+      const st = OPCT_PLUGIN_PHASE_STYLE[p.phase] || { color: '#94a3b8', icon: '&#8226;' };
+      return `<div style="display:flex;align-items:center;gap:0.5rem;font-size:0.8rem">
+        <span style="color:${st.color}">${st.icon}</span>
+        <span style="color:#cbd5e1">${escHtml(p.name)}</span>
+        <span style="color:${st.color};margin-left:auto">${escHtml(p.phase)}</span>
+      </div>`;
+    }).join('');
+  }
+
   async function opctRefreshStatus() {
     const summaryEl = document.getElementById('opct-status-summary');
     const logEl     = document.getElementById('opct-status-log');
@@ -5445,8 +5488,8 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
       const qs = new URLSearchParams({ ...(apiUrl ? { apiUrl } : {}), ...(ocpToken ? { ocpToken } : {}) });
       const r = await fetch(`/api/compliance/status?${qs}`);
       const s = await r.json();
-      if (s.status === 'idle') { summaryEl.textContent = 'No OPCT run has been started yet.'; opctSetCollectEnabled('idle'); return; }
-      if (s.status === 'error') { summaryEl.innerHTML = `<span style="color:#f87171">Status check failed: ${escHtml(s.error || '')}</span>`; opctSetCollectEnabled('error'); return; }
+      if (s.status === 'idle') { summaryEl.textContent = 'No OPCT run has been started yet.'; opctSetCollectEnabled('idle'); renderOpctProgress(null); return; }
+      if (s.status === 'error') { summaryEl.innerHTML = `<span style="color:#f87171">Status check failed: ${escHtml(s.error || '')}</span>`; opctSetCollectEnabled('error'); renderOpctProgress(null); return; }
 
       const startedStr = s.startedAt ? new Date(s.startedAt).toLocaleString() : '-';
       const b = OPCT_STATUS_BADGES[s.status] || { color: '#94a3b8', icon: '&#8226;', text: s.status };
@@ -5458,6 +5501,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
       logEl.textContent = s.logTail || '(no log output yet)';
       logEl.scrollTop = logEl.scrollHeight;
       opctSetCollectEnabled(s.status);
+      renderOpctProgress(s.plugins);
 
       if (s.hasReport) opctLoadReport();
     } catch (e) {
