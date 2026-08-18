@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.3.2</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.3.3</span>
   </div>
 
   <div class="banner-actions">
@@ -1823,10 +1823,11 @@
     <div id="opct-status-summary" style="font-size:0.88rem;color:#cbd5e1;margin-bottom:0.75rem"></div>
     <pre id="opct-status-log" style="background:#0a0c12;border:1px solid #1e2333;border-radius:6px;padding:0.75rem 1rem;font-size:0.78rem;color:#94a3b8;max-height:260px;overflow:auto;white-space:pre-wrap"></pre>
 
-    <button class="btn btn-primary btn-full" id="opct-collect-btn" style="margin-top:1rem">
+    <button class="btn btn-primary btn-full" id="opct-collect-btn" style="margin-top:1rem" disabled>
       <span id="opct-collect-label">&#128229; Collect &amp; Generate Report</span>
       <span class="spinner hidden" id="opct-collect-spinner"></span>
     </button>
+    <div id="opct-collect-hint" style="font-size:0.76rem;color:#64748b;margin-top:0.4rem">Waiting for the run to finish — check status above.</div>
     <div id="opct-collect-steps" style="display:flex;flex-direction:column;gap:0.3rem;margin-top:1rem;font-size:0.82rem"></div>
     <pre id="opct-collect-log" class="hidden" style="background:#0a0c12;border:1px solid #1e2333;border-radius:6px;padding:0.75rem 1rem;font-size:0.78rem;color:#94a3b8;max-height:220px;overflow:auto;margin-top:0.75rem;white-space:pre-wrap"></pre>
     <div class="error-box hidden" id="opct-collect-error"></div>
@@ -5418,6 +5419,23 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     unknown:          { color: '#94a3b8', icon: '&#8226;',  text: 'Unknown (connect to cluster to check)' }
   };
 
+  function opctSetCollectEnabled(status) {
+    const btn  = document.getElementById('opct-collect-btn');
+    const hint = document.getElementById('opct-collect-hint');
+    const readyStates = { 'ready-to-collect': 1, collected: 1 };
+    const enabled = !!readyStates[status];
+    btn.disabled = !enabled;
+    const hints = {
+      running:            'Still running — the button unlocks once the run finishes.',
+      'awaiting-pods':    'Submitted, waiting for test pods to start — check back shortly.',
+      unknown:            'Can’t verify run status without a cluster connection — connect on the Cluster Connection tab first.',
+      idle:               'Start a run above first.',
+      'ready-to-collect': 'Run finished — ready to collect.',
+      collected:          'Already collected — click again to re-collect the latest results.'
+    };
+    hint.textContent = hints[status] || 'Waiting for the run to finish — check status above.';
+  }
+
   async function opctRefreshStatus() {
     const summaryEl = document.getElementById('opct-status-summary');
     const logEl     = document.getElementById('opct-status-log');
@@ -5427,8 +5445,8 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
       const qs = new URLSearchParams({ ...(apiUrl ? { apiUrl } : {}), ...(ocpToken ? { ocpToken } : {}) });
       const r = await fetch(`/api/compliance/status?${qs}`);
       const s = await r.json();
-      if (s.status === 'idle') { summaryEl.textContent = 'No OPCT run has been started yet.'; return; }
-      if (s.status === 'error') { summaryEl.innerHTML = `<span style="color:#f87171">Status check failed: ${escHtml(s.error || '')}</span>`; return; }
+      if (s.status === 'idle') { summaryEl.textContent = 'No OPCT run has been started yet.'; opctSetCollectEnabled('idle'); return; }
+      if (s.status === 'error') { summaryEl.innerHTML = `<span style="color:#f87171">Status check failed: ${escHtml(s.error || '')}</span>`; opctSetCollectEnabled('error'); return; }
 
       const startedStr = s.startedAt ? new Date(s.startedAt).toLocaleString() : '-';
       const b = OPCT_STATUS_BADGES[s.status] || { color: '#94a3b8', icon: '&#8226;', text: s.status };
@@ -5439,10 +5457,12 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
       }
       logEl.textContent = s.logTail || '(no log output yet)';
       logEl.scrollTop = logEl.scrollHeight;
+      opctSetCollectEnabled(s.status);
 
       if (s.hasReport) opctLoadReport();
     } catch (e) {
       summaryEl.innerHTML = `<span style="color:#f87171">Status check failed: ${escHtml(e.message)}</span>`;
+      opctSetCollectEnabled('error');
     }
   }
   document.getElementById('opct-status-refresh-btn').addEventListener('click', opctRefreshStatus);
@@ -5460,12 +5480,13 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
         errEl
       });
       await opctLoadReport();
-      opctRefreshStatus();
+      await opctRefreshStatus();
     } catch (e) {
       errEl.textContent = e.message;
       errEl.classList.remove('hidden');
+      await opctRefreshStatus();
     } finally {
-      btn.disabled = false; label.textContent = '📥 Collect & Generate Report'; spin.classList.add('hidden');
+      label.textContent = '📥 Collect & Generate Report'; spin.classList.add('hidden');
     }
   });
 
