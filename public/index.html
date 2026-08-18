@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.2.0</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.3.0</span>
   </div>
 
   <div class="banner-actions">
@@ -1755,6 +1755,24 @@
        Compliance Report (OPCT) section
        ══════════════════════════════════════════════════════════════════════ -->
 
+  <!-- ── Card: Preflight Checklist ────────────────────────────────────────── -->
+  <div class="card" id="opct-preflight-card" style="display:none;max-width:860px">
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.75rem;margin-bottom:0.5rem">
+      <h2 style="margin:0">&#9989; Cluster Readiness Checklist</h2>
+      <button id="opct-preflight-refresh-btn" style="background:#0f2035;color:#60a5fa;border:1px solid #1e3a5f;border-radius:6px;padding:0.4rem 0.9rem;font-size:0.82rem;cursor:pointer">
+        &#8635; Check Now
+      </button>
+    </div>
+    <p style="font-size:0.85rem;color:#94a3b8;margin-bottom:1rem;line-height:1.6">
+      OPCT's own preflight checks fail hard without much explanation. This runs the same checks up front —
+      each failing item can be fixed with one click before you kick off a multi-hour run.
+      Uses the API URL/token from the <strong style="color:#e2e8f0">Cluster Connection</strong> tab, plus the
+      management host details below.
+    </p>
+    <div id="opct-preflight-list" style="display:flex;flex-direction:column;gap:0.5rem"></div>
+    <div class="error-box hidden" id="opct-preflight-error" style="margin-top:0.75rem"></div>
+  </div>
+
   <!-- ── Card: Configure & Start Run ─────────────────────────────────────── -->
   <div class="card" id="opct-start-card" style="display:none;max-width:860px">
     <h2 style="margin-bottom:0.25rem">&#128203; OPCT Compliance Report</h2>
@@ -2255,7 +2273,7 @@
     autoscaling:  ['autoscaling-connect-hint', 'machine-api-status-card', 'autoscale-card'],
     healthchecks:    ['healthchecks-connect-hint', 'mhc-list-card', 'mhc-create-card'],
     'install-cluster': ['new-cluster-card'],
-    compliance:      ['opct-start-card', 'opct-status-card', 'opct-report-card'],
+    compliance:      ['opct-preflight-card', 'opct-start-card', 'opct-status-card', 'opct-report-card'],
   };
   let currentNav = 'connection';
 
@@ -5234,6 +5252,136 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     if (onDone) onDone(doneData);
     return doneData;
   }
+
+  // ── Preflight checklist ──────────────────────────────────────────────────
+  const OPCT_FIX_ENDPOINTS = {
+    'registry':           '/api/compliance/preflight/fix-registry',
+    'zone-labels':        '/api/compliance/preflight/fix-zone-labels',
+    'machineset-labels':  '/api/compliance/preflight/fix-machineset-labels',
+    'dedicated-node':     '/api/compliance/preflight/fix-dedicated-node',
+    'kubeconfig':         '/api/compliance/preflight/fix-kubeconfig'
+  };
+
+  function opctPreflightBody() {
+    return {
+      apiUrl:        document.getElementById('api-url').value.trim(),
+      ocpToken:      document.getElementById('ocp-token').value.trim(),
+      mgmtHost:      document.getElementById('opct-mgmt-host').value.trim(),
+      sshKey:        document.getElementById('opct-ssh-key').value.trim(),
+      sshPassphrase: document.getElementById('opct-ssh-passphrase').value
+    };
+  }
+
+  async function opctRunPreflight() {
+    const listEl = document.getElementById('opct-preflight-list');
+    const errEl  = document.getElementById('opct-preflight-error');
+    errEl.classList.add('hidden');
+    const body = opctPreflightBody();
+    if (!body.apiUrl || !body.ocpToken) {
+      listEl.innerHTML = '<div style="color:#64748b;font-size:0.85rem;padding:0.5rem 0">Connect to a cluster first (Cluster Connection tab) to run the checklist.</div>';
+      return;
+    }
+    listEl.innerHTML = '<div style="color:#64748b;font-size:0.85rem;padding:0.5rem 0">Checking…</div>';
+    try {
+      const r = await fetch('/api/compliance/preflight', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+      renderOpctPreflight(data.items || []);
+    } catch (e) {
+      listEl.innerHTML = '';
+      errEl.textContent = 'Preflight check failed: ' + e.message;
+      errEl.classList.remove('hidden');
+    }
+  }
+
+  function renderOpctPreflight(items) {
+    const listEl = document.getElementById('opct-preflight-list');
+    const badge = status => ({
+      pass:    { icon: '&#10003;', color: '#86efac', bg: '#0f2d1f', text: 'Pass' },
+      fail:    { icon: '&#10007;', color: '#fca5a5', bg: '#2d1414', text: 'Fail' },
+      error:   { icon: '&#9888;',  color: '#fbbf24', bg: '#2d1f00', text: 'Error' },
+      unknown: { icon: '&#8226;',  color: '#94a3b8', bg: '#1e2333', text: 'Unknown' }
+    }[status] || { icon: '&#8226;', color: '#94a3b8', bg: '#1e2333', text: status });
+
+    listEl.innerHTML = items.map(item => {
+      const b = badge(item.status);
+      const canFix = item.status === 'fail' && OPCT_FIX_ENDPOINTS[item.key];
+      return `
+        <div style="border:1px solid #1e2333;border-radius:8px;padding:0.75rem 1rem;display:flex;align-items:center;justify-content:space-between;gap:0.75rem;flex-wrap:wrap">
+          <div style="flex:1;min-width:240px">
+            <div style="display:flex;align-items:center;gap:0.5rem">
+              <span style="color:${b.color};background:${b.bg};border-radius:999px;padding:0.1rem 0.55rem;font-size:0.72rem;font-weight:600;white-space:nowrap">${b.icon} ${b.text}</span>
+              <span style="font-size:0.88rem;color:#e2e8f0">${escHtml(item.label)}</span>
+            </div>
+            <div style="font-size:0.76rem;color:#64748b;margin-top:0.25rem">${escHtml(item.detail || '')}</div>
+          </div>
+          ${canFix ? `<button class="opct-fix-btn" data-key="${item.key}" style="background:#1a3a5c;color:#93c5fd;border:1px solid #1e3a5f;border-radius:6px;padding:0.4rem 0.9rem;font-size:0.82rem;font-weight:600;cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:0.4rem">
+            <span class="opct-fix-label">&#128295; Fix</span><span class="spinner hidden opct-fix-spinner"></span>
+          </button>` : ''}
+        </div>`;
+    }).join('') || '<div style="color:#64748b;font-size:0.85rem;padding:0.5rem 0">No checks returned.</div>';
+
+    listEl.querySelectorAll('.opct-fix-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const key      = btn.dataset.key;
+        const endpoint = OPCT_FIX_ENDPOINTS[key];
+        const labelEl  = btn.querySelector('.opct-fix-label');
+        const spinEl   = btn.querySelector('.opct-fix-spinner');
+        const errEl    = document.getElementById('opct-preflight-error');
+        btn.disabled = true; labelEl.textContent = 'Fixing…'; spinEl.classList.remove('hidden');
+        errEl.classList.add('hidden');
+        try {
+          const body = opctPreflightBody();
+          if (key === 'kubeconfig') {
+            body.adminUsername = document.getElementById('ocp-admin-username')?.value.trim() || '';
+            body.adminPassword = document.getElementById('ocp-admin-password')?.value || '';
+          }
+          const resp = await fetch(endpoint, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+          });
+          if (!resp.ok) {
+            const d = await resp.json().catch(() => ({}));
+            throw new Error(d.error || `HTTP ${resp.status}`);
+          }
+          // Fix endpoints are SSE — drain the stream, surface the final event.
+          const reader = resp.body.getReader();
+          const dec = new TextDecoder();
+          let buf = '';
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += dec.decode(value, { stream: true });
+            const parts = buf.split('\n\n');
+            buf = parts.pop();
+            for (const part of parts) {
+              const dl = part.split('\n').find(l => l.startsWith('data:'));
+              if (!dl) continue;
+              let ev; try { ev = JSON.parse(dl.slice(5)); } catch { continue; }
+              if (ev.type === 'error') throw new Error(ev.message);
+            }
+          }
+          await opctRunPreflight();
+        } catch (e) {
+          errEl.textContent = `Fix failed: ${e.message}`;
+          errEl.classList.remove('hidden');
+        } finally {
+          btn.disabled = false; labelEl.textContent = '🔧 Fix'; spinEl.classList.add('hidden');
+        }
+      });
+    });
+  }
+
+  document.getElementById('opct-preflight-refresh-btn').addEventListener('click', opctRunPreflight);
+
+  // Run the checklist once when the Compliance tab first opens
+  let opctPreflightCheckedOnce = false;
+  document.querySelector('.nav-item[data-section="compliance"]').addEventListener('click', () => {
+    if (opctPreflightCheckedOnce) return;
+    opctPreflightCheckedOnce = true;
+    opctRunPreflight();
+  });
 
   document.getElementById('opct-start-btn').addEventListener('click', async () => {
     const btn   = document.getElementById('opct-start-btn');

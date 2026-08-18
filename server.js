@@ -1848,7 +1848,10 @@ echo "ALT_WRITE_OK"
               }
             },
             spec: {
-              metadata: { labels: frankfurtDiversity ? { 'ionos-site': 'fra1' } : {} },
+              // topology.kubernetes.io/zone here propagates to the Node when the Machine
+              // joins — required by OPCT (and any topology-spread-aware workload); without
+              // it, pods like the image registry can fail to schedule (see OPCT preflight).
+              metadata: { labels: { [OPCT_ZONE_LABEL]: 'fra1', ...(frankfurtDiversity ? { 'ionos-site': 'fra1' } : {}) } },
               providerSpec: { value: providerSpec },
               taints: []
             }
@@ -1956,6 +1959,14 @@ echo "ALT_WRITE_OK"
       const msLabelKey = 'machine.openshift.io/cluster-api-machineset';
       if (clone.spec.selector?.matchLabels)              clone.spec.selector.matchLabels[msLabelKey]             = targetMsName;
       if (clone.spec.template?.metadata?.labels)         clone.spec.template.metadata.labels[msLabelKey]         = targetMsName;
+      // Carry forward (or add) the zone label so nodes from the clone keep auto-labeling too.
+      if (!clone.spec.template) clone.spec.template = {};
+      if (!clone.spec.template.spec) clone.spec.template.spec = {};
+      if (!clone.spec.template.spec.metadata) clone.spec.template.spec.metadata = {};
+      clone.spec.template.spec.metadata.labels = {
+        ...(clone.spec.template.spec.metadata.labels || {}),
+        [OPCT_ZONE_LABEL]: clone.spec.template.spec.metadata.labels?.[OPCT_ZONE_LABEL] || 'fra1'
+      };
       await ocpApply(msApiBase, targetMsName, clone);
       log(`MachineSet "${targetMsName}" cloned from "${msSource}" (${clone.spec.replicas} replicas)\n`);
       step(`MachineSet "${targetMsName}" created`, 'ok');
@@ -5255,6 +5266,278 @@ function renderOpctPdf(doc, state) {
   doc.font('Overpass').fontSize(7.5).fillColor('#111827')
     .text(state.reportRaw || '(no output)', { width: pageWidth - marginX * 2 });
 }
+
+// ── OPCT Preflight Checklist ────────────────────────────────────────────────
+// Checks the cluster-readiness conditions OPCT requires (discovered the hard
+// way running this the first time): registry Managed, worker nodes carrying
+// a topology.kubernetes.io/zone label, MachineSets configured to pass that
+// label on to nodes they create, a dedicated tainted test node, and a valid
+// kubeconfig on the management host.
+
+const OPCT_ZONE_LABEL   = 'topology.kubernetes.io/zone';
+const OPCT_TEST_LABEL   = 'node-role.kubernetes.io/tests';
+const OPCT_MACHINESETS_PATH = '/apis/machine.openshift.io/v1beta1/namespaces/openshift-machine-api/machinesets';
+
+app.post('/api/compliance/preflight', async (req, res) => {
+  const { apiUrl, ocpToken, mgmtHost, sshKey, sshPassphrase } = req.body;
+  if (!apiUrl || !ocpToken) return res.status(400).json({ error: 'apiUrl and ocpToken are required.' });
+
+  const items = [];
+  try {
+    // 1. Image registry Managed + Available
+    try {
+      const reg = await ocpGet(apiUrl, '/apis/imageregistry.operator.openshift.io/v1/configs/cluster', ocpToken);
+      const managed   = reg.spec?.managementState === 'Managed';
+      const available = (reg.status?.conditions || []).some(c => c.type === 'Available' && c.status === 'True');
+      items.push({
+        key: 'registry', label: 'Image registry is Managed and Available',
+        status: (managed && available) ? 'pass' : 'fail',
+        detail: `managementState=${reg.spec?.managementState || 'unknown'}, Available=${available}`
+      });
+    } catch (e) {
+      items.push({ key: 'registry', label: 'Image registry is Managed and Available', status: 'error', detail: e.message });
+    }
+
+    // 2 & 3. Worker node zone labels + MachineSet templates carrying the label
+    let workerNodes = [];
+    try {
+      const nodes = await ocpGet(apiUrl, '/api/v1/nodes?labelSelector=node-role.kubernetes.io/worker', ocpToken);
+      workerNodes = nodes.items || [];
+      const missing = workerNodes.filter(n => !n.metadata?.labels?.[OPCT_ZONE_LABEL]);
+      items.push({
+        key: 'zone-labels', label: 'Worker nodes have a topology.kubernetes.io/zone label',
+        status: (workerNodes.length && missing.length === 0) ? 'pass' : 'fail',
+        detail: workerNodes.length
+          ? `${workerNodes.length - missing.length}/${workerNodes.length} labeled${missing.length ? ' — missing: ' + missing.map(n => n.metadata.name).join(', ') : ''}`
+          : 'No worker nodes found'
+      });
+    } catch (e) {
+      items.push({ key: 'zone-labels', label: 'Worker nodes have a topology.kubernetes.io/zone label', status: 'error', detail: e.message });
+    }
+
+    try {
+      const ms = await ocpGet(apiUrl, OPCT_MACHINESETS_PATH, ocpToken);
+      const sets = ms.items || [];
+      const missing = sets.filter(s => !s.spec?.template?.spec?.metadata?.labels?.[OPCT_ZONE_LABEL]);
+      items.push({
+        key: 'machineset-labels', label: 'MachineSets auto-label new nodes with the zone label',
+        status: (sets.length && missing.length === 0) ? 'pass' : 'fail',
+        detail: sets.length
+          ? `${sets.length - missing.length}/${sets.length} configured${missing.length ? ' — missing: ' + missing.map(s => s.metadata.name).join(', ') : ''}`
+          : 'No MachineSets found'
+      });
+    } catch (e) {
+      items.push({ key: 'machineset-labels', label: 'MachineSets auto-label new nodes with the zone label', status: 'error', detail: e.message });
+    }
+
+    // 4. Dedicated OPCT test node (label + taint)
+    try {
+      const nodes = await ocpGet(apiUrl, '/api/v1/nodes', ocpToken);
+      const tainted = (nodes.items || []).find(n => (n.spec?.taints || []).some(t => t.key === OPCT_TEST_LABEL));
+      items.push({
+        key: 'dedicated-node', label: 'A dedicated node is tainted for OPCT test workloads',
+        status: tainted ? 'pass' : 'fail',
+        detail: tainted ? `Node: ${tainted.metadata.name}` : 'No node found with the node-role.kubernetes.io/tests taint'
+      });
+    } catch (e) {
+      items.push({ key: 'dedicated-node', label: 'A dedicated node is tainted for OPCT test workloads', status: 'error', detail: e.message });
+    }
+
+    // 5. Kubeconfig on the management host is valid (requires SSH creds)
+    if (mgmtHost && sshKey) {
+      let conn;
+      try {
+        conn = await sshConnect(mgmtHost, 'root', sshKey, sshPassphrase);
+        const who = await sshRunScript(conn, `export KUBECONFIG=/root/.kube/config; oc whoami 2>&1`);
+        items.push({
+          key: 'kubeconfig', label: 'Management host kubeconfig is valid',
+          status: 'pass', detail: `Logged in as ${who.stdout.trim()}`
+        });
+      } catch (e) {
+        items.push({ key: 'kubeconfig', label: 'Management host kubeconfig is valid', status: 'fail', detail: e.message });
+      } finally {
+        if (conn) try { conn.end(); } catch (_) {}
+      }
+    } else {
+      items.push({ key: 'kubeconfig', label: 'Management host kubeconfig is valid', status: 'unknown', detail: 'Enter management host + SSH key above to check' });
+    }
+
+    res.json({ items });
+  } catch (e) {
+    res.status(502).json({ error: e.message, items });
+  }
+});
+
+// POST /api/compliance/preflight/fix-registry — SSE. Sets the image registry
+// to Managed with emptyDir storage and waits for it to become Available.
+app.post('/api/compliance/preflight/fix-registry', async (req, res) => {
+  const { apiUrl, ocpToken } = req.body;
+  const { step, log, done, fail } = makeSseHelpers(res);
+  if (!apiUrl || !ocpToken) { fail('apiUrl and ocpToken are required.'); return; }
+
+  try {
+    step('Patch image registry to Managed / emptyDir', 'running');
+    await ocpPatch(apiUrl, '/apis/imageregistry.operator.openshift.io/v1/configs/cluster', ocpToken,
+      { spec: { storage: { emptyDir: {} }, managementState: 'Managed' } });
+    step('Patch image registry to Managed / emptyDir', 'done');
+
+    step('Wait for registry to become Available', 'running');
+    const kaTimer = setInterval(() => log('  Still waiting...\n'), 15000);
+    try {
+      const deadline = Date.now() + 180000;
+      let available = false;
+      while (Date.now() < deadline) {
+        const reg = await ocpGet(apiUrl, '/apis/imageregistry.operator.openshift.io/v1/configs/cluster', ocpToken);
+        available = (reg.status?.conditions || []).some(c => c.type === 'Available' && c.status === 'True');
+        if (available) break;
+        await new Promise(r => setTimeout(r, 5000));
+      }
+      if (!available) throw new Error('Timed out after 180s waiting for the registry to become Available.');
+    } finally { clearInterval(kaTimer); }
+    step('Wait for registry to become Available', 'done');
+
+    done('Image registry is Managed and Available.');
+  } catch (e) {
+    fail(`Failed to fix image registry: ${e.message}`);
+  }
+});
+
+// POST /api/compliance/preflight/fix-zone-labels — SSE. Labels existing worker
+// nodes that are missing the zone label (needed by OPCT's registry pod / any
+// topology-spread-aware workload right now, not just future nodes).
+app.post('/api/compliance/preflight/fix-zone-labels', async (req, res) => {
+  const { apiUrl, ocpToken, zoneValue } = req.body;
+  const { step, log, done, fail } = makeSseHelpers(res);
+  if (!apiUrl || !ocpToken) { fail('apiUrl and ocpToken are required.'); return; }
+  const zone = (zoneValue || 'fra1').trim();
+
+  try {
+    step('Label worker nodes', 'running');
+    const nodes = await ocpGet(apiUrl, '/api/v1/nodes?labelSelector=node-role.kubernetes.io/worker', ocpToken);
+    const missing = (nodes.items || []).filter(n => !n.metadata?.labels?.[OPCT_ZONE_LABEL]);
+    if (!missing.length) {
+      log('  All worker nodes already have the zone label.\n');
+    } else {
+      for (const n of missing) {
+        await ocpPatch(apiUrl, `/api/v1/nodes/${encodeURIComponent(n.metadata.name)}`, ocpToken,
+          { metadata: { labels: { [OPCT_ZONE_LABEL]: zone } } });
+        log(`  Labeled ${n.metadata.name}: ${OPCT_ZONE_LABEL}=${zone}\n`);
+      }
+    }
+    step('Label worker nodes', 'done');
+    done(`Labeled ${missing.length} node(s) with ${OPCT_ZONE_LABEL}=${zone}.`);
+  } catch (e) {
+    fail(`Failed to label worker nodes: ${e.message}`);
+  }
+});
+
+// POST /api/compliance/preflight/fix-machineset-labels — SSE. Patches every
+// MachineSet's pod/node template so any node it creates from now on — via
+// manual scaling or the cluster autoscaler — automatically carries the zone
+// label. This is what makes labeling "automatic" going forward.
+app.post('/api/compliance/preflight/fix-machineset-labels', async (req, res) => {
+  const { apiUrl, ocpToken, zoneValue } = req.body;
+  const { step, log, done, fail } = makeSseHelpers(res);
+  if (!apiUrl || !ocpToken) { fail('apiUrl and ocpToken are required.'); return; }
+  const zone = (zoneValue || 'fra1').trim();
+
+  try {
+    step('Patch MachineSet templates', 'running');
+    const ms = await ocpGet(apiUrl, OPCT_MACHINESETS_PATH, ocpToken);
+    const sets = ms.items || [];
+    const missing = sets.filter(s => !s.spec?.template?.spec?.metadata?.labels?.[OPCT_ZONE_LABEL]);
+    if (!missing.length) {
+      log('  All MachineSets already configured.\n');
+    } else {
+      for (const s of missing) {
+        await ocpPatch(apiUrl, `/apis/machine.openshift.io/v1beta1/namespaces/openshift-machine-api/machinesets/${encodeURIComponent(s.metadata.name)}`, ocpToken,
+          { spec: { template: { spec: { metadata: { labels: { [OPCT_ZONE_LABEL]: zone } } } } } });
+        log(`  Patched MachineSet "${s.metadata.name}"\n`);
+      }
+    }
+    step('Patch MachineSet templates', 'done');
+    done(`New nodes from ${missing.length} MachineSet(s) will now auto-carry ${OPCT_ZONE_LABEL}=${zone}.`);
+  } catch (e) {
+    fail(`Failed to patch MachineSets: ${e.message}`);
+  }
+});
+
+// POST /api/compliance/preflight/fix-dedicated-node — SSE. Labels + taints one
+// worker node for OPCT's dedicated test workloads (mirrors what
+// `opct adm e2e-dedicated taint-node` does, without its interactive prompt).
+app.post('/api/compliance/preflight/fix-dedicated-node', async (req, res) => {
+  const { apiUrl, ocpToken } = req.body;
+  const { step, log, done, fail } = makeSseHelpers(res);
+  if (!apiUrl || !ocpToken) { fail('apiUrl and ocpToken are required.'); return; }
+
+  try {
+    step('Pick a worker node', 'running');
+    const nodes = await ocpGet(apiUrl, '/api/v1/nodes?labelSelector=node-role.kubernetes.io/worker', ocpToken);
+    const workers = nodes.items || [];
+    const already = workers.find(n => (n.spec?.taints || []).some(t => t.key === OPCT_TEST_LABEL));
+    if (already) {
+      log(`  ${already.metadata.name} is already tainted.\n`);
+      step('Pick a worker node', 'done');
+      done(`Dedicated node already set: ${already.metadata.name}`);
+      return;
+    }
+    // Avoid nodes running Prometheus replicas, same precaution opct's own tool takes.
+    const pods = await ocpGet(apiUrl, '/api/v1/namespaces/openshift-monitoring/pods?labelSelector=app.kubernetes.io/name=prometheus', ocpToken);
+    const busyNodes = new Set((pods.items || []).map(p => p.spec?.nodeName).filter(Boolean));
+    const target = workers.find(n => !busyNodes.has(n.metadata.name)) || workers[0];
+    if (!target) throw new Error('No worker nodes found.');
+    step('Pick a worker node', 'done');
+    log(`  Selected: ${target.metadata.name}\n`);
+
+    step('Label and taint the node', 'running');
+    const existingTaints = target.spec?.taints || [];
+    await ocpPatch(apiUrl, `/api/v1/nodes/${encodeURIComponent(target.metadata.name)}`, ocpToken, {
+      metadata: { labels: { [OPCT_TEST_LABEL]: '' } },
+      spec:     { taints: [...existingTaints, { key: OPCT_TEST_LABEL, effect: 'NoSchedule' }] }
+    });
+    step('Label and taint the node', 'done');
+    done(`Node ${target.metadata.name} is now dedicated to OPCT test workloads.`);
+  } catch (e) {
+    fail(`Failed to set up the dedicated node: ${e.message}`);
+  }
+});
+
+// POST /api/compliance/preflight/fix-kubeconfig — SSE. Re-runs `oc login` on
+// the management host to refresh an expired token in its kubeconfig.
+app.post('/api/compliance/preflight/fix-kubeconfig', async (req, res) => {
+  const { mgmtHost, sshKey, sshPassphrase, apiUrl, adminUsername, adminPassword } = req.body;
+  const { step, log, done, fail } = makeSseHelpers(res);
+  if (!mgmtHost || !sshKey || !apiUrl || !adminUsername || !adminPassword) {
+    fail('Management host, SSH key, cluster API URL, and admin username/password are required.');
+    return;
+  }
+
+  let conn;
+  try {
+    step('Connect to management host via SSH', 'running');
+    conn = await sshConnect(mgmtHost, 'root', sshKey, sshPassphrase);
+    step('Connect to management host via SSH', 'done');
+
+    step('Refresh kubeconfig (oc login)', 'running');
+    const escapedPass = adminPassword.replace(/'/g, "'\\''");
+    const escapedUser = adminUsername.replace(/'/g, "'\\''");
+    const escapedUrl  = apiUrl.replace(/'/g, "'\\''");
+    const { stdout } = await sshRunScript(conn, `
+set -e
+export KUBECONFIG=/root/.kube/config
+oc login '${escapedUrl}' -u '${escapedUser}' -p '${escapedPass}' --insecure-skip-tls-verify=true >/dev/null 2>&1
+oc whoami
+`);
+    log(`  Logged in as ${stdout.trim()}\n`);
+    step('Refresh kubeconfig (oc login)', 'done');
+
+    done('Kubeconfig refreshed.');
+  } catch (e) {
+    fail(`Failed to refresh kubeconfig: ${e.message}`);
+  } finally {
+    if (conn) try { conn.end(); } catch (_) {}
+  }
+});
 
 // POST /api/compliance/start — SSE. Connects to the management host, installs
 // opct if needed, and launches the conformance run in the background (it can
