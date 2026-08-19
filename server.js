@@ -5159,31 +5159,39 @@ function saveOpctState(state) {
 }
 let opctState = loadOpctState();
 
-// Best-effort parser for `opct report -s <tarball>` text output. The exact
-// column layout isn't guaranteed across opct versions, so this looks for
-// whitespace-aligned tabular blocks and picks the largest one; the raw text
-// is always kept as the source of truth alongside it.
+// Parser for `opct report <tarball>` text output. opct renders one box-drawn,
+// │-delimited "OPCT Summary" table (infra info, cluster version, plugin
+// summary, env health, test counts) before a separate "Processed Summary"
+// section with one box per plugin — this pulls out just the OPCT Summary box
+// as the structured table; the raw text is always kept as the source of truth
+// alongside it regardless of how well this parses.
 function parseOpctReport(raw) {
-  const lines = String(raw || '').split(/\r?\n/);
-  const tables = [];
-  let current = null;
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) { if (current) { tables.push(current); current = null; } continue; }
-    const cols = trimmed.split(/\s{2,}/).map(s => s.trim()).filter(Boolean);
-    if (cols.length >= 2) {
-      if (!current) current = { header: null, rows: [] };
-      if (!current.header) current.header = cols;
-      else current.rows.push(cols);
-    } else if (current) {
-      tables.push(current);
-      current = null;
+  const text  = String(raw || '');
+  const lines = text.split(/\r?\n/);
+
+  const startIdx = lines.findIndex(l => /│\s*OPCT Summary/.test(l));
+  const rows = [];
+  if (startIdx !== -1) {
+    for (let i = startIdx; i < lines.length; i++) {
+      const line = lines[i];
+      const trimmed = line.trim();
+      if (trimmed.startsWith('└')) break; // end of box
+      if (/^[├┌]/.test(trimmed) && /─{3,}/.test(trimmed)) continue; // divider row
+      if (!line.includes('│')) break; // malformed / end of box
+      const cells = line.split('│').map(c => c.trim()).filter((c, idx, arr) => c !== '' || (idx !== 0 && idx !== arr.length - 1));
+      if (!cells.length) continue;
+      rows.push(cells.length === 1 ? [cells[0], ''] : [cells[0], cells.slice(1).join(' — ')]);
     }
   }
-  if (current) tables.push(current);
-  const main = tables.filter(t => t.rows.length).sort((a, b) => b.rows.length - a.rows.length)[0] || null;
-  const gradeMatch = raw.match(/Grade[:\s]+([A-Za-z0-9+\-]+)/i);
-  return { main, grade: gradeMatch ? gradeMatch[1] : null };
+  const filteredRows = rows.filter(r => r[0] && !/^OPCT Summary$/i.test(r[0]) && !/^>\s*Archive:/i.test(r[0]));
+  const main = filteredRows.length ? { header: ['Field', 'Value'], rows: filteredRows } : null;
+
+  // This opct version has no formal "Grade:" line — derive an overall PASS/FAIL
+  // from whether any plugin in the summary reports a non-"passed" status.
+  const pluginLines = lines.filter(l => /\[\d+\/\d+\/\d+\/\d+\]/.test(l));
+  const grade = pluginLines.length ? (pluginLines.some(l => /\bfailed\b/i.test(l)) ? 'FAIL' : 'PASS') : null;
+
+  return { main, grade };
 }
 
 const OPCT_FONT_DIR      = path.join(__dirname, 'fonts');
@@ -5790,10 +5798,14 @@ opct retrieve .`, chunk => log(chunk));
       log(`  Archive: ${tarballPath}\n`);
       step('Retrieve OPCT results archive', 'done');
 
-      step('Generate report (opct report -s)', 'running');
-      const rep = await sshRunScript(conn, `opct report -s "${tarballPath}" 2>&1`);
+      step('Generate report (opct report)', 'running');
+      // NOTE: `-s`/`--save-to` takes a directory to extract results into — it is not
+      // a "print report" flag. Passing the tarball path to it leaves zero positional
+      // args and opct fails instantly with "accepts 1 arg(s), received 0". The report
+      // text this app parses only comes from the plain `opct report <tarball>` form.
+      const rep = await sshRunScript(conn, `opct report "${tarballPath}" 2>&1`);
       reportRaw = rep.stdout;
-      step('Generate report (opct report -s)', 'done');
+      step('Generate report (opct report)', 'done');
     } finally { clearInterval(kaTimer); }
 
     const parsed = parseOpctReport(reportRaw);
