@@ -5288,7 +5288,9 @@ function renderOpctPdf(doc, state) {
   doc.moveDown(1.2);
   doc.font('Overpass-SemiBold').fontSize(13).fillColor('#0b1e45').text('Raw opct report output');
   doc.moveDown(0.4);
-  doc.font('Overpass').fontSize(7.5).fillColor('#111827')
+  // The raw output includes box-drawing tables (│, ─, etc.) that only line up
+  // in a monospace font — Overpass is proportional and garbles the alignment.
+  doc.font('Courier').fontSize(7.5).fillColor('#111827')
     .text(state.reportRaw || '(no output)', { width: pageWidth - marginX * 2 });
 }
 
