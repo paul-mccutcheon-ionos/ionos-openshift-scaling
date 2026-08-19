@@ -5651,22 +5651,47 @@ echo $!`);
   }
 });
 
+// Parses the table `opct status` prints, e.g.:
+//   Tue, 18 Aug 2026 19:35:19 UTC|37.042095ms> Global Status: complete
+//   JOB_NAME                           | STATUS     | RESULTS    | PROGRESS               | MESSAGE
+//   05-openshift-cluster-upgrade       | complete   | passed     | 1/1 (0 failures)        |
+// `STATUS` is whether the job finished running (running/complete/failed); `RESULTS` is
+// whether it passed or failed once finished — a job can be STATUS=complete, RESULTS=failed.
+function parseOpctStatusOutput(text) {
+  let globalStatus = null;
+  const jobs = [];
+  for (const raw of (text || '').split('\n')) {
+    const line = raw.trim();
+    const gm = line.match(/Global Status:\s*(\w+)/i);
+    if (gm) { globalStatus = gm[1].toLowerCase(); continue; }
+    if (!line.includes('|') || /^JOB_NAME/i.test(line)) continue;
+    const cols = line.split('|').map(c => c.trim());
+    const [name, status, results, progress, message] = cols;
+    if (!name || cols.length < 3) continue;
+    jobs.push({ name, status: (status || '').toLowerCase(), results: (results || '').toLowerCase(), progress: progress || '', message: message || '' });
+  }
+  return { globalStatus, jobs };
+}
+
 // GET /api/compliance/status — lightweight JSON poll of the background run.
 //
 // `opct run` submits the conformance suite as pods in the cluster's "opct"
 // namespace and then EXITS by default (it only blocks in the foreground if
 // launched with --watch, which this app doesn't use). So the management-host
-// process being gone is normal, not a failure — the real signal of whether
-// the run is still going is the state of those pods in the cluster, which is
-// what this checks first. The SSH log tail is kept only as supplementary
-// "what opct printed at submission time" context, not as the status source.
+// process being gone is normal, not a failure. The real source of truth is
+// `opct status`, run live on the management host — it queries the aggregator's
+// own tracked job state, which is what this checks first. A pod-count check
+// against the cluster API is kept only as supplementary "pods active" info,
+// NOT as the progress source: Sonobuoy deletes each plugin's pod once it
+// finishes, so a live pod listing looks identical (empty) whether the run
+// hasn't started yet or has already completed — `opct status` doesn't have
+// that ambiguity.
 app.get('/api/compliance/status', async (req, res) => {
   if (!opctState || !opctState.mgmtHost) return res.json({ status: 'idle' });
   const { apiUrl, ocpToken } = req.query;
 
   let podSummary = null;
   let podError   = null;
-  let plugins    = null;
   if (apiUrl && ocpToken) {
     try {
       const pods = await ocpGet(apiUrl, '/api/v1/namespaces/opct/pods?labelSelector=component=sonobuoy', ocpToken);
@@ -5675,15 +5700,6 @@ app.get('/api/compliance/status', async (req, res) => {
       items.forEach(p => { const ph = p.status?.phase || 'Unknown'; byPhase[ph] = (byPhase[ph] || 0) + 1; });
       const active = (byPhase.Running || 0) + (byPhase.Pending || 0);
       podSummary = { total: items.length, byPhase, active };
-
-      // Each conformance suite runs as its own labeled job pod (e.g.
-      // "20-openshift-conformance-validated") — the main "sonobuoy" aggregator
-      // pod carries no such label and is excluded. This is what drives the
-      // progress bar: N of these finished (Succeeded/Failed) vs still active.
-      plugins = items
-        .filter(p => p.metadata?.labels?.['sonobuoy-plugin'])
-        .map(p => ({ name: p.metadata.labels['sonobuoy-plugin'], phase: p.status?.phase || 'Unknown' }))
-        .sort((a, b) => a.name.localeCompare(b.name));
     } catch (e) {
       // 404 = namespace doesn't exist: either never started, or opct already cleaned it up post-retrieve.
       if (e.status !== 404) podError = e.message;
@@ -5691,25 +5707,45 @@ app.get('/api/compliance/status', async (req, res) => {
   }
 
   let logTail = '';
+  let opctStatusOut = null;
+  let opctStatusError = null;
   try {
     const conn = await sshConnect(opctState.mgmtHost, 'root', opctState.sshKey, opctState.sshPassphrase);
     try {
       const tail = await sshRunScript(conn, `tail -n 80 "${opctState.logFile}" 2>/dev/null || echo "(log file not found)"`);
       logTail = tail.stdout.trim();
+      try {
+        const st = await sshRunScript(conn, `export KUBECONFIG="${opctState.kubeconfigPath}"; opct status 2>&1`);
+        opctStatusOut = st.stdout;
+      } catch (e) { opctStatusError = e.message; }
     } finally { conn.end(); }
   } catch (e) {
     logTail = `(could not read log: ${e.message})`;
   }
 
+  const parsed = opctStatusOut ? parseOpctStatusOutput(opctStatusOut) : { globalStatus: null, jobs: [] };
+  const plugins = parsed.jobs.map(j => {
+    const phase = j.status === 'running' ? 'Running'
+      : j.results === 'passed' ? 'Succeeded'
+      : j.results === 'failed' ? 'Failed'
+      : 'Pending';
+    return { name: j.name, phase, status: j.status, results: j.results, progress: j.progress, message: j.message };
+  });
+
   let status;
-  if (podSummary) {
+  if (parsed.globalStatus === 'complete') {
+    status = opctState.reportRaw ? 'collected' : 'ready-to-collect';
+  } else if (parsed.globalStatus === 'running') {
+    status = 'running';
+  } else if (podSummary) {
+    // Fallback for the brief window before `opct status` can reach the aggregator yet.
     status = podSummary.total === 0
       ? (opctState.reportRaw ? 'collected' : 'awaiting-pods')
       : (podSummary.active > 0 ? 'running' : 'ready-to-collect');
   } else if (opctState.reportRaw) {
     status = 'collected';
   } else {
-    status = 'unknown'; // couldn't reach the cluster API to check pods (no apiUrl/ocpToken passed, or an error)
+    status = 'unknown'; // couldn't reach the mgmt host or cluster API to check status
   }
   opctState.status = status;
   saveOpctState(opctState);
@@ -5724,7 +5760,8 @@ app.get('/api/compliance/status', async (req, res) => {
     hasReport:   !!opctState.reportRaw,
     pods:        podSummary,
     plugins,
-    podError
+    podError,
+    opctStatusError
   });
 });
 
