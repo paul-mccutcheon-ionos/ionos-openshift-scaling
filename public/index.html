@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.4.0</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.4.1</span>
   </div>
 
   <div class="banner-actions">
@@ -2999,6 +2999,11 @@
       // Show the correct action card based on current radio selection
       applyScalingActionChoice();
       document.getElementById('add-node-card').classList.remove('hidden');
+      // If the compliance tab was already checked (e.g. before credentials were
+      // available), re-check now that we have a live apiUrl/ocpToken.
+      if (!document.getElementById('opct-status-card').classList.contains('hidden')) {
+        opctRefreshStatus();
+      }
     } catch (err) {
       showError('connect-error', err.message);
     } finally {
@@ -5461,7 +5466,14 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     const barEl   = document.getElementById('opct-progress-bar');
     const fracEl  = document.getElementById('opct-progress-fraction');
     const listEl  = document.getElementById('opct-progress-plugins');
-    if (!plugins || !plugins.length) { wrap.classList.add('hidden'); return; }
+    if (!plugins) { wrap.classList.add('hidden'); return; }
+    if (!plugins.length) {
+      wrap.classList.remove('hidden');
+      barEl.style.width = '0%';
+      fracEl.textContent = '';
+      listEl.innerHTML = '<div style="font-size:0.8rem;color:#64748b">Waiting for individual test-suite pods to start…</div>';
+      return;
+    }
     wrap.classList.remove('hidden');
 
     const done = plugins.filter(p => OPCT_FINISHED_PHASES[p.phase]).length;
@@ -5483,9 +5495,9 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     const summaryEl = document.getElementById('opct-status-summary');
     const logEl     = document.getElementById('opct-status-log');
     try {
-      const apiUrl   = document.getElementById('api-url').value.trim();
-      const ocpToken = document.getElementById('ocp-token').value.trim();
-      const qs = new URLSearchParams({ ...(apiUrl ? { apiUrl } : {}), ...(ocpToken ? { ocpToken } : {}) });
+      const apiUrl   = clusterApiUrl || document.getElementById('api-url').value.trim();
+      const ocpTok   = ocpToken || document.getElementById('ocp-token').value.trim();
+      const qs = new URLSearchParams({ ...(apiUrl ? { apiUrl } : {}), ...(ocpTok ? { ocpToken: ocpTok } : {}) });
       const r = await fetch(`/api/compliance/status?${qs}`);
       const s = await r.json();
       if (s.status === 'idle') { summaryEl.textContent = 'No OPCT run has been started yet.'; opctSetCollectEnabled('idle'); renderOpctProgress(null); return; }
