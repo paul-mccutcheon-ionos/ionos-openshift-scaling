@@ -5359,7 +5359,17 @@ function renderOpctPdf(doc, state) {
 
   setContentFont('Overpass-Mono', rawFontSize, BASE_COLOR);
   rawLines.forEach(line => {
-    if (doc.y > doc.page.height - 40) doc.addPage({ size: 'A4', layout: 'landscape', margin: marginX });
+    // Use pdfkit's own line-height calculation (the same figure it uses
+    // internally to decide whether a .text() call needs to auto-paginate) so
+    // our proactive addPage() always fires first. A plain fixed-pixel buffer
+    // here previously left just enough slack that pdfkit's OWN automatic
+    // pagination — for whichever line finally tipped it over — quietly won
+    // the race and added the page itself with no explicit options, silently
+    // falling back from landscape to the document's original portrait A4
+    // default. That's why only the raw section's first page stayed landscape.
+    if (doc.y + doc.currentLineHeight(true) > doc.page.height - marginX) {
+      doc.addPage({ size: 'A4', layout: 'landscape', margin: marginX });
+    }
 
     const cellBounds = [];
     { let start = 0;
