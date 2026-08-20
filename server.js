@@ -4695,7 +4695,10 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
         nlbId = existNlb.id;
         logFound(`NLB ${nlbId}`);
         if ((existNlb.metadata?.state || '') !== 'AVAILABLE')
-          await ionosWaitAvailable(`/datacenters/${dcId}/networkloadbalancers/${nlbId}`, ionosToken, 180000);
+          // 300s: IONOS NLB provisioning has occasionally taken longer than the
+          // previous 180s allowed, aborting the step before the resource actually
+          // finished — leaving an AVAILABLE-but-ruleless NLB behind (see below).
+          await ionosWaitAvailable(`/datacenters/${dcId}/networkloadbalancers/${nlbId}`, ionosToken, 300000);
       } else {
         const nlb = await ionosPost(`/datacenters/${dcId}/networkloadbalancers`, ionosToken, {
           properties: { name: `${clusterName}-nlb`, listenerLan: pubLanId,
@@ -4703,22 +4706,31 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
         });
         nlbId = nlb.id;
         log(`  NLB created: ${nlbId} — waiting for AVAILABLE...\n`);
-        await ionosWaitAvailable(`/datacenters/${dcId}/networkloadbalancers/${nlbId}`, ionosToken, 180000);
-        for (const { port, name } of [
-          { port: 6443,  name: 'kube-api'      },
-          { port: 22623, name: 'mcs'           },
-          { port: 80,    name: 'http-ingress'  },
-          { port: 443,   name: 'https-ingress' },
-        ]) {
-          await ionosPost(`/datacenters/${dcId}/networkloadbalancers/${nlbId}/forwardingrules`, ionosToken, {
-            properties: { name: `${clusterName}-${name}`, algorithm: 'ROUND_ROBIN', protocol: 'TCP',
-              listenerIp: nlbPubIp, listenerPort: port,
-              targets: cpDetails.map(d => ({ ip: d.ip, port, weight: 1 })) }
-          });
-          await ionosWaitAvailable(`/datacenters/${dcId}/networkloadbalancers/${nlbId}`, ionosToken, 120000);
-          log(`  NLB rule: ${port}/TCP\n`);
-        }
-        logCreated(`NLB ${nlbId}  (${nlbPubIp})`);
+        await ionosWaitAvailable(`/datacenters/${dcId}/networkloadbalancers/${nlbId}`, ionosToken, 300000);
+      }
+
+      // Ensure all 4 forwarding rules exist regardless of whether the NLB above
+      // was just created or already existed — a prior run can leave an
+      // AVAILABLE NLB with no rules if it timed out before reaching this loop
+      // (the NLB itself keeps provisioning on IONOS's side after our wait gives
+      // up), and simply finding an existing NLB here used to skip rule creation
+      // entirely on retry.
+      const existingRules = (await ionosGet(`/datacenters/${dcId}/networkloadbalancers/${nlbId}/forwardingrules?depth=1`, ionosToken)).items || [];
+      for (const { port, name } of [
+        { port: 6443,  name: 'kube-api'      },
+        { port: 22623, name: 'mcs'           },
+        { port: 80,    name: 'http-ingress'  },
+        { port: 443,   name: 'https-ingress' },
+      ]) {
+        const ruleName = `${clusterName}-${name}`;
+        if (byName(existingRules, ruleName)) { logFound(`NLB rule ${ruleName}`); continue; }
+        await ionosPost(`/datacenters/${dcId}/networkloadbalancers/${nlbId}/forwardingrules`, ionosToken, {
+          properties: { name: ruleName, algorithm: 'ROUND_ROBIN', protocol: 'TCP',
+            listenerIp: nlbPubIp, listenerPort: port,
+            targets: cpDetails.map(d => ({ ip: d.ip, port, weight: 1 })) }
+        });
+        await ionosWaitAvailable(`/datacenters/${dcId}/networkloadbalancers/${nlbId}`, ionosToken, 120000);
+        logCreated(`NLB rule ${ruleName}`);
       }
     } finally { clearInterval(nlbKaTimer); }
     step('Create Network Load Balancer', 'done');
