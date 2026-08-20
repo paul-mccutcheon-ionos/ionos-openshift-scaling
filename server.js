@@ -5344,16 +5344,42 @@ function renderOpctPdf(doc, state) {
   const BASE_COLOR = '#111827';
   const PASS_FAIL_RE = /\b(fail(?:ed)?|pass(?:ed)?)\b/gi;
 
+  // Only highlight pass/fail where it's the actual status VALUE of a table
+  // cell (the dedicated RESULT column, a "passed [402/402/0/0] (0)"-style
+  // summary value, a bracket marker like "[FAIL]", or a "0 (FAIL)" count) —
+  // not every occurrence of the word, which also shows up as ordinary prose
+  // inside check descriptions ("Pass ratio must be >=98.5%", "...must pass").
+  // Cells are delimited by the report's own │ box-drawing borders.
+  function isStatusCell(cellText) {
+    const t = cellText.trim();
+    if (/^\[(ok|fail|warn|x)\]$/i.test(t)) return true;
+    if (/^\d+\s*\((?:pass|fail|warn)\)$/i.test(t)) return true;
+    return /^(pass|passed|fail|failed|skip|skipped|warn)\b/i.test(t);
+  }
+
   setContentFont('Overpass-Mono', rawFontSize, BASE_COLOR);
   rawLines.forEach(line => {
     if (doc.y > doc.page.height - 40) doc.addPage({ size: 'A4', layout: 'landscape', margin: marginX });
+
+    const cellBounds = [];
+    { let start = 0;
+      for (let i = 0; i <= line.length; i++) {
+        if (i === line.length || line[i] === '│') { cellBounds.push({ start, end: i }); start = i + 1; }
+      }
+    }
+    const cellIsStatus = cellBounds.map(c => isStatusCell(line.slice(c.start, c.end)));
+    function statusAt(pos) {
+      const idx = cellBounds.findIndex(c => pos >= c.start && pos < c.end);
+      return idx !== -1 && cellIsStatus[idx];
+    }
 
     const segments = [];
     let lastIndex = 0, m;
     PASS_FAIL_RE.lastIndex = 0;
     while ((m = PASS_FAIL_RE.exec(line))) {
       if (m.index > lastIndex) segments.push({ text: line.slice(lastIndex, m.index), color: BASE_COLOR });
-      segments.push({ text: m[0], color: /^fail/i.test(m[0]) ? '#dc2626' : '#16a34a' });
+      const color = statusAt(m.index) ? (/^fail/i.test(m[0]) ? '#dc2626' : '#16a34a') : BASE_COLOR;
+      segments.push({ text: m[0], color });
       lastIndex = m.index + m[0].length;
     }
     if (lastIndex < line.length || !segments.length) segments.push({ text: line.slice(lastIndex), color: BASE_COLOR });
