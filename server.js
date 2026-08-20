@@ -5198,6 +5198,7 @@ const OPCT_FONT_DIR      = path.join(__dirname, 'fonts');
 const OPCT_FONT_REGULAR  = path.join(OPCT_FONT_DIR, 'Overpass-Regular.ttf');
 const OPCT_FONT_BOLD     = path.join(OPCT_FONT_DIR, 'Overpass-Bold.ttf');
 const OPCT_FONT_SEMIBOLD = path.join(OPCT_FONT_DIR, 'Overpass-SemiBold.ttf');
+const OPCT_FONT_MONO     = path.join(OPCT_FONT_DIR, 'OverpassMono-Regular.ttf');
 const OPCT_LOGO_PATH     = path.join(__dirname, 'public', 'ionos-cloud-logo.png');
 // Logo is 913x121px — pdfkit's proportional auto-scale (passing only `height`)
 // mis-renders at natural size when a text flow follows in the same content
@@ -5209,6 +5210,7 @@ function renderOpctPdf(doc, state) {
   doc.registerFont('Overpass',          OPCT_FONT_REGULAR);
   doc.registerFont('Overpass-Bold',     OPCT_FONT_BOLD);
   doc.registerFont('Overpass-SemiBold', OPCT_FONT_SEMIBOLD);
+  doc.registerFont('Overpass-Mono',     OPCT_FONT_MONO);
 
   const pageWidth  = doc.page.width;
   const bannerH    = 86;
@@ -5217,6 +5219,19 @@ function renderOpctPdf(doc, state) {
   const titleWidth = pageWidth - titleX - marginX;
   const TITLE      = 'OpenShift Compliance Report';
   const SUBTITLE   = 'OPCT — OpenShift Provider Compatibility Tool';
+
+  // pdfkit fires 'pageAdded' on every page break — including ones that happen
+  // mid-flow inside a single long .text() call (like the raw report dump
+  // below) — and drawBanner() sets its own font/size/color for the banner
+  // text. Without restoring whatever font the surrounding content was using,
+  // every page after the first silently reverts to drawBanner's last font
+  // instead of continuing in the one the caller set. contentFont tracks the
+  // "current content font" so drawBanner can put it back afterwards.
+  let contentFont = { name: 'Overpass', size: 9, color: '#111827' };
+  function setContentFont(name, size, color) {
+    contentFont = { name, size, color };
+    doc.font(name).fontSize(size).fillColor(color);
+  }
 
   function drawBanner() {
     doc.rect(0, 0, pageWidth, bannerH).fill('#0b1e45');
@@ -5232,6 +5247,7 @@ function renderOpctPdf(doc, state) {
       .text(SUBTITLE, titleX, blockTop + titleH + 4, { width: titleWidth });
     doc.y = bannerH + 24;
     doc.x = marginX;
+    doc.font(contentFont.name).fontSize(contentFont.size).fillColor(contentFont.color);
   }
 
   drawBanner();
@@ -5286,12 +5302,17 @@ function renderOpctPdf(doc, state) {
   }
 
   doc.moveDown(1.2);
-  doc.font('Overpass-SemiBold').fontSize(13).fillColor('#0b1e45').text('Raw opct report output');
+  setContentFont('Overpass-SemiBold', 13, '#0b1e45');
+  doc.text('Raw opct report output');
   doc.moveDown(0.4);
   // The raw output includes box-drawing tables (│, ─, etc.) that only line up
   // in a monospace font — Overpass is proportional and garbles the alignment.
-  doc.font('Courier').fontSize(7.5).fillColor('#111827')
-    .text(state.reportRaw || '(no output)', { width: pageWidth - marginX * 2 });
+  // Overpass Mono (the family's own monospace companion) keeps this
+  // consistent with the rest of the report instead of falling back to
+  // PDF-standard Courier. This block commonly spans many pages, so it must go
+  // through setContentFont (not a bare doc.font call) — see the note above drawBanner.
+  setContentFont('Overpass-Mono', 7.5, '#111827');
+  doc.text(state.reportRaw || '(no output)', { width: pageWidth - marginX * 2 });
 }
 
 // ── OPCT Preflight Checklist ────────────────────────────────────────────────
