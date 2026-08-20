@@ -5216,7 +5216,6 @@ function renderOpctPdf(doc, state) {
   const bannerH    = 86;
   const marginX    = 40;
   const titleX     = marginX + OPCT_LOGO_WIDTH + 20;
-  const titleWidth = pageWidth - titleX - marginX;
   const TITLE      = 'OpenShift Compliance Report';
   const SUBTITLE   = 'OPCT — OpenShift Provider Compatibility Tool';
 
@@ -5234,17 +5233,22 @@ function renderOpctPdf(doc, state) {
   }
 
   function drawBanner() {
-    doc.rect(0, 0, pageWidth, bannerH).fill('#0b1e45');
+    // Recomputed from doc.page.width (not the outer `pageWidth` const) so this
+    // still draws correctly on the landscape pages the raw-output section
+    // below switches to — that const is fixed at the initial portrait width.
+    const pw = doc.page.width;
+    const tw = pw - titleX - marginX;
+    doc.rect(0, 0, pw, bannerH).fill('#0b1e45');
     try {
       doc.image(OPCT_LOGO_PATH, marginX, (bannerH - OPCT_LOGO_HEIGHT) / 2,
         { width: OPCT_LOGO_WIDTH, height: OPCT_LOGO_HEIGHT });
     } catch (_) {}
     doc.font('Overpass-Bold').fontSize(15);
-    const titleH = doc.heightOfString(TITLE, { width: titleWidth });
+    const titleH = doc.heightOfString(TITLE, { width: tw });
     const blockTop = (bannerH - (titleH + 14)) / 2;
-    doc.fillColor('#ffffff').text(TITLE, titleX, blockTop, { width: titleWidth });
+    doc.fillColor('#ffffff').text(TITLE, titleX, blockTop, { width: tw });
     doc.font('Overpass').fontSize(8.5).fillColor('#93c5fd')
-      .text(SUBTITLE, titleX, blockTop + titleH + 4, { width: titleWidth });
+      .text(SUBTITLE, titleX, blockTop + titleH + 4, { width: tw });
     doc.y = bannerH + 24;
     doc.x = marginX;
     doc.font(contentFont.name).fontSize(contentFont.size).fillColor(contentFont.color);
@@ -5305,14 +5309,67 @@ function renderOpctPdf(doc, state) {
   setContentFont('Overpass-SemiBold', 13, '#0b1e45');
   doc.text('Raw opct report output');
   doc.moveDown(0.4);
-  // The raw output includes box-drawing tables (│, ─, etc.) that only line up
-  // in a monospace font — Overpass is proportional and garbles the alignment.
-  // Overpass Mono (the family's own monospace companion) keeps this
-  // consistent with the rest of the report instead of falling back to
-  // PDF-standard Courier. This block commonly spans many pages, so it must go
-  // through setContentFont (not a bare doc.font call) — see the note above drawBanner.
-  setContentFont('Overpass-Mono', 7.5, '#111827');
-  doc.text(state.reportRaw || '(no output)', { width: pageWidth - marginX * 2 });
+
+  // Rows in the raw output can run 150+ characters wide (box-drawing tables,
+  // long check descriptions) — that doesn't fit a legible monospace size in
+  // portrait, so this section gets its own landscape pages for more room.
+  doc.addPage({ size: 'A4', layout: 'landscape', margin: marginX });
+
+  // Overpass Mono doesn't carry glyphs for opct's status emoji (✅❌✔⚠️🚨) —
+  // undefined glyphs render as tofu boxes — so swap them for plain ASCII tags.
+  const rawText = String(state.reportRaw || '(no output)')
+    .replace(/✅|✔/g, '[OK]')
+    .replace(/❌|✗/g, '[FAIL]')
+    .replace(/⚠️|⚠/g, '[WARN]')
+    .replace(/🚨/g, '[!]')
+    .replace(/�/g, '?');
+  const rawLines  = rawText.split(/\r?\n/);
+  const rawWidth  = doc.page.width - marginX * 2;
+
+  // Pick the largest font size that still fits the widest line, measured with
+  // the real font metrics rather than guessed from a fixed char-width ratio —
+  // report width varies by opct version/content, so this adapts automatically.
+  doc.font('Overpass-Mono').fontSize(10);
+  // Measure every line's actual rendered width, not just character count — box-drawing
+  // and bracket glyphs don't necessarily share the same advance width as regular
+  // characters even in a "monospace" font, so the longest-by-character-count line
+  // isn't reliably the widest one once rendered.
+  const measuredWidth = rawLines.reduce((max, l) => Math.max(max, doc.widthOfString(l)), 1);
+  // 0.985 safety margin: sizing to an exact fit leaves the widest line's
+  // rendered width equal to the available width, and rounding/kerning in the
+  // real render pass can then push it a hair over, silently wrapping that one
+  // line's trailing character onto an unaligned second line.
+  const rawFontSize = Math.max(5.5, Math.min(9, (rawWidth * 0.985 / measuredWidth) * 10));
+
+  const BASE_COLOR = '#111827';
+  const PASS_FAIL_RE = /\b(fail(?:ed)?|pass(?:ed)?)\b/gi;
+
+  setContentFont('Overpass-Mono', rawFontSize, BASE_COLOR);
+  rawLines.forEach(line => {
+    if (doc.y > doc.page.height - 40) doc.addPage({ size: 'A4', layout: 'landscape', margin: marginX });
+
+    const segments = [];
+    let lastIndex = 0, m;
+    PASS_FAIL_RE.lastIndex = 0;
+    while ((m = PASS_FAIL_RE.exec(line))) {
+      if (m.index > lastIndex) segments.push({ text: line.slice(lastIndex, m.index), color: BASE_COLOR });
+      segments.push({ text: m[0], color: /^fail/i.test(m[0]) ? '#dc2626' : '#16a34a' });
+      lastIndex = m.index + m[0].length;
+    }
+    if (lastIndex < line.length || !segments.length) segments.push({ text: line.slice(lastIndex), color: BASE_COLOR });
+
+    doc.x = marginX;
+    segments.forEach((seg, i) => {
+      // NOTE: lineBreak:false here would also suppress the vertical line-advance
+      // pdfkit normally does once a (non-continued) .text() call finishes — every
+      // line would then get drawn on top of the last at the same y position
+      // instead of stacking downward. Leave it at the default (true); the font
+      // size above is already sized to fit within the page width, so wrapping
+      // never actually triggers.
+      doc.font('Overpass-Mono').fontSize(rawFontSize).fillColor(seg.color)
+        .text(seg.text, { continued: i < segments.length - 1 });
+    });
+  });
 }
 
 // ── OPCT Preflight Checklist ────────────────────────────────────────────────
