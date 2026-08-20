@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.4.8</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.4.9</span>
   </div>
 
   <div class="banner-actions">
@@ -1017,18 +1017,28 @@
           <span id="frankfurt-loc-badge" style="font-size:0.72rem;font-family:monospace;padding:0.15rem 0.5rem;border-radius:4px;background:#1e293b;color:#94a3b8;border:1px solid #334155">—</span>
         </div>
         <p id="frankfurt-desc" style="font-size:0.78rem;color:#64748b;margin:0 0 0.6rem">
-          Browse VDCs and select a Frankfurt datacenter (de/fra or de/fra/2) to enable this option.
+          Browse VDCs and select a Frankfurt datacenter (de/fra, de/fra/1, or de/fra/2) to enable this option.
         </p>
         <div id="frankfurt-site-override" style="display:none;margin:0 0 0.6rem;padding:0.4rem 0.6rem;background:#0a0d14;border:1px solid #1e293b;border-radius:6px;font-size:0.78rem;color:#94a3b8">
-          <span style="margin-right:0.75rem">My cluster site:</span>
-          <label style="display:inline-flex;align-items:center;gap:0.3rem;cursor:pointer;margin-right:0.75rem">
-            <input type="radio" name="frankfurt-actual-site" value="de/fra" />
-            <span>de/fra (FRA-1)</span>
-          </label>
-          <label style="display:inline-flex;align-items:center;gap:0.3rem;cursor:pointer">
-            <input type="radio" name="frankfurt-actual-site" value="de/fra/2" />
-            <span>de/fra/2 (FRA-2)</span>
-          </label>
+          <div style="margin-bottom:0.5rem">
+            <span style="margin-right:0.75rem">My cluster site:</span>
+            <label style="display:inline-flex;align-items:center;gap:0.3rem;cursor:pointer;margin-right:0.75rem">
+              <input type="radio" name="frankfurt-actual-site" value="de/fra" />
+              <span>de/fra</span>
+            </label>
+            <label style="display:inline-flex;align-items:center;gap:0.3rem;cursor:pointer;margin-right:0.75rem">
+              <input type="radio" name="frankfurt-actual-site" value="de/fra/1" />
+              <span>de/fra/1 (FRA-1)</span>
+            </label>
+            <label style="display:inline-flex;align-items:center;gap:0.3rem;cursor:pointer">
+              <input type="radio" name="frankfurt-actual-site" value="de/fra/2" />
+              <span>de/fra/2 (FRA-2)</span>
+            </label>
+          </div>
+          <div>
+            <span style="margin-right:0.75rem">Secondary (diversity) site:</span>
+            <select id="frankfurt-secondary-site" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:4px;padding:0.2rem 0.5rem;font-size:0.78rem"></select>
+          </div>
         </div>
         <label style="display:flex;align-items:center;gap:0.6rem;cursor:pointer;font-size:0.85rem;font-weight:600;color:#cbd5e1">
           <input type="checkbox" id="frankfurt-diversity-enabled" style="width:16px;height:16px;cursor:pointer" />
@@ -1950,6 +1960,7 @@
               VDC Location
               <select id="ncw-vdc-location" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
                 <option value="de/fra/2">Frankfurt 2 (de/fra/2)</option>
+                <option value="de/fra/1">Frankfurt 1 (de/fra/1)</option>
                 <option value="de/fra">Frankfurt (de/fra)</option>
                 <option value="de/txl">Berlin (de/txl)</option>
                 <option value="gb/lhr">London (gb/lhr)</option>
@@ -2863,10 +2874,10 @@
     setLoading('frankfurt-browse-dc-label', 'frankfurt-browse-dc-spinner', 'frankfurt-browse-dc-btn', true, 'Loading…');
     try {
       const data = await apiPost('/api/ionos/datacenters', { ionosToken: tok });
-      // Only show VDCs at the other Frankfurt site
-      const checkedSite = document.querySelector('input[name="frankfurt-actual-site"]:checked');
-      const effectiveSite = checkedSite ? checkedSite.value : datacenterLocation;
-      const otherLoc = effectiveSite === 'de/fra' ? 'de/fra/2' : 'de/fra';
+      // Only show VDCs at the selected secondary Frankfurt site (detectFrankfurt()
+      // keeps #frankfurt-secondary-site populated with whichever of the 3 sites
+      // isn't the primary one).
+      const otherLoc = document.getElementById('frankfurt-secondary-site').value || 'de/fra/2';
       const filtered = data.datacenters.filter(dc => dc.location === otherLoc);
       const sel = document.getElementById('frankfurt-existing-dc-select');
       if (filtered.length === 0) {
@@ -3858,7 +3869,11 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
   }));
 
   // Update Frankfurt diversity panel — always visible in IONOS mode.
-  // Enables the checkbox only when the selected VDC is in de/fra or de/fra/2.
+  // Enables the checkbox only when the selected VDC is in one of the three
+  // Frankfurt sites (de/fra, de/fra/1, de/fra/2).
+  const FRANKFURT_SITES = ['de/fra', 'de/fra/1', 'de/fra/2'];
+  const FRANKFURT_VDC_NAMES = { 'de/fra': 'OpenShift-Workers-FRA', 'de/fra/1': 'OpenShift-Workers-FRA1', 'de/fra/2': 'OpenShift-Workers-FRA2' };
+
   function detectFrankfurt(preserveOverride) {
     // Fall back to reading the dropdown if the JS variable was cleared by a refresh
     if (!datacenterLocation) {
@@ -3866,12 +3881,13 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
       const opt   = dcSel?.options?.[dcSel?.selectedIndex];
       if (opt?.dataset?.location) datacenterLocation = opt.dataset.location;
     }
-    const isFra   = datacenterLocation === 'de/fra' || datacenterLocation === 'de/fra/2';
+    const isFra   = FRANKFURT_SITES.includes(datacenterLocation);
     const locText = datacenterLocation || '—';
 
     document.getElementById('frankfurt-loc-badge').textContent = locText;
     const descEl          = document.getElementById('frankfurt-desc');
     const overridePanel   = document.getElementById('frankfurt-site-override');
+    const secondarySel    = document.getElementById('frankfurt-secondary-site');
 
     if (isFra) {
       overridePanel.style.display = '';
@@ -3883,17 +3899,25 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
       // Effective location = whatever radio is selected (user override or default)
       const checkedRadio = document.querySelector('input[name="frankfurt-actual-site"]:checked');
       const effectiveLoc = checkedRadio ? checkedRadio.value : datacenterLocation;
-      const other = effectiveLoc === 'de/fra' ? 'de/fra/2' : 'de/fra';
-      document.getElementById('frankfurt-vdc-name').value =
-        other === 'de/fra/2' ? 'OpenShift-Workers-FRA2' : 'OpenShift-Workers-FRA';
+
+      // With 3 sites, "the other one" is no longer a fixed complement — repopulate
+      // the secondary-site dropdown with whichever 2 sites aren't the primary,
+      // preserving the user's current pick if it's still a valid choice.
+      const prevSecondary = secondarySel.value;
+      const candidates = FRANKFURT_SITES.filter(s => s !== effectiveLoc);
+      secondarySel.innerHTML = candidates.map(s => `<option value="${s}">${s}</option>`).join('');
+      secondarySel.value = candidates.includes(prevSecondary) ? prevSecondary : candidates[0];
+
+      const other = secondarySel.value;
+      document.getElementById('frankfurt-vdc-name').value = FRANKFURT_VDC_NAMES[other] || 'OpenShift-Workers-FRA';
       descEl.innerHTML = `Your cluster VDC is in <strong style="color:#94a3b8">${effectiveLoc}</strong>.
-        Tick the box to place worker nodes at the other Frankfurt site
+        Tick the box to place worker nodes at the selected secondary Frankfurt site
         (<strong style="color:#94a3b8">${other}</strong>)
         via Private Cross Connect (PCC).`;
     } else {
       overridePanel.style.display = 'none';
       if (datacenterLocation) {
-        descEl.textContent = `VDC location: ${datacenterLocation} — Frankfurt diversity requires de/fra or de/fra/2.`;
+        descEl.textContent = `VDC location: ${datacenterLocation} — Frankfurt diversity requires de/fra, de/fra/1, or de/fra/2.`;
       } else {
         descEl.textContent = 'Browse VDCs and select a datacenter to check Frankfurt diversity eligibility.';
       }
@@ -3927,6 +3951,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
   document.querySelectorAll('input[name="frankfurt-actual-site"]').forEach(r => r.addEventListener('change', () => {
     detectFrankfurt(true);
   }));
+  document.getElementById('frankfurt-secondary-site').addEventListener('change', () => detectFrankfurt(true));
 
   document.querySelectorAll('input[name="frankfurt-submode"]').forEach(r => r.addEventListener('change', () => {
     const isCreate = document.querySelector('input[name="frankfurt-submode"]:checked')?.value === 'create';
@@ -4216,6 +4241,10 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     // Effective primary location — user may have overridden the IONOS API value via the site radio
     const frankfurtSiteRadio  = document.querySelector('input[name="frankfurt-actual-site"]:checked');
     const effectiveRegion     = (frankfurtEnabled && frankfurtSiteRadio) ? frankfurtSiteRadio.value : datacenterLocation;
+    // Which of the other 2 Frankfurt sites to place diversity workers at —
+    // resolved by detectFrankfurt() into #frankfurt-secondary-site since it's no
+    // longer a fixed complement of effectiveRegion now that there are 3 sites.
+    const frankfurtSecondarySite = document.getElementById('frankfurt-secondary-site').value.trim();
     const frankfurtPccName    = document.getElementById('frankfurt-pcc-name').value.trim();
     const frankfurtPrimaryLan = parseInt(document.getElementById('frankfurt-primary-lan').value, 10) || 1;
     const frankfurtExistingDc = document.getElementById('frankfurt-existing-dc-select').value.trim();
@@ -4336,6 +4365,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
           // Frankfurt Intra-geographical Diversity
           frankfurtDiversity:   msMode === 'ionos' && frankfurtEnabled,
           frankfurtSubMode,
+          frankfurtSecondarySite,
           frankfurtVdcName,
           frankfurtPccName,
           frankfurtPrimaryLanId: frankfurtPrimaryLan,

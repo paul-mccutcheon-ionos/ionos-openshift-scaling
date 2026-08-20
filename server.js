@@ -921,7 +921,7 @@ app.post('/api/setup-autoscaler', async (req, res) => {
           // Container registry for provider image
           registryType, registryImage, registryUsername, registryPassword,
           // Frankfurt Intra-geographical Diversity
-          frankfurtDiversity, frankfurtSubMode,
+          frankfurtDiversity, frankfurtSubMode, frankfurtSecondarySite,
           frankfurtVdcName, frankfurtPccName, frankfurtPrimaryLanId,
           frankfurtExistingDcId, frankfurtExistingLanId,
           frankfurtIgnitionIp, frankfurtStaticIp } = req.body;
@@ -1232,10 +1232,19 @@ app.post('/api/setup-autoscaler', async (req, res) => {
       let _fraPrimaryLan  = 0;
 
       if (frankfurtDiversity) {
-        const otherLocation = region === 'de/fra' ? 'de/fra/2' : 'de/fra';
-        // Convert IONOS location format to Machine API region format (de/fra → de-fra-1, de/fra/2 → de-fra-2)
-        const locationRegionMap = { 'de/fra': 'de-fra-1', 'de/fra/2': 'de-fra-2' };
+        // With three Frankfurt sites now live (de/fra, de/fra/1, de/fra/2), the
+        // "other" site can no longer be inferred as a simple binary complement of
+        // `region` (the primary) — there are two possible secondary sites once the
+        // primary is known, so the frontend resolves it explicitly and sends it.
+        // The `region === 'de/fra' ? ... : 'de/fra'` fallback below only covers the
+        // pre-fra/1 two-site case, for older clients that never send the field.
+        const otherLocation = frankfurtSecondarySite || (region === 'de/fra' ? 'de/fra/2' : 'de/fra');
+        // Convert IONOS location format to Machine API region format
+        // (de/fra → de-fra, de/fra/1 → de-fra-1, de/fra/2 → de-fra-2)
+        const locationRegionMap = { 'de/fra': 'de-fra', 'de/fra/1': 'de-fra-1', 'de/fra/2': 'de-fra-2' };
         effectiveRegion = locationRegionMap[otherLocation] || otherLocation.replace(/\//g, '-');
+        // fra, fra1, fra2 — used for the FTP site tag and the ionos-site node label.
+        const otherSiteTag = otherLocation.split('/').slice(1).join('') || 'fra';
 
         // Pre-flight: ensure selected image is available in the secondary location.
         // If it's only in the primary location, auto-copy via FTP from the management host.
@@ -1853,7 +1862,7 @@ echo "ALT_WRITE_OK"
               // it, pods like the image registry can fail to schedule (see OPCT preflight).
               // Frankfurt diversity nodes live in the *other* physical DC site (reached via
               // PCC), so they get their own zone value — never collapsed into the primary site's.
-              metadata: { labels: { [OPCT_ZONE_LABEL]: ionosZoneFromLocation(effectiveRegion), ...(frankfurtDiversity ? { 'ionos-site': 'fra1' } : {}) } },
+              metadata: { labels: { [OPCT_ZONE_LABEL]: ionosZoneFromLocation(effectiveRegion), ...(frankfurtDiversity ? { 'ionos-site': otherSiteTag } : {}) } },
               providerSpec: { value: providerSpec },
               taints: []
             }
@@ -4291,15 +4300,15 @@ function ftpHostForLoc(loc) {
 }
 
 // topology.kubernetes.io/zone value for a node in a given IONOS location.
-// Accepts either slash form (de/fra, de/fra/2) or the Machine API dash form
-// already used for cross-site Frankfurt diversity (de-fra-1, de-fra-2) — the
-// two physical DC sites reachable via PCC must map to distinct zones so
-// topology-spread-aware workloads (and OPCT) see them as separate failure
-// domains, not one merged zone.
+// Accepts either slash form (de/fra, de/fra/1, de/fra/2) or the Machine API
+// dash form already used for cross-site Frankfurt diversity (de-fra,
+// de-fra-1, de-fra-2) — the physical DC sites reachable via PCC must map to
+// distinct zones so topology-spread-aware workloads (and OPCT) see them as
+// separate failure domains, not one merged zone.
 function ionosZoneFromLocation(loc) {
-  if (!loc) return 'de-fra-1';
+  if (!loc) return 'de-fra';
   if (!loc.includes('/')) return loc; // already dash form, e.g. de-fra-2
-  const known = { 'de/fra': 'de-fra-1', 'de/fra/2': 'de-fra-2' };
+  const known = { 'de/fra': 'de-fra', 'de/fra/1': 'de-fra-1', 'de/fra/2': 'de-fra-2' };
   return known[loc] || loc.replace(/\//g, '-');
 }
 
