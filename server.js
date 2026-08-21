@@ -4332,8 +4332,6 @@ app.get('/api/new-cluster/mgmt-images', async (req, res) => {
   const { location, token } = req.query;
   if (!token || !location) return res.status(400).json({ error: 'location and token required' });
 
-  const baseLocation = location.replace(/\/\d+$/, '');
-
   try {
     const imgResp = await ionosGet('/images?depth=1', token);
 
@@ -4353,8 +4351,9 @@ app.get('/api/new-cluster/mgmt-images', async (req, res) => {
 
     const images = (imgResp.items || [])
       .filter(img => {
-        const imgLoc = (img.properties?.location || '').replace(/\/\d+$/, '');
-        return imgLoc === baseLocation && img.properties?.imageType === 'HDD';
+        // Exact match — de/fra, de/fra/1, and de/fra/2 each carry their own
+        // separate image catalog entries, not shared ones under a common base.
+        return img.properties?.location === location && img.properties?.imageType === 'HDD';
       })
       .map(img => ({
         id:   img.id,
@@ -4369,46 +4368,58 @@ app.get('/api/new-cluster/mgmt-images', async (req, res) => {
   }
 });
 
-// GET /api/new-cluster/cpu-families?location=de/txl&token=...
-// Returns Dedicated Core CPU families available in the given IONOS location.
-app.get('/api/new-cluster/cpu-families', async (req, res) => {
-  const { location, token } = req.query;
-  if (!location || !token) return res.status(400).json({ error: 'location and token required' });
+// Hardcoded fallbacks by exact IONOS location, used only when the live
+// /locations/{...} lookup below fails. Frankfurt's 3 sites are physically
+// distinct DCs with independent hardware — de/fra/1 and de/fra/2 are NOT
+// variants of de/fra, so this must be keyed by the full location string,
+// never a "/N" suffix stripped down to a shared base. Confirmed against the
+// live IONOS Locations API on 2026-08-21:
+//   de/fra   (frankfurt)      → INTEL_XEON, AMD_EPYC
+//   de/fra/1 (frankfurt-west) → INTEL_SIERRAFOREST, AMD_TURIN   (no AMD_EPYC!)
+//   de/fra/2 (frankfurt-east) → AMD_EPYC, INTEL_SIERRAFOREST, AMD_TURIN
+const CPU_FAMILY_DEFAULTS = {
+  'de/fra':   [{ family: 'INTEL_XEON' }, { family: 'AMD_EPYC' }],
+  'de/fra/1': [{ family: 'INTEL_SIERRAFOREST' }, { family: 'AMD_TURIN' }],
+  'de/fra/2': [{ family: 'AMD_EPYC' }, { family: 'INTEL_SIERRAFOREST' }, { family: 'AMD_TURIN' }],
+  'de/txl':   [{ family: 'AMD_EPYC' }, { family: 'INTEL_XEON' }],
+  'gb/lhr':   [{ family: 'AMD_EPYC' }, { family: 'INTEL_XEON' }],
+  'us/las':   [{ family: 'AMD_EPYC' }, { family: 'INTEL_XEON' }],
+  'us/ewr':   [{ family: 'AMD_EPYC' }, { family: 'INTEL_XEON' }],
+  'es/vit':   [{ family: 'AMD_EPYC' }, { family: 'INTEL_XEON' }],
+  'fr/par':   [{ family: 'AMD_EPYC' }, { family: 'INTEL_XEON' }],
+};
 
-  const parts  = location.replace(/\/\d+$/, '').split('/');  // 'de/txl' → ['de','txl']
-  const region = parts[0];
-  const loc    = parts[1];
-
+// Shared by /api/new-cluster/cpu-families and the create-infra fallback below.
+// IONOS's Locations API takes the location's exact id as-is, e.g.
+// /locations/de/fra/1 — do NOT strip any "/N" suffix before calling it, that
+// silently queries a *different*, unrelated site (see comment above).
+async function resolveCpuFamiliesForLocation(location, token) {
   try {
-    const data    = await ionosGet(`/locations/${region}/${loc}`, token);
-    const archs   = data?.properties?.cpuArchitecture || [];
+    const data  = await ionosGet(`/locations/${location}`, token);
+    const archs = data?.properties?.cpuArchitecture || [];
     if (archs.length > 0) {
-      return res.json({
+      return {
         families: archs.map(a => ({
           family:    a.cpuFamily,
           maxCores:  a.maxCores,
           maxRamGB:  Math.round((a.maxRam || 0) / 1024),
           vendor:    a.vendor || '',
         }))
-      });
+      };
     }
   } catch (_) { /* fall through to defaults */ }
-
-  // Hardcoded fallbacks by base location
-  const defaults = {
-    'de/fra':  [{ family: 'AMD_TURIN' }, { family: 'AMD_EPYC' }, { family: 'INTEL_XEON' }],
-    'de/txl':  [{ family: 'AMD_EPYC' }, { family: 'INTEL_XEON' }],
-    'gb/lhr':  [{ family: 'AMD_EPYC' }, { family: 'INTEL_XEON' }],
-    'us/las':  [{ family: 'AMD_EPYC' }, { family: 'INTEL_XEON' }],
-    'us/ewr':  [{ family: 'AMD_EPYC' }, { family: 'INTEL_XEON' }],
-    'es/vit':  [{ family: 'AMD_EPYC' }, { family: 'INTEL_XEON' }],
-    'fr/par':  [{ family: 'AMD_EPYC' }, { family: 'INTEL_XEON' }],
-  };
-  const baseLocation = `${region}/${loc}`;
-  res.json({
-    families: defaults[baseLocation] || [{ family: 'AMD_EPYC' }, { family: 'INTEL_XEON' }, { family: 'AMD_TURIN' }],
+  return {
+    families: CPU_FAMILY_DEFAULTS[location] || [{ family: 'AMD_EPYC' }, { family: 'INTEL_XEON' }, { family: 'AMD_TURIN' }],
     fallback: true,
-  });
+  };
+}
+
+// GET /api/new-cluster/cpu-families?location=de/txl&token=...
+// Returns Dedicated Core CPU families available in the given IONOS location.
+app.get('/api/new-cluster/cpu-families', async (req, res) => {
+  const { location, token } = req.query;
+  if (!location || !token) return res.status(400).json({ error: 'location and token required' });
+  res.json(await resolveCpuFamiliesForLocation(location, token));
 });
 
 // GET /api/new-cluster/ocp-versions
@@ -4440,13 +4451,20 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
           mgmtImageId, mgmtImageName } = req.body;
   const { step, log, done, fail } = makeSseHelpers(res);
 
-  const baseLocation      = vdcLocation.replace(/\/\d+$/, '');
-  const resolvedCpuFamily = cpuFamily || 'AMD_EPYC';
+  // NOT stripped to a "/N"-less base — de/fra, de/fra/1, and de/fra/2 are
+  // physically distinct sites with their own separate image catalogs and CPU
+  // hardware, not zone variants of one location (see resolveCpuFamiliesForLocation).
   const byName = (items, name) => (items || []).find(i => i.properties?.name === name);
   const logFound   = label => log(`  (exists) ${label}\n`);
   const logCreated = label => log(`  (new)    ${label}\n`);
 
   try {
+    // Only hit the live/fallback lookup when the wizard didn't already pass an
+    // explicit choice — this location-aware resolution replaces what used to
+    // be a blind 'AMD_EPYC' default, which fails outright at sites (like
+    // de/fra/1) that don't offer that family at all.
+    const resolvedCpuFamily = cpuFamily ||
+      (await resolveCpuFamiliesForLocation(vdcLocation, ionosToken)).families[0]?.family || 'AMD_EPYC';
     // 1. Find or reserve IP blocks
     step('Reserve public IP addresses', 'running');
     log('Checking for existing IP address reservations...\n');
@@ -4530,20 +4548,21 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
       resolvedImageId = mgmtImageId;
       log(`  Using selected image: ${mgmtImageName || mgmtImageId}\n`);
     } else {
-      log(`Searching catalog for Rocky/RHEL/AlmaLinux 9 in "${baseLocation}"...\n`);
+      log(`Searching catalog for Rocky/RHEL/AlmaLinux 9 in "${vdcLocation}"...\n`);
       const imgResp = await ionosGet('/images?depth=1', ionosToken);
+      // Exact location match — de/fra, de/fra/1, and de/fra/2 each carry their
+      // own separate image catalog entries, not shared ones under a common base.
       const img = (imgResp.items || []).find(i => {
-        const loc = (i.properties?.location || '').replace(/\/\d+$/, '');
-        if (loc !== baseLocation || i.properties?.imageType !== 'HDD') return false;
+        if (i.properties?.location !== vdcLocation || i.properties?.imageType !== 'HDD') return false;
         const n = (i.properties?.name || '').toLowerCase();
         return (n.includes('rocky') || n.includes('rhel') || n.includes('red hat') || n.includes('almalinux')) &&
                (/ 9[^0-9]/.test(n) || n.endsWith(' 9') || n.includes('-9') || n.includes(':9'));
       });
       if (!img) {
         const avail = (imgResp.items || [])
-          .filter(i => (i.properties?.location || '').replace(/\/\d+$/, '') === baseLocation && i.properties?.imageType === 'HDD')
+          .filter(i => i.properties?.location === vdcLocation && i.properties?.imageType === 'HDD')
           .map(i => i.properties?.name).join(', ');
-        fail(`No Rocky/RHEL/AlmaLinux 9 image found for "${baseLocation}". Available: ${avail || 'none'}.`);
+        fail(`No Rocky/RHEL/AlmaLinux 9 image found for "${vdcLocation}". Available: ${avail || 'none'}.`);
         return;
       }
       resolvedImageId = img.id;
