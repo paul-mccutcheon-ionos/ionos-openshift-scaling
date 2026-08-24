@@ -2350,6 +2350,27 @@ app.post('/api/ionos/location-cpu-families', async (req, res) => {
   }
 });
 
+// GET /api/ionos/templates?token=...
+// Lists IONOS Cube templates (id, name, cores, ram, storage) — this catalog
+// is global, not scoped to a datacenter location like images/CPU families.
+app.get('/api/ionos/templates', async (req, res) => {
+  const { token } = req.query;
+  if (!token) return res.status(400).json({ error: 'token required' });
+  try {
+    const data = await ionosGet('/templates?depth=1', token);
+    const templates = (data.items || []).map(t => ({
+      id:        t.id,
+      name:      t.properties?.name || t.id,
+      cores:     t.properties?.cores,
+      ramGB:     Math.round((t.properties?.ram || 0) / 1024),
+      storageGB: t.properties?.storageSize,
+    }));
+    res.json({ templates });
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
 // Create a new worker node server on IONOS Cloud — SSE streaming endpoint.
 // Workflow: create server → create SSD volume → attach volume → configure NIC → poll for IP/MAC
 app.post('/api/ionos/create-worker', async (req, res) => {
@@ -4445,11 +4466,17 @@ app.get('/api/new-cluster/ocp-versions', async (_req, res) => {
 // ── Phase A: Create Infrastructure ────────────────────────────────────────
 app.post('/api/new-cluster/create-infra', async (req, res) => {
   const { ionosToken, clusterName, vdcName, vdcLocation,
+          controlServerType, controlTemplateId,
           controlCores, controlRamGB, controlDiskGB,
           cpuFamily,
           ocpSshPubKey, mgmtSshPubKey,
           mgmtImageId, mgmtImageName } = req.body;
   const { step, log, done, fail } = makeSseHelpers(res);
+  const isCubeControlPlane = controlServerType === 'CUBE';
+  if (isCubeControlPlane && !controlTemplateId) {
+    fail('A Cube template must be selected for the control plane.');
+    return;
+  }
 
   // NOT stripped to a "/N"-less base — de/fra, de/fra/1, and de/fra/2 are
   // physically distinct sites with their own separate image catalogs and CPU
@@ -4462,9 +4489,10 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
     // Only hit the live/fallback lookup when the wizard didn't already pass an
     // explicit choice — this location-aware resolution replaces what used to
     // be a blind 'AMD_EPYC' default, which fails outright at sites (like
-    // de/fra/1) that don't offer that family at all.
-    const resolvedCpuFamily = cpuFamily ||
-      (await resolveCpuFamiliesForLocation(vdcLocation, ionosToken)).families[0]?.family || 'AMD_EPYC';
+    // de/fra/1) that don't offer that family at all. Cube servers have no
+    // CPU-family concept (fixed by the template), so skip this entirely.
+    const resolvedCpuFamily = isCubeControlPlane ? null : (cpuFamily ||
+      (await resolveCpuFamiliesForLocation(vdcLocation, ionosToken)).families[0]?.family || 'AMD_EPYC');
     // 1. Find or reserve IP blocks
     step('Reserve public IP addresses', 'running');
     log('Checking for existing IP address reservations...\n');
@@ -4599,8 +4627,11 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
     }
     step('Create management VM (2 vCPU, 4 GB RAM)', 'done');
 
-    step(`Create 3 control plane VMs (${controlCores}C / ${controlRamGB} GB / ${controlDiskGB} GB)`, 'running');
-    log(`CPU family: ${resolvedCpuFamily}\n`);
+    const cpStepLabel = isCubeControlPlane
+      ? 'Create 3 control plane VMs (Cube)'
+      : `Create 3 control plane VMs (${controlCores}C / ${controlRamGB} GB / ${controlDiskGB} GB)`;
+    step(cpStepLabel, 'running');
+    log(isCubeControlPlane ? `Cube template: ${controlTemplateId}\n` : `CPU family: ${resolvedCpuFamily}\n`);
     const cpKaTimer = setInterval(() => log('  Still waiting on IONOS Cloud API...\n'), 15000);
     let cpSrvIds;
     try {
@@ -4608,19 +4639,25 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
         const ex = byName(allSrvs.items, `${clusterName}-control-${i}`);
         if (ex) { logFound(`control-${i}: ${ex.id}`); return { id: ex.id }; }
         try {
+          // Cube servers are sized entirely by their template — no cores/ram/
+          // cpuFamily on the server, and the boot volume must be type "DAS"
+          // with no explicit size (the template fixes it).
           const srv = await ionosPost(`/datacenters/${dcId}/servers`, ionosToken, {
-            properties: {
-              name: `${clusterName}-control-${i}`,
-              cores:     parseInt(controlCores, 10),
-              ram:       parseInt(controlRamGB, 10) * 1024,
-              cpuFamily: resolvedCpuFamily,
-              type:      'ENTERPRISE'
-            },
+            properties: isCubeControlPlane
+              ? { name: `${clusterName}-control-${i}`, type: 'CUBE', templateUuid: controlTemplateId }
+              : {
+                  name: `${clusterName}-control-${i}`,
+                  cores:     parseInt(controlCores, 10),
+                  ram:       parseInt(controlRamGB, 10) * 1024,
+                  cpuFamily: resolvedCpuFamily,
+                  type:      'ENTERPRISE'
+                },
             entities: {
-              volumes: { items: [{ properties: {
-                name: `${clusterName}-control-${i}-root`, size: parseInt(controlDiskGB, 10),
-                type: 'SSD Premium', licenceType: 'LINUX'
-              }}] },
+              volumes: { items: [{ properties: isCubeControlPlane
+                ? { name: `${clusterName}-control-${i}-root`, type: 'DAS', licenceType: 'LINUX' }
+                : { name: `${clusterName}-control-${i}-root`, size: parseInt(controlDiskGB, 10),
+                    type: 'SSD Premium', licenceType: 'LINUX' }
+              }] },
               nics: { items: [{ properties: { name: 'private', lan: privLanId, dhcp: true } }] }
             }
           });
@@ -4632,7 +4669,7 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
         }
       }));
     } finally { clearInterval(cpKaTimer); }
-    step(`Create 3 control plane VMs (${controlCores}C / ${controlRamGB} GB / ${controlDiskGB} GB)`, 'done');
+    step(cpStepLabel, 'done');
 
     // 7. Wait for all VMs to be AVAILABLE
     step('Provision VMs (Dedicated Core: 5–10 min)', 'running');

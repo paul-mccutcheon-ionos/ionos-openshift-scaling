@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.5.1</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.6.0</span>
   </div>
 
   <div class="banner-actions">
@@ -1990,35 +1990,60 @@
       <!-- Step 2: Node Sizing -->
       <div id="ncw-panel-2" style="display:none">
         <h3 style="margin-bottom:1rem;color:#cbd5e1">Node Sizing</h3>
-        <p style="font-size:0.8rem;color:#64748b;margin-bottom:1rem">IONOS recommendation: 8 vCPU / 16 GB RAM / 600 GB SSD Premium for control plane (Dedicated Core, AMD TURIN).</p>
+        <p style="font-size:0.8rem;color:#64748b;margin-bottom:1rem">IONOS recommendation: 8 vCPU / 16 GB RAM / ~480-600 GB for control plane — Dedicated Core (pick cores/RAM/disk) or Cube (fixed template, defaults to Basic Cube L).</p>
         <div style="display:grid;gap:1.2rem">
           <div>
-            <h4 style="margin-bottom:0.6rem;color:#94a3b8;font-size:0.85rem;text-transform:uppercase;letter-spacing:0.05em">Control Plane (×3 Dedicated Core)</h4>
+            <h4 style="margin-bottom:0.6rem;color:#94a3b8;font-size:0.85rem;text-transform:uppercase;letter-spacing:0.05em">Control Plane (×3)</h4>
             <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.75rem">
-              <label style="font-size:0.85rem;color:#94a3b8;white-space:nowrap">CPU Family</label>
-              <select id="ncw-cp-cpu-family" style="flex:1;background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.45rem 0.75rem;font-size:0.85rem">
-                <option value="AMD_EPYC">AMD_EPYC</option>
-                <option value="AMD_TURIN">AMD_TURIN (Frankfurt only)</option>
-                <option value="INTEL_XEON">INTEL_XEON</option>
+              <label style="font-size:0.85rem;color:#94a3b8;white-space:nowrap">Server Type</label>
+              <select id="ncw-cp-server-type" style="flex:1;background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.45rem 0.75rem;font-size:0.85rem">
+                <option value="ENTERPRISE" selected>Dedicated Core</option>
+                <option value="CUBE">Cube (fixed template)</option>
               </select>
-              <button id="ncw-cpu-family-refresh" type="button" onclick="ncwLoadCpuFamilies()"
-                style="background:#1e3a5f;border:1px solid #2d5a8e;color:#e2e8f0;border-radius:6px;padding:0.45rem 0.8rem;font-size:0.82rem;cursor:pointer;white-space:nowrap">
-                &#8635; Refresh
-              </button>
+              <div class="field-note" style="white-space:nowrap">Dedicated Core = pick cores/RAM/disk; Cube = fixed template size</div>
             </div>
-            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.75rem">
-              <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
-                Cores
-                <input id="ncw-cp-cores" type="number" value="8" min="4" max="64" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
-              </label>
-              <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
-                RAM (GB)
-                <input id="ncw-cp-ram" type="number" value="16" min="8" max="256" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
-              </label>
-              <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
-                Disk (GB)
-                <input id="ncw-cp-disk" type="number" value="600" min="120" max="4096" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
-              </label>
+
+            <div id="ncw-cp-dedicated-fields">
+              <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.75rem">
+                <label style="font-size:0.85rem;color:#94a3b8;white-space:nowrap">CPU Family</label>
+                <select id="ncw-cp-cpu-family" style="flex:1;background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.45rem 0.75rem;font-size:0.85rem">
+                  <option value="AMD_EPYC">AMD_EPYC</option>
+                  <option value="AMD_TURIN">AMD_TURIN (Frankfurt only)</option>
+                  <option value="INTEL_XEON">INTEL_XEON</option>
+                </select>
+                <button id="ncw-cpu-family-refresh" type="button" onclick="ncwLoadCpuFamilies()"
+                  style="background:#1e3a5f;border:1px solid #2d5a8e;color:#e2e8f0;border-radius:6px;padding:0.45rem 0.8rem;font-size:0.82rem;cursor:pointer;white-space:nowrap">
+                  &#8635; Refresh
+                </button>
+              </div>
+              <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.75rem">
+                <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+                  Cores
+                  <input id="ncw-cp-cores" type="number" value="8" min="4" max="64" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
+                </label>
+                <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+                  RAM (GB)
+                  <input id="ncw-cp-ram" type="number" value="16" min="8" max="256" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
+                </label>
+                <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+                  Disk (GB)
+                  <input id="ncw-cp-disk" type="number" value="600" min="120" max="4096" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
+                </label>
+              </div>
+            </div>
+
+            <div id="ncw-cp-cube-fields" style="display:none">
+              <div style="display:flex;align-items:center;gap:0.5rem">
+                <label style="font-size:0.85rem;color:#94a3b8;white-space:nowrap">Cube Template</label>
+                <select id="ncw-cp-template" style="flex:1;background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.45rem 0.75rem;font-size:0.85rem">
+                  <option value="">— select IONOS token first, then Refresh —</option>
+                </select>
+                <button id="ncw-cp-template-refresh" type="button" onclick="ncwLoadTemplates()"
+                  style="background:#1e3a5f;border:1px solid #2d5a8e;color:#e2e8f0;border-radius:6px;padding:0.45rem 0.8rem;font-size:0.82rem;cursor:pointer;white-space:nowrap">
+                  &#8635; Refresh
+                </button>
+              </div>
+              <div class="field-note" style="margin-top:0.4rem">Cores/RAM/disk are fixed by the template — defaults to Basic Cube L (8 vCPU / 16 GB / 480 GB).</div>
             </div>
           </div>
           <div>
@@ -2076,7 +2101,7 @@
           &#10003; RHEL 9 HDD image is available in your target VDC location<br>
           &#10003; DNS zone for your base domain is accessible (you will add records after infra creation)<br>
           &#10003; IONOS FTP credentials are correct (same as your IONOS account login)<br>
-          &#10003; Sufficient IONOS quota: 3× Dedicated Core + 1× vCPU server, 3× SSD Premium 600 GB, 3× public IPs
+          &#10003; Sufficient IONOS quota: 3× control-plane servers (Dedicated Core or Cube) + 1× vCPU server, 3× public IPs
         </div>
         <div class="error-box hidden" id="ncw-review-error" style="margin-top:0.75rem"></div>
       </div>
@@ -4860,8 +4885,13 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
       `VDC Name:          ${c.vdcName || '—'}`,
       `VDC Location:      ${c.vdcLocation || '—'}`,
       ``,
-      `Control Plane:     3× Dedicated Core (AMD TURIN)`,
-      `                   ${c.controlCores || 8} cores / ${c.controlRamGB || 16} GB RAM / ${c.controlDiskGB || 600} GB SSD Premium`,
+      ...(c.controlServerType === 'CUBE' ? [
+        `Control Plane:     3× Cube`,
+        `                   ${c.controlTemplateName || c.controlTemplateId || '— template not selected —'}`,
+      ] : [
+        `Control Plane:     3× Dedicated Core (${c.cpuFamily || 'AMD_EPYC'})`,
+        `                   ${c.controlCores || 8} cores / ${c.controlRamGB || 16} GB RAM / ${c.controlDiskGB || 600} GB SSD Premium`,
+      ]),
       ``,
       `Workers (initial): ${c.workerReplicas || 2}× vCPU`,
       `                   ${c.workerCores || 4} cores / ${c.workerRamGB || 8} GB RAM / ${c.workerDiskGB || 120} GB SSD Standard`,
@@ -4883,6 +4913,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     if (!c.ocpVersion)    missing.push('OCP Version');
     if (!c.vdcName)       missing.push('VDC Name');
     if (!c.mgmtSshPrivKey) missing.push('Mgmt SSH Private Key');
+    if (c.controlServerType === 'CUBE' && !c.controlTemplateId) missing.push('Cube Template');
     const errEl = document.getElementById('ncw-review-error');
     if (missing.length) {
       errEl.classList.remove('hidden');
@@ -4912,6 +4943,9 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
         break;
       }
       case 2:
+        ncwConfig.controlServerType = document.getElementById('ncw-cp-server-type').value;
+        ncwConfig.controlTemplateId = document.getElementById('ncw-cp-template').value;
+        ncwConfig.controlTemplateName = document.getElementById('ncw-cp-template').selectedOptions[0]?.text || '';
         ncwConfig.cpuFamily     = document.getElementById('ncw-cp-cpu-family').value;
         ncwConfig.controlCores  = document.getElementById('ncw-cp-cores').value;
         ncwConfig.controlRamGB  = document.getElementById('ncw-cp-ram').value;
@@ -5231,6 +5265,47 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     const token = document.getElementById('ncw-ionos-token').value.trim() || ncwConfig.ionosToken || '';
     if (token) { ncwLoadMgmtImages(); ncwLoadCpuFamilies(); }
   });
+
+  // ── Cube template loader (control plane) ────────────────────────────────────
+  // Cube templates are a fixed catalog, not scoped to a location like CPU
+  // families/images — no location param needed.
+  async function ncwLoadTemplates() {
+    const token = document.getElementById('ncw-ionos-token').value.trim() || ncwConfig.ionosToken || '';
+    const sel   = document.getElementById('ncw-cp-template');
+    const btn   = document.getElementById('ncw-cp-template-refresh');
+    if (!token) return;
+    if (btn) { btn.disabled = true; btn.textContent = '...'; }
+    try {
+      const r = await fetch(`/api/ionos/templates?token=${encodeURIComponent(token)}`);
+      const { templates, error } = await r.json();
+      if (error) throw new Error(error);
+      if (templates && templates.length > 0) {
+        const prev = sel.value;
+        sel.innerHTML = templates.map(t =>
+          `<option value="${escHtml(t.id)}">${escHtml(t.name)}  (${t.cores} vCPU / ${t.ramGB} GB / ${t.storageGB} GB)</option>`
+        ).join('');
+        const defaultTpl = templates.find(t => t.name === 'Basic Cube L');
+        if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+        else if (defaultTpl) sel.value = defaultTpl.id;
+      }
+    } catch (_) { /* keep current options */ }
+    finally {
+      if (btn) { btn.disabled = false; btn.textContent = '↻ Refresh'; }
+    }
+  }
+
+  // Toggle Dedicated Core vs Cube fields for the control plane
+  function ncwApplyCpServerType() {
+    const isCube = document.getElementById('ncw-cp-server-type').value === 'CUBE';
+    document.getElementById('ncw-cp-dedicated-fields').style.display = isCube ? 'none' : '';
+    document.getElementById('ncw-cp-cube-fields').style.display       = isCube ? '' : 'none';
+    if (isCube) {
+      const token = document.getElementById('ncw-ionos-token').value.trim() || ncwConfig.ionosToken || '';
+      const sel   = document.getElementById('ncw-cp-template');
+      if (token && !sel.value) ncwLoadTemplates();
+    }
+  }
+  document.getElementById('ncw-cp-server-type').addEventListener('change', ncwApplyCpServerType);
 
   // ═══════════════════════════════════════════════════════════════════════
   // Compliance Report (OPCT)
