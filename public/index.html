@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.6.0</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.7.0</span>
   </div>
 
   <div class="banner-actions">
@@ -1214,8 +1214,16 @@
           <select id="as-ionos-server-type">
             <option value="ENTERPRISE" selected>Dedicated Core</option>
             <option value="VCPU">vCPU</option>
+            <option value="GPU" id="as-ionos-gpu-option" disabled>GPU (NVIDIA H200) — de/fra/2, gb/bhx only</option>
           </select>
-          <div class="field-note">Dedicated Core = physical CPU cores; vCPU = shared virtual cores (no CPU family selection)</div>
+          <div class="field-note">Dedicated Core = physical CPU cores; vCPU = shared virtual cores (no CPU family selection); GPU = NVIDIA H200 template (only at de/fra/2 and gb/bhx)</div>
+        </div>
+        <div class="form-group" id="as-ionos-gpu-group" style="display:none">
+          <label for="as-ionos-gpu-template">GPU Template</label>
+          <select id="as-ionos-gpu-template">
+            <option value="">Loading…</option>
+          </select>
+          <div class="field-note">Cores, RAM and storage are fixed by the template and come attached to the VM — the RHCOS image is simply applied to that storage (no separate disk is created). Default quota is one H200-S — larger sizes need a limit increase via IONOS Support.</div>
         </div>
         <div class="form-group" id="as-ionos-cpu-family-group">
           <label for="as-ionos-cpu-family">CPU Family</label>
@@ -1242,19 +1250,19 @@
           </select>
         </div>
 
-        <div class="form-group">
+        <div class="form-group as-ionos-sized">
           <label for="as-ionos-cores">vCPU Cores</label>
           <input type="number" id="as-ionos-cores" value="4" min="1" style="width:100px" />
         </div>
-        <div class="form-group">
+        <div class="form-group as-ionos-sized">
           <label for="as-ionos-ram">RAM (GiB)</label>
           <input type="number" id="as-ionos-ram" value="8" min="1" style="width:100px" />
         </div>
-        <div class="form-group">
+        <div class="form-group as-ionos-sized">
           <label for="as-ionos-disk">Boot Disk (GB)</label>
           <input type="number" id="as-ionos-disk" value="120" min="10" style="width:100px" />
         </div>
-        <div class="form-group">
+        <div class="form-group as-ionos-sized">
           <label for="as-ionos-disk-type">Disk Type</label>
           <select id="as-ionos-disk-type">
             <option value="SSD Premium" selected>SSD Premium</option>
@@ -2882,6 +2890,7 @@
         datacenterLocation = opt?.dataset?.location || '';
         loadLans(tok, sel.value, opt?.text || '');
         loadIonosCpuFamilies();
+        applyIonosServerType();
         detectFrankfurt();
       };
     } catch (err) {
@@ -3012,6 +3021,7 @@
       // Capture location from selected DC option
       const dcOptEl = document.getElementById('datacenter-select');
       datacenterLocation = dcOptEl.options[dcOptEl.selectedIndex]?.dataset?.location || '';
+      applyIonosServerType();
 
       // Show connected strip
       document.getElementById('connect-form').classList.add('hidden');
@@ -3890,7 +3900,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
   // Toggle mode-specific fields; load CPU families when IONOS mode is selected
   document.querySelectorAll('input[name="as-ms-mode"]').forEach(r => r.addEventListener('change', () => {
     applyAsModeVisibility();
-    if (r.value === 'ionos') loadIonosCpuFamilies();
+    if (r.value === 'ionos') { loadIonosCpuFamilies(); applyIonosServerType(); }
   }));
 
   // Update Frankfurt diversity panel — always visible in IONOS mode.
@@ -4064,13 +4074,43 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
   });
 
   // Show/hide CPU family group based on instance type
-  document.getElementById('as-ionos-server-type').addEventListener('change', function () {
-    const isDedicatedCore = this.value === 'ENTERPRISE';
+  document.getElementById('as-ionos-server-type').addEventListener('change', applyIonosServerType);
+
+  // GPU VMs (H200) exist only at these locations; the template fixes the sizing.
+  const GPU_LOCATIONS = ['de/fra/2', 'gb/bhx'];
+  function applyIonosServerType() {
+    const sel   = document.getElementById('as-ionos-server-type');
+    const gpuOk = GPU_LOCATIONS.includes(datacenterLocation);
+    document.getElementById('as-ionos-gpu-option').disabled = !gpuOk;
+    if (sel.value === 'GPU' && !gpuOk) sel.value = 'ENTERPRISE';
+    const isGpu = sel.value === 'GPU';
+    const isDedicatedCore = sel.value === 'ENTERPRISE';
     document.getElementById('as-ionos-cpu-family-group').style.display = isDedicatedCore ? '' : 'none';
+    document.getElementById('as-ionos-gpu-group').style.display = isGpu ? '' : 'none';
+    document.querySelectorAll('.as-ionos-sized').forEach(el => { el.style.display = isGpu ? 'none' : ''; });
     if (isDedicatedCore && document.getElementById('as-ionos-cpu-family').options.length <= 1) {
       loadIonosCpuFamilies();
     }
-  });
+    if (isGpu) loadIonosGpuTemplates();
+  }
+
+  async function loadIonosGpuTemplates() {
+    const sel = document.getElementById('as-ionos-gpu-template');
+    if (!ionosToken) { sel.innerHTML = '<option value="">Connect to IONOS first</option>'; return; }
+    try {
+      const r = await fetch(`/api/ionos/gpu-templates?token=${encodeURIComponent(ionosToken)}`);
+      const { templates, error } = await r.json();
+      if (error) throw new Error(error);
+      if (!templates || !templates.length) { sel.innerHTML = '<option value="">No H200 templates found</option>'; return; }
+      const prev = sel.value;
+      sel.innerHTML = templates.map(t =>
+        `<option value="${escHtml(t.id)}">${escHtml(t.name)}  (${t.gpus}× H200 / ${t.cores} vCPU / ${t.ramGiB} GiB / ${t.storageGB} GB)</option>`
+      ).join('');
+      if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+    } catch (e) {
+      sel.innerHTML = `<option value="">Failed to load templates: ${escHtml(e.message)}</option>`;
+    }
+  }
 
   // IONOS image browser
   document.getElementById('as-ionos-browse-btn').addEventListener('click', async () => {
@@ -4245,7 +4285,8 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     const ionosInitReplicas = parseInt(document.getElementById('as-ionos-init-replicas').value, 10) || 1;
     const ionosImageId      = document.getElementById('as-ionos-image-id').value.trim();
     const ionosServerType   = document.getElementById('as-ionos-server-type').value;
-    const ionosCpuFamily    = ionosServerType === 'VCPU' ? '' : document.getElementById('as-ionos-cpu-family').value;
+    const ionosCpuFamily    = ionosServerType === 'ENTERPRISE' ? document.getElementById('as-ionos-cpu-family').value : '';
+    const ionosGpuTemplate  = ionosServerType === 'GPU' ? document.getElementById('as-ionos-gpu-template').value : '';
     const ionosAz           = document.getElementById('as-ionos-az').value;
     const ionosDiskAz       = document.getElementById('as-ionos-disk-az').value;
     const deployProvider    = document.getElementById('as-deploy-provider')?.checked || false;
@@ -4285,6 +4326,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     if (msMode === 'ionos') {
       if (!ionosMsName) { showError('as-error', 'Enter a MachineSet name for the IONOS MachineSet.'); return; }
       if (!ionosImageId) { showError('as-error', 'Enter the RHCOS image UUID (use Browse Images to find it).'); return; }
+      if (ionosServerType === 'GPU' && !ionosGpuTemplate) { showError('as-error', 'Select a GPU template (H200-S, H200-M, H200-L or H200-XL).'); return; }
       if (!ionosToken) { showError('as-error', 'IONOS API token is required for IONOS MachineSet creation.'); return; }
       if (!datacenterId) { showError('as-error', 'Connect to a VDC first (IONOS Datacenter ID is required).'); return; }
       if (frankfurtEnabled) {
@@ -4376,6 +4418,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
           // IONOS machine config (server field names)
           ionosImageId,
           serverType:           ionosServerType,
+          gpuTemplateId:        ionosGpuTemplate,
           cpuFamily:            ionosCpuFamily,
           region:               effectiveRegion,
           availabilityZone:     ionosAz,

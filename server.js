@@ -927,7 +927,7 @@ app.post('/api/setup-autoscaler', async (req, res) => {
           ionosToken, datacenterId,
           ionosImageId, cpuFamily, availabilityZone, diskAvailabilityZone,
           machCores, machRamGiB, machDiskGB, machDiskType, machLanId,
-          serverType, region,
+          serverType, region, gpuTemplateId,
           deployProvider,
           // Container registry for provider image
           registryType, registryImage, registryUsername, registryPassword,
@@ -1800,9 +1800,9 @@ echo "ALT_WRITE_OK"
 
       // ── Step 3: Create IONOS-backed MachineSet ────────────────────────────
       step(`Creating IONOS MachineSet "${targetMsName}"…`, 'working');
-      const ramMB      = (parseInt(machRamGiB, 10) || 8) * 1024;
+      let   ramMB      = (parseInt(machRamGiB, 10) || 8) * 1024;
       const diskGB     = parseInt(machDiskGB, 10) || 120;
-      const cores      = parseInt(machCores,  10) || 4;
+      let   cores      = parseInt(machCores,  10) || 4;
       const diskType   = (machDiskType === 'SSD Premium') ? 'SSD_PREMIUM' : 'SSD_STANDARD';
       const az         = availabilityZone     || 'AUTO';
       const diskAz     = diskAvailabilityZone || az;
@@ -1810,6 +1810,21 @@ echo "ALT_WRITE_OK"
       const lanId      = effectiveLanId;
       const srvType    = serverType           || 'ENTERPRISE';
       const isVcpu     = srvType === 'VCPU';
+      const isGpu      = srvType === 'GPU';
+
+      // GPU VMs are sized entirely by their template — read cores/RAM from it so
+      // the providerSpec and autoscaler annotations match what IONOS provisions.
+      let gpuCount = 0;
+      if (isGpu) {
+        if (!gpuTemplateId) throw new Error('A GPU template (H200-S/M/L/XL) must be selected.');
+        if (!GPU_LOCATIONS.includes(effectiveRegion))
+          throw new Error(`GPU VMs are only available in ${GPU_LOCATIONS.join(' and ')} (selected: ${effectiveRegion || 'unknown'}).`);
+        const tpl = await ionosGet(`/templates/${encodeURIComponent(gpuTemplateId)}`, ionosToken);
+        gpuCount = GPU_TEMPLATE_GPUS[tpl.properties?.name] || 0;
+        if (!gpuCount) throw new Error(`Template ${gpuTemplateId} (${tpl.properties?.name}) is not an H200 GPU template.`);
+        cores = tpl.properties.cores;
+        ramMB = tpl.properties.ram;
+      }
 
       // providerSpec raw value — serialised into the MachineSet spec.
       // Uses the ionoscloudproviderconfig.openshift.io/v1alpha1 API that the
@@ -1820,8 +1835,9 @@ echo "ALT_WRITE_OK"
         datacenterID:      effectiveDcId,
         cores,
         ram:               ramMB,
-        ...(isVcpu ? {} : { cpuFamily: cpuFam }),
+        ...(isVcpu || isGpu ? {} : { cpuFamily: cpuFam }),
         serverType:        srvType,
+        ...(isGpu ? { templateUuid: gpuTemplateId } : {}),
         ...(effectiveRegion ? { region: effectiveRegion } : {}),
         availabilityZone:  az,
         image:             effectiveImageId || ionosImageId,
@@ -1841,10 +1857,10 @@ echo "ALT_WRITE_OK"
       };
 
       const msLabelKey = 'machine.openshift.io/cluster-api-machineset';
-      const fraAnnotations = frankfurtDiversity ? {
+      const fraAnnotations = (frankfurtDiversity || isGpu) ? {
         'machine.openshift.io/vCPU':     String(cores),
         'machine.openshift.io/memoryMb': String(ramMB),
-        'machine.openshift.io/GPU':      '0',
+        'machine.openshift.io/GPU':      String(gpuCount),
         'machine.openshift.io/maxPods':  '250',
       } : {};
       const ionosMs = {
@@ -1884,9 +1900,11 @@ echo "ALT_WRITE_OK"
       await ocpApply(msApiBase, targetMsName, ionosMs);
       log(`MachineSet "${targetMsName}" created with IONOS providerSpec\n`);
       log(`  Image: ${effectiveImageId || ionosImageId}${effectiveImageId && effectiveImageId !== ionosImageId ? ` (copied to ${effectiveRegion})` : ''}\n`);
-      log(`  ${cores} cores / ${machRamGiB} GiB RAM / ${diskGB} GB ${diskType} / LAN ${lanId}\n`);
+      log(isGpu
+        ? `  GPU template ${gpuTemplateId}: ${gpuCount}× H200 / ${cores} cores / ${Math.round(ramMB / 1024)} GiB RAM (storage attached by template; image applied to it) / LAN ${lanId}\n`
+        : `  ${cores} cores / ${machRamGiB} GiB RAM / ${diskGB} GB ${diskType} / LAN ${lanId}\n`);
       log(`  VDC: ${effectiveDcId}${effectiveRegion ? ` (${effectiveRegion})` : ''}\n`);
-      log(`  Type: ${srvType}${isVcpu ? '' : ` / CPU: ${cpuFam}`} / AZ: ${az}\n`);
+      log(`  Type: ${srvType}${isVcpu || isGpu ? '' : ` / CPU: ${cpuFam}`} / AZ: ${az}\n`);
       step(`IONOS MachineSet "${targetMsName}" created`, 'ok');
 
       // Delete any stale Machines that belong to this MachineSet but have a different
@@ -2377,6 +2395,36 @@ app.get('/api/ionos/templates', async (req, res) => {
       storageGB: t.properties?.storageSize,
     }));
     res.json({ templates });
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
+// Cloud GPU VMs (NVIDIA H200) are sized by four fixed templates and only
+// offered at these locations (per docs.ionos.com Cloud GPU VM).
+const GPU_LOCATIONS = ['de/fra/2', 'gb/bhx'];
+const GPU_TEMPLATE_GPUS = { 'H200-S': 1, 'H200-M': 2, 'H200-L': 4, 'H200-XL': 8 };
+
+// GET /api/ionos/gpu-templates?token=...
+// The /templates catalog mixes Cube and GPU templates — keep only the H200 ones.
+app.get('/api/ionos/gpu-templates', async (req, res) => {
+  const { token } = req.query;
+  if (!token) return res.status(400).json({ error: 'token required' });
+  try {
+    const data = await ionosGet('/templates?depth=1', token);
+    const order = Object.keys(GPU_TEMPLATE_GPUS);
+    const templates = (data.items || [])
+      .filter(t => GPU_TEMPLATE_GPUS[t.properties?.name])
+      .map(t => ({
+        id:        t.id,
+        name:      t.properties.name,
+        cores:     t.properties.cores,
+        ramGiB:    Math.round((t.properties.ram || 0) / 1024),
+        storageGB: t.properties.storageSize,
+        gpus:      GPU_TEMPLATE_GPUS[t.properties.name],
+      }))
+      .sort((a, b) => order.indexOf(a.name) - order.indexOf(b.name));
+    res.json({ templates, locations: GPU_LOCATIONS });
   } catch (err) {
     res.status(err.status || 502).json({ error: err.message });
   }
