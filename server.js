@@ -685,7 +685,7 @@ app.post('/api/deploy-provider', async (req, res) => {
         { apiGroups: ['machine.openshift.io'], resources: ['machinesets/status'],    verbs: ['get','patch','update'] },
         { apiGroups: ['machine.openshift.io'], resources: ['machinesets/finalizers'],verbs: ['patch','update'] },
         { apiGroups: [''],                     resources: ['secrets'],               verbs: ['get','list','watch'] },
-        { apiGroups: [''],                     resources: ['nodes'],                 verbs: ['get','list','watch','delete'] },
+        { apiGroups: [''],                     resources: ['nodes'],                 verbs: ['get','list','watch','patch','update','delete'] },
         { apiGroups: ['coordination.k8s.io'],  resources: ['leases'],               verbs: ['get','list','watch','create','update','patch','delete'] },
         { apiGroups: [''],                     resources: ['events'],                verbs: ['create','patch'] }
       ]
@@ -791,15 +791,23 @@ app.post('/api/deploy-provider', async (req, res) => {
     const approverScript = [
       'echo "ionos-machine-auto-approver started"',
       'while true; do',
-      '  kubectl get csr --no-headers 2>/dev/null | while read name age signer requestor dur cond; do',
+      // --request-timeout stops one hung API call blocking the loop forever, and errors are
+      // logged (not discarded). Uses the cluster's own `oc` CLI image so the client version
+      // always matches the cluster (an unpinned bitnami/kubectl:latest moved to kubectl v1.37
+      // and wedged/failed against OCP 4.19 / Kubernetes 1.32).
+      '  OUT=$(oc get csr --request-timeout=30s --no-headers 2>&1) || echo "list failed: $OUT"',
+      '  echo "$OUT" | while read name age signer requestor dur cond; do',
       '    if [ "$cond" = "Pending" ]; then',
       '      echo "Approving CSR: $name"',
-      '      kubectl certificate approve "$name" 2>&1 || true',
+      '      oc adm certificate approve "$name" --request-timeout=30s 2>&1 || true',
       '    fi',
       '  done',
       '  sleep 30',
       'done'
     ].join('\n');
+    // Digest of the 4.19.55 release payload's `cli` image (oc adm release info --image-for=cli).
+    // Update this to the CLI image of your cluster's release when deploying elsewhere.
+    const approverImage = 'quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:139bb9a6234835efdfbb3890021ed3442632d277d2da9c3b462d2e62b7acc871';
     await ocpApply(depBase, 'ionos-machine-auto-approver', {
       apiVersion: 'apps/v1', kind: 'Deployment',
       metadata: { name: 'ionos-machine-auto-approver', namespace: ns, labels: { app: 'ionos-machine-auto-approver' } },
@@ -817,9 +825,12 @@ app.post('/api/deploy-provider', async (req, res) => {
               { key: 'node.kubernetes.io/unreachable',    effect: 'NoExecute', tolerationSeconds: 120 }
             ],
             containers: [{
-              name: 'approver', image: 'bitnami/kubectl:latest', imagePullPolicy: 'Always',
+              name: 'approver', image: approverImage, imagePullPolicy: 'IfNotPresent',
               command: ['/bin/sh', '-c'], args: [approverScript],
-              resources: { requests: { cpu: '10m', memory: '32Mi' }, limits: { cpu: '50m', memory: '64Mi' } },
+              env: [{ name: 'HOME', value: '/tmp' }],
+              // 50m CPU / 64Mi was far too small: kubectl API discovery (264 API resources on
+              // OCP 4.19) was CPU-throttled ~89% of the time and the loop wedged.
+              resources: { requests: { cpu: '50m', memory: '64Mi' }, limits: { cpu: '500m', memory: '256Mi' } },
               securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'] } }
             }],
             securityContext: { runAsNonRoot: true, seccompProfile: { type: 'RuntimeDefault' } },
@@ -828,7 +839,7 @@ app.post('/api/deploy-provider', async (req, res) => {
         }
       }
     });
-    log.push('Deployment "ionos-machine-auto-approver" created/updated (image: bitnami/kubectl:latest)');
+    log.push('Deployment "ionos-machine-auto-approver" created/updated (image: cluster oc CLI, digest-pinned)');
     } // end else (approverRunning)
 
     res.json({ ok: true, log });
@@ -1015,7 +1026,7 @@ app.post('/api/setup-autoscaler', async (req, res) => {
           { apiGroups: ['machine.openshift.io'], resources: ['machinesets/status'],    verbs: ['get','patch','update'] },
           { apiGroups: ['machine.openshift.io'], resources: ['machinesets/finalizers'],verbs: ['patch','update'] },
           { apiGroups: [''],                     resources: ['secrets'],               verbs: ['get','list','watch'] },
-          { apiGroups: [''],                     resources: ['nodes'],                 verbs: ['get','list','watch','delete'] },
+          { apiGroups: [''],                     resources: ['nodes'],                 verbs: ['get','list','watch','patch','update','delete'] },
           { apiGroups: ['coordination.k8s.io'],  resources: ['leases'],               verbs: ['get','list','watch','create','update','patch','delete'] },
           { apiGroups: [''],                     resources: ['events'],                verbs: ['create','patch'] }
         ]
