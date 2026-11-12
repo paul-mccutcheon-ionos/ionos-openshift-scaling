@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.8.5</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.8.6</span>
   </div>
 
   <div class="banner-actions">
@@ -1298,8 +1298,8 @@
         </div>
         <div class="form-group">
           <label for="as-ionos-lan">LAN ID</label>
-          <input type="number" id="as-ionos-lan" value="1" min="1" style="width:100px" />
-          <div class="field-note">Private LAN ID for the worker network (same as existing worker nodes)</div>
+          <input type="number" id="as-ionos-lan" placeholder="detecting…" min="1" style="width:100px" />
+          <div class="field-note" id="as-ionos-lan-note">Private LAN ID for the worker network (same as existing worker nodes). Filled in automatically from the cluster once connected.</div>
         </div>
       </div>
 
@@ -4173,6 +4173,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
       loadIonosCpuFamilies();
     }
     if (isGpu) loadIonosGpuTemplates();
+    detectPrivateLan();
 
     // Naming convention: <type>-ionos, used for both the MachineSet and its MachineAutoscaler.
     const nameEl   = document.getElementById('as-ionos-ms-name');
@@ -4180,6 +4181,33 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     const known    = ['dcore-ionos', 'vcpu-ionos', 'gpu-ionos'];
     nameEl.placeholder = `e.g. ${suggest}`;
     if (!nameEl.value.trim() || known.includes(nameEl.value.trim())) nameEl.value = suggest;
+  }
+
+  // The worker NIC must be on the cluster's PRIVATE LAN. A hardcoded default of 1 put a GPU worker on the
+  // public LAN, where it cannot reach the cluster. Detect it from the cluster itself instead.
+  let publicLanIds = [];
+  let lanDetectedFor = '';
+  document.getElementById('as-ionos-lan').addEventListener('input', function () { this.dataset.touched = '1'; });
+  async function detectPrivateLan(force) {
+    const inp = document.getElementById('as-ionos-lan');
+    const note = document.getElementById('as-ionos-lan-note');
+    if (!ionosToken || !datacenterId) return;
+    const key = datacenterId + '|' + (clusterApiUrl || '');
+    if (!force && lanDetectedFor === key) return;
+    lanDetectedFor = key;
+    try {
+      const d = await apiPost('/api/ionos/detect-private-lan', { ionosToken, datacenterId, clusterApiUrl, ocpToken });
+      publicLanIds = d.publicLanIds || [];
+      if (d.lanId) {
+        if (!inp.dataset.touched) inp.value = d.lanId;
+        note.innerHTML = `Private worker LAN: <strong>${d.lanId}${d.name ? ' &ldquo;' + escHtml(d.name) + '&rdquo;' : ''}</strong> &mdash; detected from ${escHtml(d.source)}.`;
+      } else {
+        note.textContent = d.note || 'Could not detect the private LAN — enter the LAN ID of the cluster network (not the public LAN).';
+      }
+    } catch (e) {
+      lanDetectedFor = '';
+      note.textContent = 'Could not detect the private LAN (' + e.message + ') — enter the cluster network LAN ID.';
+    }
   }
 
   async function loadIonosGpuTemplates() {
@@ -4386,7 +4414,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     const ionosRamGiB      = parseInt(document.getElementById('as-ionos-ram').value, 10) || 8;
     const ionosDiskGB      = parseInt(document.getElementById('as-ionos-disk').value, 10) || 120;
     const ionosDiskType    = document.getElementById('as-ionos-disk-type').value;
-    const ionosLanId       = parseInt(document.getElementById('as-ionos-lan').value, 10) || 1;
+    const ionosLanId       = parseInt(document.getElementById('as-ionos-lan').value, 10) || 0;
 
     // Frankfurt Intra-geographical Diversity
     const frankfurtEnabled    = document.getElementById('frankfurt-diversity-enabled').checked;
@@ -4417,6 +4445,9 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
       if (ionosServerType === 'GPU' && !ionosGpuTemplate) { showError('as-error', 'Select a GPU template (H200-S, H200-M, H200-L or H200-XL).'); return; }
       if (!ionosToken) { showError('as-error', 'IONOS API token is required for IONOS MachineSet creation.'); return; }
       if (!datacenterId) { showError('as-error', 'Connect to a VDC first (IONOS Datacenter ID is required).'); return; }
+      if (!ionosLanId) { showError('as-error', 'Enter the LAN ID of the cluster\'s private worker network (it is filled in automatically once the cluster is detected).'); return; }
+      if (publicLanIds.includes(ionosLanId) &&
+          !confirm(`LAN ${ionosLanId} is the PUBLIC LAN. Worker nodes on it get a public IP and cannot reach the cluster, so they will never join.\n\nContinue anyway?`)) return;
       if (frankfurtEnabled) {
         if (!frankfurtStaticIp) { showError('as-error', 'Enter a static IP for the worker node (Frankfurt diversity — primary VDC subnet, e.g. 10.7.224.30).'); return; }
         if (!frankfurtIgnitionIp) { showError('as-error', 'Enter the management host primary VDC IP (Frankfurt diversity field, e.g. 10.7.224.11).'); return; }

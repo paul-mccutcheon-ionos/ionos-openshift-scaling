@@ -2743,6 +2743,72 @@ app.post('/api/ionos/lans', async (req, res) => {
   }
 });
 
+// Which LAN is this cluster's PRIVATE worker network? Workers must sit on it: it is where the other
+// nodes live and where the Ignition server is reachable. A NIC on the public LAN gets a public IP,
+// cannot reach the cluster, and the node never joins.
+//   1. ground truth: the private LAN that holds the cluster nodes' own IPs;
+//   2. the LAN that the existing IONOS MachineSets already use;
+//   3. the only private LAN in the VDC that has NICs attached.
+app.post('/api/ionos/detect-private-lan', async (req, res) => {
+  if (!requireFields(res, req.body, ['ionosToken', 'datacenterId'])) return;
+  const { ionosToken, datacenterId, clusterApiUrl, ocpToken } = req.body;
+  try {
+    const data = await ionosGet(`/datacenters/${encodeURIComponent(datacenterId)}/lans?depth=3`, ionosToken);
+    const lans = (data?.items || []).map(l => ({
+      id:     parseInt(l.id, 10),
+      name:   l.properties?.name || '',
+      public: !!l.properties?.public,
+      ips:    (l.entities?.nics?.items || []).flatMap(n => n.properties?.ips || [])
+    }));
+    const publicLanIds = lans.filter(l => l.public).map(l => l.id);
+    const label = l => `LAN ${l.id}${l.name ? ` "${l.name}"` : ''}`;
+
+    let nodeIPs = new Set(), msLans = [];
+    if (clusterApiUrl && ocpToken) {
+      try {
+        const nodes = await ocpGet(clusterApiUrl, '/api/v1/nodes', ocpToken);
+        for (const n of nodes.items || [])
+          for (const a of n.status?.addresses || []) if (a.type === 'InternalIP') nodeIPs.add(a.address);
+      } catch (_) {}
+      try {
+        const ms = await ocpGet(clusterApiUrl, `/apis/machine.openshift.io/v1beta1/namespaces/${MAPI_NS}/machinesets`, ocpToken);
+        for (const m of ms.items || []) {
+          const v = m.spec?.template?.spec?.providerSpec?.value;
+          if (v?.kind === 'IONOSCloudMachineProviderSpec' && v.datacenterID === datacenterId)
+            for (const n of v.nics || []) if (n.lan) msLans.push(parseInt(n.lan, 10));
+        }
+      } catch (_) {}
+    }
+
+    // 1. the private LAN holding the most cluster node IPs
+    let best = null;
+    for (const l of lans) {
+      if (l.public) continue;
+      const n = l.ips.filter(ip => nodeIPs.has(ip)).length;
+      if (n && (!best || n > best.n)) best = { l, n };
+    }
+    if (best) return res.json({ lanId: best.l.id, name: best.l.name, source: `the ${best.n} cluster node(s) attached to it`, publicLanIds });
+
+    // 2. the LAN existing MachineSets use (most common, private only)
+    const counts = {};
+    msLans.filter(id => !publicLanIds.includes(id)).forEach(id => { counts[id] = (counts[id] || 0) + 1; });
+    const topMs = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+    if (topMs) {
+      const l = lans.find(x => x.id === parseInt(topMs[0], 10));
+      return res.json({ lanId: parseInt(topMs[0], 10), name: l?.name || '', source: 'your existing MachineSets', publicLanIds });
+    }
+
+    // 3. the only private LAN with NICs attached
+    const used = lans.filter(l => !l.public && l.ips.length);
+    if (used.length === 1)
+      return res.json({ lanId: used[0].id, name: used[0].name, source: 'the only private LAN in use in this VDC', publicLanIds });
+
+    res.json({ lanId: null, publicLanIds, note: `Could not tell which private LAN the cluster uses (candidates: ${lans.filter(l => !l.public).map(label).join(', ') || 'none'}).` });
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
 // Return CPU families available at the datacenter's location.
 // Used to populate the dynamic CPU Family dropdown when creating a Dedicated Core MachineSet.
 app.post('/api/ionos/location-cpu-families', async (req, res) => {
