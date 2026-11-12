@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.9.3</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.10.0</span>
   </div>
 
   <div class="banner-actions">
@@ -560,6 +560,10 @@
     <div class="nav-item" data-section="autoscaling">
       <span class="nav-item-icon">&#9889;</span>
       Machine Autoscaling Management
+    </div>
+    <div class="nav-item" data-section="controlplane">
+      <span class="nav-item-icon">&#128737;</span>
+      Control Plane
     </div>
     <div class="nav-item" data-section="healthchecks">
       <span class="nav-item-icon">&#129657;</span>
@@ -1680,6 +1684,113 @@
     Connect to your cluster first using the <strong style="color:#60a5fa">Cluster Connection</strong> tab.
   </div>
 
+  <!-- ── Control Plane: status ─────────────────────────────────────────────── -->
+  <div class="card" id="cp-status-card" style="display:none">
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.5rem;margin-bottom:0.75rem">
+      <h2 style="margin:0">&#128737; Managed Control Plane</h2>
+      <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+        <button id="cp-check-btn" onclick="cpStatus()"
+          style="background:#1e3a5f;color:#93c5fd;border:1px solid #2563eb;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;cursor:pointer">&#8635; Check readiness</button>
+        <button onclick="cpPrepare()"
+          style="background:#1a2a1a;color:#6ee7b7;border:1px solid #065f46;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;cursor:pointer">Prepare master.ign</button>
+        <button onclick="cpCopyProfile()"
+          style="background:#14233a;color:#93c5fd;border:1px solid #2563eb;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;cursor:pointer" title="Copies each control-plane node's type, size and storage as text for the test report">Copy profile for test report</button>
+        <button id="cp-image-btn" onclick="cpCreateImage()"
+          style="background:#2d1f4a;color:#c4b5fd;border:1px solid #5b21b6;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;cursor:pointer">Create master image</button>
+      </div>
+    </div>
+    <p style="font-size:0.82rem;color:#64748b;margin:0 0 0.75rem">
+      The three fixed control-plane nodes were built by hand and are invisible to the Machine API. New control-plane nodes
+      are added <strong style="color:#94a3b8">alongside</strong> them as Machine-API-managed machines (a MachineSet per machine type, like the
+      workers), so etcd keeps its quorum the whole time. The old nodes are retired later, one at a time.
+      <strong style="color:#94a3b8">Check readiness</strong> only reads.
+    </p>
+    <div style="font-size:0.82rem;color:#c4b5fd;background:#1b1535;border:1px solid #3b2a6b;border-radius:8px;padding:0.55rem 0.8rem;margin:0 0 0.8rem">
+      <strong>Why Cubes:</strong> the goal is to run the Red Hat validation / certification tests (OPCT) against a cluster whose control-plane nodes
+      use <strong>DAS</strong> storage. Cubes are the only IONOS VM type with DAS, so the target is three Cube control-plane nodes. The storage of each node is shown below.
+    </div>
+    <div id="cp-status-result" style="font-size:0.85rem"></div>
+    <pre id="cp-op-log" class="hidden" style="max-height:220px;overflow-y:auto;background:#0a0d14;padding:0.6rem 0.8rem;border-radius:6px;font-size:0.75rem;color:#94a3b8;white-space:pre-wrap;margin-top:0.75rem"></pre>
+  </div>
+
+  <!-- ── Control Plane: add a node ─────────────────────────────────────────── -->
+  <div class="card" id="cp-add-card" style="display:none">
+    <h2>&#10133; Add a control-plane node</h2>
+    <p style="font-size:0.82rem;color:#64748b;margin:0 0 0.9rem">
+      Creates (or scales) the MachineSet <code style="color:#38bdf8">control-dcore-ionos</code> or <code style="color:#38bdf8">control-cube-ionos</code>.
+      One node at a time is recommended. The step checks cluster health again on the server and refuses to run if anything is off;
+      nothing is rolled back or removed automatically.
+    </p>
+    <div class="form-grid" style="grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:0.8rem">
+      <div class="form-group">
+        <label for="cp-type">Machine type</label>
+        <select id="cp-type" onchange="cpTypeChanged()">
+          <option value="cube" selected>Cube (cube-ionos) &mdash; DAS storage</option>
+          <option value="dcore">Dedicated Core (dcore-ionos) &mdash; SSD Premium</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="cp-count">How many</label>
+        <input type="number" id="cp-count" value="1" min="1" max="2" style="width:90px" />
+      </div>
+      <div class="form-group cp-dcore" style="display:none">
+        <label for="cp-cores">Cores</label>
+        <input type="number" id="cp-cores" value="8" min="4" style="width:90px" />
+      </div>
+      <div class="form-group cp-dcore" style="display:none">
+        <label for="cp-ram">RAM (GiB)</label>
+        <input type="number" id="cp-ram" value="16" min="16" style="width:90px" />
+      </div>
+      <div class="form-group cp-dcore" style="display:none">
+        <label for="cp-disk">Disk (GB, SSD Premium)</label>
+        <input type="number" id="cp-disk" value="480" min="120" style="width:100px" />
+        <div class="field-note">480 GB matches the storage built into Basic Cube L, so the two variants are comparable.</div>
+      </div>
+      <div class="form-group cp-dcore" style="display:none">
+        <label for="cp-cpufamily">CPU family</label>
+        <input type="text" id="cp-cpufamily" value="INTEL_SIERRAFOREST" style="width:100%" />
+      </div>
+      <div class="form-group cp-cube">
+        <label for="cp-cube-template">Cube template</label>
+        <select id="cp-cube-template"><option value="">Loading…</option></select>
+        <div class="field-note">Needs at least 4 vCPU and 16 GB RAM; the template includes the storage.</div>
+      </div>
+      <div class="form-group">
+        <label for="cp-image">Master boot image</label>
+        <select id="cp-image"><option value="">Run &ldquo;Check readiness&rdquo; first</option></select>
+      </div>
+    </div>
+    <div class="field-note" id="cp-lan-note" style="margin-top:0.5rem">Network: the private cluster LAN from the Autoscaling tab (detected automatically).</div>
+    <div style="margin-top:0.9rem;display:flex;gap:0.9rem;align-items:center;flex-wrap:wrap">
+      <button onclick="cpBackup()" style="background:#14233a;color:#93c5fd;border:1px solid #2563eb;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;cursor:pointer">Take etcd snapshot</button>
+      <label style="display:flex;gap:0.5rem;align-items:center;font-size:0.85rem;color:#e2e8f0;cursor:pointer">
+        <input type="checkbox" id="cp-backup-ok" style="accent-color:#3b82f6;width:15px;height:15px" />
+        A recent etcd snapshot exists
+      </label>
+      <button id="cp-add-btn" onclick="cpAdd()" disabled
+        style="background:#14532d;color:#86efac;border:1px solid #166534;border-radius:6px;padding:0.4rem 1.1rem;font-size:0.85rem;font-weight:600;cursor:pointer;opacity:0.5">
+        Add control-plane node
+      </button>
+    </div>
+    <pre id="cp-add-log" class="hidden" style="max-height:260px;overflow-y:auto;background:#0a0d14;padding:0.6rem 0.8rem;border-radius:6px;font-size:0.75rem;color:#94a3b8;white-space:pre-wrap;margin-top:0.85rem"></pre>
+    <div id="cp-add-done" class="hidden" style="background:#052e16;border:1px solid #166534;border-radius:8px;padding:0.8rem 1rem;font-size:0.85rem;color:#6ee7b7;margin-top:0.75rem"></div>
+    <div class="error-box" id="cp-add-error"></div>
+  </div>
+
+  <!-- ── Control Plane: retire (dry run) ───────────────────────────────────── -->
+  <div class="card" id="cp-retire-card" style="display:none">
+    <h2>&#128260; Retire a fixed control-plane node &mdash; dry run</h2>
+    <p style="font-size:0.82rem;color:#64748b;margin:0 0 0.9rem">
+      Shows the safety checks and the exact ordered steps for removing one of the hand-built nodes once its replacement is in place.
+      <strong style="color:#94a3b8">Nothing is changed</strong> &mdash; executing a retire is a separate, deliberate step.
+    </p>
+    <div style="display:flex;gap:0.6rem;align-items:center;flex-wrap:wrap">
+      <select id="cp-retire-node" style="min-width:180px"><option value="">Run &ldquo;Check readiness&rdquo; first</option></select>
+      <button onclick="cpRetirePlan()" style="background:#1e3a5f;color:#93c5fd;border:1px solid #2563eb;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;cursor:pointer">Show plan</button>
+    </div>
+    <div id="cp-retire-result" style="font-size:0.85rem;margin-top:0.8rem"></div>
+  </div>
+
   <!-- ── Card: Existing Health Checks ──────────────────────────────────────── -->
   <div class="card hidden" id="mhc-list-card">
     <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.75rem;margin-bottom:1rem">
@@ -2362,6 +2473,7 @@
     connection:  ['connect-card', 'overview-card', 'machinesets-card', 'nodes-card'],
     manual:      ['manual-connect-hint', 'scaling-action-card', 'scale-in-card', 'add-node-card', 'csrs-card'],
     autoscaling:  ['autoscaling-connect-hint', 'post-upgrade-card', 'machine-api-status-card', 'autoscale-card'],
+    controlplane:    ['cp-status-card', 'cp-add-card', 'cp-retire-card'],
     healthchecks:    ['healthchecks-connect-hint', 'mhc-list-card', 'mhc-create-card'],
     'install-cluster': ['new-cluster-card'],
     compliance:      ['opct-preflight-card', 'opct-start-card', 'opct-status-card', 'opct-report-card'],
@@ -2662,6 +2774,222 @@
     }
   }
 
+  // ── Control Plane: managed control-plane nodes ─────────────────────────────
+  function cpBody(extra) {
+    return Object.assign({ clusterApiUrl, ocpToken, mgmtHost, sshUser, sshKey, sshPassphrase, ionosToken, datacenterId }, extra || {});
+  }
+  let cpLastStatus = null;
+
+  function cpNeedConnection(el) {
+    if (clusterApiUrl && ocpToken) return false;
+    el.innerHTML = '<div style="color:#f87171">Connect to a cluster first (Cluster Connection tab).</div>';
+    return true;
+  }
+
+  // Reads a server-sent-events response (the same format the other long-running flows use).
+  async function cpStream(path, body, logEl, onDone, onError) {
+    logEl.classList.remove('hidden'); logEl.textContent = '';
+    try {
+      const resp = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      if (!resp.ok || !resp.body) { const j = await resp.json().catch(() => ({})); onError(j.error || 'HTTP ' + resp.status); return; }
+      const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf = '';
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let i;
+        while ((i = buf.indexOf('\n\n')) !== -1) {
+          const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
+          for (const line of chunk.split('\n')) {
+            if (!line.startsWith('data: ')) continue;
+            let ev; try { ev = JSON.parse(line.slice(6)); } catch (_) { continue; }
+            if (ev.type === 'step') logEl.textContent += '▸ ' + ev.label + (ev.status === 'ok' ? '  ✓' : '') + '\n';
+            else if (ev.type === 'log') logEl.textContent += ev.text;
+            else if (ev.type === 'done') onDone(ev.message || '', ev.data);
+            else if (ev.type === 'error') onError(ev.message);
+            logEl.scrollTop = logEl.scrollHeight;
+          }
+        }
+      }
+    } catch (e) { onError(e.message); }
+  }
+
+  function cpRender(d) {
+    const out = document.getElementById('cp-status-result');
+    const icon = { ok: ['&#10003;', '#6ee7b7'], warn: ['&#9888;', '#fbbf24'], block: ['&#10007;', '#f87171'] };
+    const rows = d.masters.map(m => `<tr>
+      <td style="padding:0.2rem 0.6rem 0.2rem 0"><code style="color:#38bdf8">${escHtml(m.name)}</code></td>
+      <td style="padding:0.2rem 0.6rem">${escHtml(m.ip || '')}</td>
+      <td style="padding:0.2rem 0.6rem;color:${m.ready ? '#6ee7b7' : '#f87171'}">${m.ready ? 'Ready' : 'NotReady'}</td>
+      <td style="padding:0.2rem 0.6rem;color:${m.managed ? '#6ee7b7' : '#94a3b8'}">${m.managed ? 'Machine-managed (' + escHtml(m.machineSet || m.machine) + ')' : 'fixed (hand-built)'}</td>
+      <td style="padding:0.2rem 0.6rem;color:${m.etcdPod?.ready ? '#6ee7b7' : '#f87171'}">${m.etcdPod ? (m.etcdPod.ready ? 'etcd Ready' : 'etcd starting') : 'no etcd pod'}</td>
+      <td style="padding:0.2rem 0.6rem;color:${/DAS/.test((d.storage?.[m.name]?.volumes || []).join()) ? '#c4b5fd' : '#94a3b8'}">${escHtml(d.storage?.[m.name] ? d.storage[m.name].type + ' · ' + d.storage[m.name].volumes.join(', ') : '')}</td></tr>`).join('');
+    const das = d.masters.filter(m => /DAS/.test((d.storage?.[m.name]?.volumes || []).join())).length;
+    const nlb = Array.isArray(d.nlb)
+      ? d.nlb.map(r => `<div style="color:#94a3b8">port ${r.port} &rarr; ${r.targets.map(escHtml).join(', ')}</div>`).join('')
+      : `<div style="color:#64748b">${escHtml(d.nlb?.error || 'not checked (IONOS token / datacenter needed)')}</div>`;
+    const checks = d.checks.map(c => {
+      const [ic, col] = icon[c.status] || icon.warn;
+      return `<div style="display:flex;gap:0.6rem;margin:0.3rem 0;align-items:baseline"><span style="color:${col};font-weight:700;width:1rem;flex-shrink:0">${ic}</span>
+        <span><span style="color:#e2e8f0">${escHtml(c.title)}</span><div style="color:#64748b;font-size:0.8rem">${escHtml(c.detail || '')}</div></span></div>`;
+    }).join('');
+    out.innerHTML = `
+      <div style="margin-bottom:0.6rem;color:#94a3b8">OpenShift ${escHtml(d.version || '')} &middot; etcd: ${d.etcd.podsReady}/${d.etcd.pods} pods ready &mdash; ${escHtml(d.etcd.message || '')}</div>
+      <table style="border-collapse:collapse;margin-bottom:0.4rem">${rows}</table>
+      <div style="margin-bottom:0.7rem;color:#c4b5fd;font-size:0.82rem">Control-plane nodes on DAS storage (Cube): <strong>${das} of ${d.masters.length}</strong> &mdash; target for the certification run: all control-plane nodes on DAS.</div>
+      <div style="margin-bottom:0.7rem"><div style="color:#64748b;font-size:0.78rem;margin-bottom:0.15rem">API / machine-config load balancer targets</div>${nlb}</div>
+      ${checks}
+      <div style="margin-top:0.5rem;color:${d.canAdd ? '#6ee7b7' : '#fbbf24'};font-weight:600">${d.canAdd ? '&#10003; Ready to add a control-plane node.' : '&#9888; Not ready yet &mdash; resolve the items marked &#10007;.'}</div>`;
+
+    // image select
+    const imgSel = document.getElementById('cp-image');
+    const avail = (d.masterImages || []).filter(i => i.state === 'AVAILABLE');
+    imgSel.innerHTML = avail.length ? avail.map(i => `<option value="${escHtml(i.id)}">${escHtml(i.name)}</option>`).join('') : '<option value="">No master image yet &mdash; use &ldquo;Create master image&rdquo;</option>';
+    // retire select: only the fixed nodes
+    const rs = document.getElementById('cp-retire-node');
+    const fixed = d.masters.filter(m => !m.managed);
+    rs.innerHTML = fixed.length ? fixed.map(m => `<option value="${escHtml(m.name)}">${escHtml(m.name)} (${escHtml(m.ip || '')})</option>`).join('') : '<option value="">No fixed control-plane nodes</option>';
+    cpUpdateAddButton();
+  }
+
+  function cpUpdateAddButton() {
+    const btn = document.getElementById('cp-add-btn');
+    const ok = !!(cpLastStatus && cpLastStatus.canAdd) && document.getElementById('cp-backup-ok').checked;
+    btn.disabled = !ok; btn.style.opacity = ok ? '1' : '0.5';
+  }
+  document.getElementById('cp-backup-ok').addEventListener('change', cpUpdateAddButton);
+
+  async function cpStatus() {
+    const out = document.getElementById('cp-status-result');
+    if (cpNeedConnection(out)) return;
+    const btn = document.getElementById('cp-check-btn');
+    btn.disabled = true; out.innerHTML = '<div style="color:#64748b">Checking the control plane, etcd, operators and the management host&hellip;</div>';
+    try {
+      cpLastStatus = await apiPost('/api/control-plane/status', cpBody());
+      cpRender(cpLastStatus);
+      detectPrivateLan();
+    } catch (e) { out.innerHTML = `<div style="color:#f87171">Check failed: ${escHtml(e.message)}</div>`; }
+    finally { btn.disabled = false; }
+  }
+
+  function cpTypeChanged() {
+    const cube = document.getElementById('cp-type').value === 'cube';
+    document.querySelectorAll('.cp-dcore').forEach(el => { el.style.display = cube ? 'none' : ''; });
+    document.querySelectorAll('.cp-cube').forEach(el => { el.style.display = cube ? '' : 'none'; });
+    if (cube) cpLoadCubeTemplates();
+  }
+
+  async function cpLoadCubeTemplates() {
+    const sel = document.getElementById('cp-cube-template');
+    if (!ionosToken) { sel.innerHTML = '<option value="">Connect to IONOS first</option>'; return; }
+    try {
+      const r = await fetch(`/api/ionos/templates?token=${encodeURIComponent(ionosToken)}`);
+      const { templates, error } = await r.json();
+      if (error) throw new Error(error);
+      const small = t => (t.cores || 0) < 4 || (t.ramGB || 0) < 16;      // control-plane minimum
+      sel.innerHTML = templates.map(t => `<option value="${escHtml(t.id)}"${small(t) ? ' disabled' : ''}>${escHtml(t.name)}  (${t.cores} vCPU / ${t.ramGB} GB / ${t.storageGB} GB storage)${small(t) ? ' — too small' : ''}</option>`).join('');
+      const pref = [...sel.options].find(o => /Basic Cube L/.test(o.text) && !o.disabled) || [...sel.options].find(o => !o.disabled);
+      if (pref) sel.value = pref.value;
+    } catch (e) { sel.innerHTML = `<option value="">Failed to load templates: ${escHtml(e.message)}</option>`; }
+  }
+
+  // A plain-text description of what the control plane runs on, to attach to a test (OPCT) report.
+  async function cpCopyProfile() {
+    const out = document.getElementById('cp-status-result');
+    if (!cpLastStatus) { await cpStatus(); }
+    const d = cpLastStatus; if (!d) return;
+    const lines = ['Control-plane profile', '=====================',
+      'Date:        ' + new Date().toISOString(),
+      'OpenShift:   ' + (d.version || ''),
+      'etcd:        ' + d.etcd.podsReady + '/' + d.etcd.pods + ' members ready (' + (d.etcd.message || '') + ')',
+      'Datacenter:  ' + (datacenterId || ''), '', 'Nodes:'];
+    d.masters.forEach(m => {
+      const s = d.storage?.[m.name];
+      lines.push('  ' + m.name + '  ' + (m.ip || '') + '  ' + (m.managed ? 'Machine-managed (' + (m.machineSet || m.machine) + ')' : 'fixed (hand-built)') +
+        (s ? '  |  ' + s.type + ' ' + s.cores + ' vCPU / ' + s.ramGiB + ' GiB' + (s.cpuFamily ? ' (' + s.cpuFamily + ')' : '') + '  |  storage: ' + s.volumes.join(', ') : '') + '  |  ' + (m.ready ? 'Ready' : 'NotReady'));
+    });
+    const das = d.masters.filter(m => /DAS/.test((d.storage?.[m.name]?.volumes || []).join())).length;
+    lines.push('', 'Control-plane nodes on DAS storage: ' + das + ' of ' + d.masters.length);
+    lines.push('Note: Cube servers use vCPUs, Dedicated Core servers use dedicated physical cores - compare results with that in mind.');
+    const text = lines.join(String.fromCharCode(10));
+    try { await navigator.clipboard.writeText(text); out.insertAdjacentHTML('beforeend', '<div style="color:#6ee7b7;margin-top:0.5rem">&#10003; Profile copied to the clipboard.</div>'); }
+    catch (_) { out.insertAdjacentHTML('beforeend', '<pre style="background:#0a0d14;padding:0.6rem;border-radius:6px;margin-top:0.5rem;white-space:pre-wrap;font-size:0.75rem">' + escHtml(text) + '</pre>'); }
+  }
+
+  async function cpPrepare() {
+    const out = document.getElementById('cp-status-result');
+    if (cpNeedConnection(out)) return;
+    out.innerHTML = '<div style="color:#64748b">Creating master.ign on the management host&hellip;</div>';
+    try { const d = await apiPost('/api/control-plane/prepare', cpBody()); out.innerHTML = `<div style="color:#6ee7b7">&#10003; ${escHtml(d.message)}</div>`; }
+    catch (e) { out.innerHTML = `<div style="color:#f87171">Prepare failed: ${escHtml(e.message)}</div>`; }
+  }
+
+  async function cpBackup() {
+    const log = document.getElementById('cp-add-log');
+    if (cpNeedConnection(document.getElementById('cp-add-error'))) return;
+    log.classList.remove('hidden'); log.textContent = 'Taking an etcd snapshot (oc debug on a control-plane node)… about a minute.\n';
+    try {
+      const d = await apiPost('/api/control-plane/backup', cpBody());
+      log.textContent += `Saved on ${d.node}: ${d.path}\n${d.output}\n`;
+      document.getElementById('cp-backup-ok').checked = true; cpUpdateAddButton();
+    } catch (e) { log.textContent += 'Snapshot failed: ' + e.message + '\n'; }
+  }
+
+  async function cpCreateImage() {
+    const log = document.getElementById('cp-op-log');
+    const out = document.getElementById('cp-status-result');
+    if (cpNeedConnection(out)) return;
+    const ftpUser = document.getElementById('rhcos-ftp-user').value.trim();
+    const ftpPass = document.getElementById('rhcos-ftp-pass').value;
+    if (!ftpUser || !ftpPass) { out.innerHTML = '<div style="color:#f87171">Enter your IONOS login/password in the &ldquo;Upload RHCOS Image&rdquo; panel (Autoscaling tab) first &mdash; they are reused here.</div>'; return; }
+    if (!confirm('Create the master boot image?\n\nThis derives rhcos-4.18-qemu-v2-master from the existing worker image on the management host (only the Ignition URL changes) and uploads ~16 GB to the IONOS image store. It takes roughly 30-60 minutes. The worker image is not touched.')) return;
+    const btn = document.getElementById('cp-image-btn'); btn.disabled = true;
+    await cpStream('/api/upload-rhcos-image', { ionosToken, datacenterId, ocpVersion: (document.getElementById('rhcos-ocp-version').value || '4.18').trim(), role: 'master',
+      ftpUser, ftpPass, mgmtHost, mgmtSshKey: sshKey, mgmtSshUser: sshUser, sshPassphrase }, log,
+      (msg) => { let m = msg; try { m = 'Image ready — ' + JSON.parse(msg).imageId; } catch (_) {} log.textContent += '\n✓ ' + m + '\n'; btn.disabled = false; cpStatus(); },
+      (err) => { log.textContent += '\n✗ ' + err + '\n'; btn.disabled = false; });
+  }
+
+  async function cpAdd() {
+    const log = document.getElementById('cp-add-log'), err = document.getElementById('cp-add-error'), done = document.getElementById('cp-add-done');
+    err.style.display = 'none'; done.classList.add('hidden');
+    if (cpNeedConnection(err)) { err.style.display = 'block'; return; }
+    const type = document.getElementById('cp-type').value;
+    if (!document.getElementById('as-ionos-lan').value) await detectPrivateLan(true);
+    const lanId = parseInt(document.getElementById('as-ionos-lan').value, 10);
+    if (!lanId) { err.textContent = 'The private cluster LAN could not be detected — enter it in the LAN ID field on the Autoscaling tab.'; err.style.display = 'block'; return; }
+    const count = parseInt(document.getElementById('cp-count').value, 10) || 1;
+    const what = type === 'cube' ? 'Cube (' + (document.getElementById('cp-cube-template').selectedOptions[0]?.text || '') + ')' : `Dedicated Core ${document.getElementById('cp-cores').value} vCPU / ${document.getElementById('cp-ram').value} GiB`;
+    if (!confirm(`Add ${count} control-plane node(s): ${what}\n\nThey join NEXT TO the existing control-plane nodes and become etcd members. Nothing is removed. Continue?`)) return;
+    const btn = document.getElementById('cp-add-btn'); btn.disabled = true; btn.style.opacity = '0.5';
+    await cpStream('/api/control-plane/add', cpBody({
+      machineType: type, count, lanId, imageId: document.getElementById('cp-image').value, backupConfirmed: document.getElementById('cp-backup-ok').checked,
+      cores: document.getElementById('cp-cores').value, ramGiB: document.getElementById('cp-ram').value, diskGB: document.getElementById('cp-disk').value,
+      cpuFamily: document.getElementById('cp-cpufamily').value.trim(), cubeTemplateId: document.getElementById('cp-cube-template').value }), log,
+      (msg) => { done.innerHTML = '<strong>&#10003; Done.</strong> ' + escHtml(msg); done.classList.remove('hidden'); cpStatus(); },
+      (m) => { err.textContent = m; err.style.display = 'block'; cpUpdateAddButton(); });
+  }
+
+  async function cpRetirePlan() {
+    const out = document.getElementById('cp-retire-result');
+    if (cpNeedConnection(out)) return;
+    const node = document.getElementById('cp-retire-node').value;
+    if (!node) { out.innerHTML = '<div style="color:#f87171">Run &ldquo;Check readiness&rdquo; and pick a node first.</div>'; return; }
+    out.innerHTML = '<div style="color:#64748b">Building the plan&hellip;</div>';
+    try {
+      const d = await apiPost('/api/control-plane/retire-plan', cpBody({ node }));
+      const li = (arr, col, ic) => arr.map(x => `<div style="display:flex;gap:0.5rem;margin:0.25rem 0"><span style="color:${col};font-weight:700">${ic}</span><span>${escHtml(x)}</span></div>`).join('');
+      out.innerHTML = `
+        <div style="color:#94a3b8;margin-bottom:0.5rem">${escHtml(d.node)} (${escHtml(d.ip || '')})${d.server ? ' &middot; IONOS server ' + escHtml(d.server.name) + ' ' + escHtml(d.server.id) : ''} &middot; control-plane nodes ${d.quorum.before} &rarr; ${d.quorum.after}</div>
+        ${d.blockers.length ? '<div style="color:#f87171;font-weight:600">Blocked &mdash; would not be safe today:</div>' + li(d.blockers, '#f87171', '&#10007;') : '<div style="color:#6ee7b7;font-weight:600">&#10003; No blockers.</div>'}
+        ${d.warnings.length ? li(d.warnings, '#fbbf24', '&#9888;') : ''}
+        <div style="color:#64748b;font-size:0.8rem;margin:0.6rem 0 0.2rem">Ordered steps (reference only &mdash; ${escHtml(d.note)})</div>
+        ${d.steps.map((s, i) => `<div style="margin:0.2rem 0"><span style="color:#64748b">${i + 1}.</span> <code style="color:#94a3b8;white-space:pre-wrap">${escHtml(s)}</code></div>`).join('')}`;
+    } catch (e) { out.innerHTML = `<div style="color:#f87171">Plan failed: ${escHtml(e.message)}</div>`; }
+  }
+
+
+  cpTypeChanged();   // the form defaults to Cube: show its fields and load the templates
   // ── Post-upgrade check / repair ────────────────────────────────────────────
   function postUpgradeBody(extra) {
     return Object.assign({ clusterApiUrl, ocpToken, mgmtHost, sshUser, sshKey, sshPassphrase, ionosToken, datacenterId }, extra || {});

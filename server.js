@@ -765,7 +765,7 @@ async function findNodeLinkDrift(ctx) {
 // Ingress routers run host-networked on whichever workers they land on, and the NLB forwards 80/443
 // to fixed IPs. Targeting EVERY Ready worker is therefore the robust setting: the NLB health check
 // drops nodes without a router, so the routers can move freely and nodes can come and go.
-async function nlbIngressState(ctx) {
+async function nlbIngressState(ctx, ports = [80, 443]) {
   const nodes = await ocpGet(ctx.apiUrl, '/api/v1/nodes', ctx.token);
   const ipOf = n => (n.status?.addresses || []).find(a => a.type === 'InternalIP')?.address;
   const clusterIPs = new Set(nodes.items.map(ipOf).filter(Boolean));         // every role: fingerprints the API rules
@@ -804,7 +804,7 @@ async function nlbIngressState(ctx) {
       if (!ours) continue;
       for (const r of rs) {
         const p = r.properties;
-        if (![80, 443].includes(p.listenerPort) || !p.targets?.length) continue;
+        if (!ports.includes(p.listenerPort) || !p.targets?.length) continue;
         rules.push({ dc, nlbId: lb.id, id: r.id, port: p.listenerPort, have: p.targets.map(t => t.ip).sort(), template: p.targets[0] });
       }
     }
@@ -856,6 +856,355 @@ app.post('/api/post-upgrade/repair', async (req, res) => {
     for (const step of POST_UPGRADE_STEPS) checks.push(await runPostUpgradeStep(step, ctx));
     res.json({ results, checks, drift: checks.filter(c => c.status === 'drift').length });
   } catch (e) { res.status(502).json({ error: e.message, results }); }
+});
+
+// ══ Managed control plane ═══════════════════════════════════════════════════
+// The fixed control-plane nodes (control-0/1/2) were built by hand and are invisible to the Machine API. New
+// control-plane nodes are added ALONGSIDE them as Machine-API-managed machines (a MachineSet per machine type,
+// like the workers), so etcd keeps its quorum the whole time and the old nodes can be retired later, one by
+// one. Each step is gated on cluster health and nothing is ever removed automatically.
+const CP_MAX_MEMBERS = 5;                                     // etcd: 3 or 5 members; never go beyond 5 here
+const CP_SETS = { dcore: 'control-dcore-ionos', cube: 'control-cube-ionos' };
+const CP_WATCHED_OPERATORS = ['etcd', 'kube-apiserver', 'kube-controller-manager', 'kube-scheduler', 'openshift-apiserver', 'authentication', 'machine-config', 'network', 'dns'];
+
+const isMasterNode = n => 'node-role.kubernetes.io/master' in (n.metadata?.labels || {}) || 'node-role.kubernetes.io/control-plane' in (n.metadata?.labels || {});
+const isNodeReady  = n => (n.status?.conditions || []).some(c => c.type === 'Ready' && c.status === 'True');
+const nodeIpOf     = n => (n.status?.addresses || []).find(a => a.type === 'InternalIP')?.address;
+const podReady     = p => p.status?.phase === 'Running' && (p.status?.containerStatuses || []).length > 0 && (p.status.containerStatuses || []).every(c => c.ready);
+
+// Everything the status view and the safety checks need, read-only.
+async function cpGather(ctx) {
+  const A = ctx.apiUrl, T = ctx.token;
+  const [nodes, machines, cos, cv, mcp, approver, provider, secretOk, etcdPods, etcd] = await Promise.all([
+    ocpGet(A, '/api/v1/nodes', T),
+    ocpGet(A, `/apis/machine.openshift.io/v1beta1/namespaces/${MAPI_NS}/machines`, T),
+    ocpGet(A, '/apis/config.openshift.io/v1/clusteroperators', T),
+    ocpGet(A, '/apis/config.openshift.io/v1/clusterversions/version', T),
+    ocpGet(A, '/apis/machineconfiguration.openshift.io/v1/machineconfigpools/master', T).catch(() => null),
+    ocpGet(A, `/apis/apps/v1/namespaces/${MAPI_NS}/deployments/ionos-machine-auto-approver`, T).catch(() => null),
+    ocpGet(A, `/apis/apps/v1/namespaces/${MAPI_NS}/deployments/ionos-machine-api-provider`, T).catch(() => null),
+    ocpGet(A, `/api/v1/namespaces/${MAPI_NS}/secrets/master-user-data-managed`, T).then(() => true).catch(() => false),
+    ocpGet(A, '/api/v1/namespaces/openshift-etcd/pods?labelSelector=app%3Detcd', T),
+    ocpGet(A, '/apis/operator.openshift.io/v1/etcds/cluster', T).catch(() => null),
+  ]);
+
+  const masterMachines = (machines.items || []).filter(m => m.metadata.labels?.['machine.openshift.io/cluster-api-machine-role'] === 'master');
+  const machineByNode = new Map(masterMachines.map(m => [m.status?.nodeRef?.name || m.metadata.name, m]));
+  const etcdPodByNode = new Map((etcdPods.items || []).map(p => [p.spec?.nodeName, p]));
+  const masters = (nodes.items || []).filter(isMasterNode).map(n => {
+    const m = machineByNode.get(n.metadata.name);
+    const ep = etcdPodByNode.get(n.metadata.name);
+    return {
+      name: n.metadata.name, ip: nodeIpOf(n), ready: isNodeReady(n), kubelet: n.status?.nodeInfo?.kubeletVersion,
+      providerID: n.spec?.providerID || '', schedulable: !n.spec?.unschedulable,
+      managed: !!m, machine: m?.metadata.name || null, machineSet: (m?.metadata.ownerReferences || []).find(r => r.kind === 'MachineSet')?.name || null,
+      etcdPod: ep ? { name: ep.metadata.name, ready: podReady(ep) } : null,
+      created: n.metadata.creationTimestamp,
+    };
+  });
+
+  const condOf = (o, t) => (o.status?.conditions || []).find(c => c.type === t);
+  const operatorIssues = (cos.items || []).filter(o => condOf(o, 'Available')?.status === 'False' || condOf(o, 'Degraded')?.status === 'True')
+    .map(o => ({ name: o.metadata.name, available: condOf(o, 'Available')?.status, degraded: condOf(o, 'Degraded')?.status, message: (condOf(o, 'Degraded')?.message || condOf(o, 'Available')?.message || '').slice(0, 160) }));
+  const watched = (cos.items || []).filter(o => CP_WATCHED_OPERATORS.includes(o.metadata.name)).map(o => ({ name: o.metadata.name,
+    ok: condOf(o, 'Available')?.status === 'True' && condOf(o, 'Degraded')?.status === 'False' && condOf(o, 'Progressing')?.status === 'False' }));
+  const etcdMembersMsg = (etcd?.status?.conditions || []).find(c => c.type === 'EtcdMembersAvailable');
+
+  return {
+    masters, masterMachines: masterMachines.map(m => ({ name: m.metadata.name, phase: m.status?.phase, machineSet: (m.metadata.ownerReferences || []).find(r => r.kind === 'MachineSet')?.name })),
+    operatorIssues, watched,
+    upgrading: condOf(cv, 'Progressing')?.status === 'True', version: cv.status?.desired?.version,
+    mcp: mcp ? { updated: condOf(mcp, 'Updated')?.status === 'True', updating: condOf(mcp, 'Updating')?.status === 'True', degraded: condOf(mcp, 'Degraded')?.status === 'True', ready: mcp.status?.readyMachineCount, total: mcp.status?.machineCount } : null,
+    approverReady: (approver?.status?.readyReplicas || 0) >= 1,
+    providerImage: provider?.spec?.template?.spec?.containers?.[0]?.image || '', providerReady: (provider?.status?.readyReplicas || 0) >= 1,
+    masterSecret: secretOk,
+    etcd: { podsReady: (etcdPods.items || []).filter(podReady).length, pods: (etcdPods.items || []).length,
+            membersAvailable: etcdMembersMsg?.status === 'True', message: (etcdMembersMsg?.message || '').slice(0, 120) },
+  };
+}
+
+// Master boot image(s) in the IONOS image store of the datacenter's location.
+async function cpFindMasterImages(ctx) {
+  const dc = await ionosGet(`/datacenters/${encodeURIComponent(ctx.ionos.dc)}`, ctx.ionos.token);
+  const location = dc.properties?.location;
+  const d = await ionosGet('/images?depth=1', ctx.ionos.token);
+  const images = (d.items || [])
+    .filter(i => /rhcos/i.test(i.properties?.name || '') && /master/i.test(i.properties?.name || '') && i.properties?.location === location)
+    .map(i => ({ id: i.id, name: i.properties.name, state: i.metadata?.state }));
+  return { location, images };
+}
+
+// Readiness checks: 'block' stops the Add button, 'warn' is shown but does not stop it.
+async function cpChecks(ctx, g) {
+  const items = [];
+  const add = (id, title, status, detail) => items.push({ id, title, status, detail });
+
+  const stable = !g.upgrading && g.mcp && g.mcp.updated && !g.mcp.updating && !g.mcp.degraded && g.operatorIssues.length === 0;
+  add('cluster-stable', 'Cluster is stable (no upgrade, master pool updated, operators healthy)', stable ? 'ok' : 'block',
+    stable ? `${g.version}; master pool ${g.mcp?.ready}/${g.mcp?.total} updated; ${g.watched.filter(w => w.ok).length}/${g.watched.length} control-plane operators settled.`
+           : [g.upgrading && 'an upgrade is in progress', g.mcp && !g.mcp.updated && 'master pool not updated', g.mcp?.updating && 'master pool is updating', g.mcp?.degraded && 'master pool degraded',
+              g.operatorIssues.length && `operators with problems: ${g.operatorIssues.map(o => o.name).join(', ')}`].filter(Boolean).join('; '));
+
+  const etcdOk = g.etcd.membersAvailable && g.etcd.podsReady === g.etcd.pods && g.etcd.pods === g.masters.length;
+  add('etcd-healthy', 'etcd is healthy with one member per control-plane node', etcdOk ? 'ok' : 'block',
+    `${g.etcd.podsReady}/${g.etcd.pods} etcd pods ready for ${g.masters.length} control-plane node(s). ${g.etcd.message}`);
+
+  add('members-cap', `Fewer than ${CP_MAX_MEMBERS} control-plane nodes`, g.masters.length < CP_MAX_MEMBERS ? 'ok' : 'block',
+    `${g.masters.length} control-plane node(s) now; this feature adds up to ${CP_MAX_MEMBERS} (etcd runs best with 3 or 5 members).`);
+  add('master-secret', 'Master user-data secret exists', g.masterSecret ? 'ok' : 'block', g.masterSecret ? 'master-user-data-managed found.' : 'Secret master-user-data-managed is missing in openshift-machine-api.');
+  add('approver', 'CSR auto-approver is running', g.approverReady ? 'ok' : 'block', g.approverReady ? 'ionos-machine-auto-approver is ready.' : 'Without it the new node cannot join (its CSRs would wait for manual approval).');
+  add('provider', 'Machine API provider is running', g.providerReady ? 'ok' : 'block', g.providerImage);
+  const cpSync = /-cp-/.test(g.providerImage);
+  add('provider-nlb', 'Provider keeps the API load-balancer rules in step with the control plane', cpSync ? 'ok' : 'warn',
+    cpSync ? 'The running provider image includes control-plane NLB sync.' : 'This provider image has no control-plane NLB sync: new masters would not be added to the API rules automatically (needed before retiring any old node).');
+
+  // management host: master stub
+  try {
+    const ref = await referenceMcsCa(ctx);
+    const stub = await withMgmtSsh(ctx, async conn => (await readIgnStubs(conn)).find(s => s.file.endsWith('/master.ign')));
+    if (!stub) add('stub', 'master.ign Ignition stub on the management host', 'block', `No ${IGN_DIR}/master.ign — use "Prepare".`);
+    else {
+      const st = stubCaState(stub, ref);
+      const src = stub.json?.ignition?.config?.merge?.[0]?.source || '';
+      const roleOk = /[/]config[/]master$/.test(src);
+      add('stub', 'master.ign Ignition stub on the management host', st.state === 'ok' && roleOk ? 'ok' : 'block',
+        st.state === 'ok' && roleOk ? `Present, merges ${src}, CA matches the cluster.` : `Present but ${st.state !== 'ok' ? 'its CA is ' + st.state : 'it does not merge /config/master (' + src + ')'} — use "Prepare".`);
+    }
+  } catch (e) {
+    add('stub', 'master.ign Ignition stub on the management host', e.skip ? 'warn' : 'block', e.skip ? 'Management host SSH details not supplied — cannot verify.' : e.message);
+  }
+
+  // master boot image
+  let images = { images: [] };
+  if (ctx.ionos) {
+    try { images = await cpFindMasterImages(ctx); } catch (e) { images = { images: [], error: e.message }; }
+    const ok = images.images.find(i => i.state === 'AVAILABLE');
+    add('image', 'Master boot image in the IONOS image store', ok ? 'ok' : 'block',
+      ok ? `${ok.name} (${ok.id}) at ${images.location}.` : `No AVAILABLE rhcos *master* image at ${images.location || 'the datacenter location'} — create it with "Create master image".${images.error ? ' (' + images.error + ')' : ''}`);
+  } else add('image', 'Master boot image in the IONOS image store', 'warn', 'IONOS token / datacenter not supplied.');
+
+  return { items, images, canAdd: !items.some(i => i.status === 'block') };
+}
+
+app.post('/api/control-plane/status', async (req, res) => {
+  if (!req.body.clusterApiUrl || !req.body.ocpToken) return res.status(400).json({ error: 'clusterApiUrl and ocpToken are required.' });
+  const ctx = postUpgradeCtx(req.body);
+  try {
+    const g = await cpGather(ctx);
+    const checks = await cpChecks(ctx, g);
+    let nlb = null;
+    if (ctx.ionos) {
+      try {
+        const st = await nlbIngressState(ctx, [6443, 22623]);
+        nlb = st.rules.map(r => ({ port: r.port, targets: r.have }));
+      } catch (e) { nlb = { error: e.message }; }
+    }
+    // Which storage does each control-plane VM actually run on? (DAS = Cube; the certification target.)
+    let storage = null;
+    if (ctx.ionos) {
+      try {
+        const sv = await ionosGet(`/datacenters/${encodeURIComponent(ctx.ionos.dc)}/servers?depth=3`, ctx.ionos.token);
+        storage = {};
+        for (const m of g.masters) {
+          const hit = (sv.items || []).find(x => (x.entities?.nics?.items || []).some(n => (n.properties?.ips || []).includes(m.ip)));
+          if (hit) storage[m.name] = { server: hit.properties?.name, type: hit.properties?.type,
+            cores: hit.properties?.cores, ramGiB: Math.round((hit.properties?.ram || 0) / 1024), cpuFamily: hit.properties?.cpuFamily || '',
+            volumes: (hit.entities?.volumes?.items || []).map(v => `${v.properties?.size}GB ${v.properties?.type}`) };
+        }
+      } catch (_) { storage = null; }
+    }
+    res.json({ ...g, checks: checks.items, canAdd: checks.canAdd, masterImages: checks.images.images, nlb, storage, sets: CP_SETS, maxMembers: CP_MAX_MEMBERS });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// Create /root/ignition-serve/master.ign from the worker stub (same CA and settings, merges /config/master).
+app.post('/api/control-plane/prepare', async (req, res) => {
+  if (!req.body.clusterApiUrl || !req.body.ocpToken) return res.status(400).json({ error: 'clusterApiUrl and ocpToken are required.' });
+  const ctx = postUpgradeCtx(req.body);
+  try {
+    const ref = await referenceMcsCa(ctx);
+    const msg = await withMgmtSsh(ctx, async conn => {
+      const stubs = await readIgnStubs(conn);
+      const worker = stubs.find(s => s.file.endsWith('/worker.ign'));
+      if (!worker || !worker.json) throw new Error('worker.ign not found (or not valid JSON) on the management host');
+      const merge = worker.json.ignition?.config?.merge?.[0];
+      if (!merge || !/[/]config[/]worker$/.test(merge.source || '')) throw new Error('worker.ign does not merge a .../config/worker URL — refusing to derive a master stub from it');
+      const master = JSON.parse(JSON.stringify(worker.json));
+      master.ignition.config.merge[0].source = merge.source.replace(/[/]config[/]worker$/, '/config/master');
+      const idx = ignCas(master).findIndex(c => (decodeDataUrl(c.source) || '').includes('BEGIN CERTIFICATE'));
+      if (idx >= 0) master.ignition.security.tls.certificateAuthorities[idx].source = encodeDataUrl(ref, master.ignition.security.tls.certificateAuthorities[idx].source);
+      const b64 = Buffer.from(JSON.stringify(master)).toString('base64');
+      await sshRunScript(conn, ['set -e', `echo '${b64}' | base64 -d > '${IGN_DIR}/master.ign.tmp'`, `chmod --reference='${IGN_DIR}/worker.ign' '${IGN_DIR}/master.ign.tmp'`, `mv '${IGN_DIR}/master.ign.tmp' '${IGN_DIR}/master.ign'`].join('\n'));
+      const check = await sshRunScript(conn, "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/master.ign || true");
+      return `Wrote ${IGN_DIR}/master.ign (merges ${master.ignition.config.merge[0].source}); served on :8080 → HTTP ${check.stdout.trim()}.`;
+    });
+    res.json({ ok: true, message: msg });
+  } catch (e) { res.status(e.skip ? 400 : 502).json({ error: e.message }); }
+});
+
+// etcd snapshot via the cluster's own backup script (oc debug on one control-plane node).
+app.post('/api/control-plane/backup', async (req, res) => {
+  if (!req.body.clusterApiUrl || !req.body.ocpToken) return res.status(400).json({ error: 'clusterApiUrl and ocpToken are required.' });
+  const ctx = postUpgradeCtx(req.body);
+  try {
+    const g = await cpGather(ctx);
+    const target = g.masters.find(m => m.ready && m.etcdPod?.ready);
+    if (!target) return res.status(409).json({ error: 'No Ready control-plane node with a healthy etcd pod to take the snapshot from.' });
+    const out = await withMgmtSsh(ctx, async conn => (await sshRunScript(conn,
+      `oc --token='${ctx.token}' debug node/${target.name} -- chroot /host /usr/local/bin/cluster-backup.sh /home/core/assets/backup 2>&1 | tail -12`)).stdout);
+    const ok = /snapshot db and kube resources are successfully saved/i.test(out);
+    res.status(ok ? 200 : 502).json({ ok, node: target.name, path: '/home/core/assets/backup', output: out.slice(-1200) });
+  } catch (e) { res.status(e.skip ? 400 : 502).json({ error: e.message }); }
+});
+
+function cpBuildMachineSet(p) {
+  const key = 'machine.openshift.io/cluster-api-machineset';
+  const providerSpec = {
+    apiVersion: 'ionoscloudproviderconfig.openshift.io/v1alpha1', kind: 'IONOSCloudMachineProviderSpec',
+    datacenterID: p.dc, cores: p.cores, ram: p.ramMB, serverType: p.serverType,
+    ...(p.templateUuid ? { templateUuid: p.templateUuid } : {}),
+    ...(p.serverType === 'ENTERPRISE' ? { cpuFamily: p.cpuFamily } : {}),
+    region: p.region, availabilityZone: p.az, image: p.imageId,
+    disk: { name: `${p.name}-boot`, size: p.diskGB, type: p.diskType, availabilityZone: p.az },
+    nics: [{ lan: p.lan, dhcp: true, firewallActive: false, name: `${p.name}-nic0` }],
+    credentialsSecret: { name: 'ionoscloud-credentials', namespace: MAPI_NS },
+    userDataSecret:    { name: 'master-user-data-managed', namespace: MAPI_NS },
+  };
+  return {
+    apiVersion: 'machine.openshift.io/v1beta1', kind: 'MachineSet',
+    metadata: { name: p.name, namespace: MAPI_NS, labels: { [key]: p.name } },
+    spec: {
+      replicas: p.replicas, selector: { matchLabels: { [key]: p.name } },
+      template: {
+        metadata: { labels: { [key]: p.name, 'machine.openshift.io/cluster-api-machine-role': 'master', 'machine.openshift.io/cluster-api-machine-type': 'master',
+                              ...(p.regionLabel ? { 'machine.openshift.io/region': p.regionLabel } : {}), 'machine.openshift.io/zone': p.az } },
+        // The control-plane taint and node-role labels come from the master kubelet config the node pulls from the MCS.
+        spec: { metadata: { labels: p.regionLabel ? { [OPCT_ZONE_LABEL]: p.regionLabel } : {} }, providerSpec: { value: providerSpec } },
+      },
+    },
+  };
+}
+
+// Add Machine-API-managed control-plane node(s) alongside the existing ones — streams progress.
+app.post('/api/control-plane/add', async (req, res) => {
+  const b = req.body;
+  if (!b.clusterApiUrl || !b.ocpToken) return res.status(400).json({ error: 'clusterApiUrl and ocpToken are required.' });
+  if (!['dcore', 'cube'].includes(b.machineType)) return res.status(400).json({ error: "machineType must be 'dcore' or 'cube'." });
+  if (b.backupConfirmed !== true) return res.status(400).json({ error: 'Confirm that a recent etcd snapshot exists (backupConfirmed).' });
+  const count = Math.max(1, Math.min(2, parseInt(b.count, 10) || 1));
+  const { step, log, done, fail } = makeSseHelpers(res);
+  const ctx = postUpgradeCtx(b);
+  const A = ctx.apiUrl, T = ctx.token;
+  try {
+    // 1. Re-check everything server-side: the browser's view may be stale.
+    step('Checking the cluster is ready…', 'working');
+    const g = await cpGather(ctx);
+    const checks = await cpChecks(ctx, g);
+    const blockers = checks.items.filter(i => i.status === 'block');
+    if (blockers.length) throw new Error('Not ready: ' + blockers.map(i => `${i.title} — ${i.detail}`).join(' | '));
+    if (g.masters.length + count > CP_MAX_MEMBERS) throw new Error(`Would exceed ${CP_MAX_MEMBERS} control-plane nodes (${g.masters.length} now + ${count}).`);
+    step('Cluster ready', 'ok');
+
+    // 2. Describe the new machines
+    const name = CP_SETS[b.machineType];
+    const dcInfo = await ionosGet(`/datacenters/${encodeURIComponent(ctx.ionos.dc)}`, ctx.ionos.token);
+    const region = dcInfo.properties?.location || '';
+    const img = (checks.images.images || []).find(i => i.state === 'AVAILABLE' && (!b.imageId || i.id === b.imageId));
+    if (!img) throw new Error('No AVAILABLE master image selected.');
+    const lan = parseInt(b.lanId, 10);
+    if (!lan) throw new Error('lanId (the private cluster LAN) is required.');
+    const spec = { name, dc: ctx.ionos.dc, region, regionLabel: ionosZoneFromLocation(region), az: b.availabilityZone || 'AUTO', imageId: img.id, lan };
+    if (b.machineType === 'cube') {
+      if (!b.cubeTemplateId) throw new Error('Select a Cube template.');
+      const tpl = await ionosGet(`/templates/${encodeURIComponent(b.cubeTemplateId)}`, ctx.ionos.token);
+      if (!isCubeTemplate(tpl)) throw new Error('The selected template is not a Cube template.');
+      Object.assign(spec, { serverType: 'CUBE', templateUuid: b.cubeTemplateId, cores: tpl.properties.cores, ramMB: tpl.properties.ram, diskGB: tpl.properties.storageSize, diskType: 'DAS' });
+    } else {
+      Object.assign(spec, { serverType: 'ENTERPRISE', cores: parseInt(b.cores, 10) || 8, ramMB: (parseInt(b.ramGiB, 10) || 16) * 1024, diskGB: parseInt(b.diskGB, 10) || 200,
+                            diskType: 'SSD_PREMIUM', cpuFamily: b.cpuFamily || 'INTEL_SIERRAFOREST' });
+    }
+    if (spec.cores < 4 || spec.ramMB < 16 * 1024) throw new Error('A control-plane node needs at least 4 vCPU and 16 GiB RAM.');
+    log(`Type ${spec.serverType}: ${spec.cores} vCPU / ${Math.round(spec.ramMB / 1024)} GiB / ${spec.diskGB} GB ${spec.diskType} · image ${img.name} · LAN ${lan} · ${region}\n`);
+
+    // 3. Create or scale the MachineSet (never an autoscaler: the control plane is scaled deliberately)
+    step(`Creating control-plane MachineSet "${name}" (+${count})…`, 'working');
+    const msPath = `/apis/machine.openshift.io/v1beta1/namespaces/${MAPI_NS}/machinesets`;
+    let existing = null;
+    try { existing = await ocpGet(A, `${msPath}/${name}`, T); } catch (e) { if (e.status !== 404) throw e; }
+    spec.replicas = (existing?.spec?.replicas || 0) + count;
+    const before = new Set(g.masters.map(m => m.name));
+    await ocpApplyObj(A, T, msPath, name, cpBuildMachineSet(spec));
+    step(`MachineSet "${name}" at ${spec.replicas} replica(s)`, 'ok');
+
+    // 4. Watch the machine(s) become nodes and etcd members. Poll; never roll anything back automatically.
+    const deadline = Date.now() + 40 * 60000;
+    const seen = new Set();
+    const say = (key, text) => { if (!seen.has(key)) { seen.add(key); log(text + '\n'); } };
+    let stage = 'machine';
+    step('Waiting for the VM(s), nodes and etcd members…', 'working');
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 20000));
+      const cur = await cpGather(ctx);
+      const fresh = cur.masters.filter(m => !before.has(m.name));
+      const ms = cur.masterMachines.filter(m => m.machineSet === name);
+      ms.forEach(m => say('m:' + m.name + m.phase, `machine ${m.name}: ${m.phase || 'pending'}`));
+      fresh.forEach(m => {
+        say('n:' + m.name, `node ${m.name} registered (${m.ip})`);
+        if (m.ready) say('r:' + m.name, `node ${m.name} Ready`);
+        if (m.etcdPod) say('e:' + m.name + m.etcdPod.ready, `etcd pod on ${m.name}: ${m.etcdPod.ready ? 'Ready' : 'starting'}`);
+      });
+      const allUp = fresh.length >= count && fresh.every(m => m.ready && m.etcdPod?.ready);
+      if (allUp && cur.etcd.membersAvailable && cur.etcd.podsReady === cur.etcd.pods && cur.operatorIssues.length === 0) {
+        step('New control-plane node(s) joined and etcd is healthy', 'ok');
+        const names = fresh.map(m => m.name).join(', ');
+        return done(`Added ${names}. etcd now has ${cur.etcd.podsReady} healthy members. Next: check the console, then retire an old node when you are ready (dry-run plan available).`, { nodes: fresh.map(m => m.name) });
+      }
+      stage = fresh.length ? 'join' : stage;
+    }
+    throw new Error(`Timed out after 40 minutes (stage: ${stage}). Nothing was rolled back — inspect the machine and node, then scale MachineSet ${name} back down if needed.`);
+  } catch (e) { fail(e.message); }
+});
+
+// Dry-run plan for retiring one fixed control-plane node. Reads only — it never changes anything.
+app.post('/api/control-plane/retire-plan', async (req, res) => {
+  if (!req.body.clusterApiUrl || !req.body.ocpToken || !req.body.node) return res.status(400).json({ error: 'clusterApiUrl, ocpToken and node are required.' });
+  const ctx = postUpgradeCtx(req.body);
+  try {
+    const g = await cpGather(ctx);
+    const checks = await cpChecks(ctx, g);
+    const target = g.masters.find(m => m.name === req.body.node);
+    const blockers = [], warnings = [];
+    if (!target) return res.status(404).json({ error: `No control-plane node named ${req.body.node}.` });
+    if (target.managed) blockers.push('This node is already Machine-API-managed; delete its Machine instead of using this plan.');
+    const remaining = g.masters.filter(m => m.name !== target.name);
+    const healthyAfter = remaining.filter(m => m.ready && m.etcdPod?.ready).length;
+    if (healthyAfter < 3) blockers.push(`After removal only ${healthyAfter} healthy control-plane node(s) would remain; at least 3 are needed to keep etcd quorum with a spare.`);
+    if (!g.etcd.membersAvailable || g.etcd.podsReady !== g.etcd.pods) blockers.push('etcd is not fully healthy right now.');
+    if (checks.items.find(i => i.id === 'cluster-stable')?.status !== 'ok') blockers.push('The cluster is not stable (upgrade, pool update or degraded operators).');
+    if (checks.items.find(i => i.id === 'provider-nlb')?.status !== 'ok') blockers.push('The provider does not yet keep the API load-balancer rules in step with the control plane.');
+    if (!g.masters.some(m => m.managed && m.ready)) blockers.push('There is no Ready Machine-managed control-plane node yet — add one alongside first.');
+    if (g.masters.length - 1 < 3) warnings.push('Retiring leaves fewer than 4 nodes in total; add the replacement first so the cluster never drops below 3.');
+    let server = null;
+    if (ctx.ionos && target.ip) {
+      try {
+        const s = await ionosGet(`/datacenters/${encodeURIComponent(ctx.ionos.dc)}/servers?depth=3`, ctx.ionos.token);
+        const hit = (s.items || []).find(x => (x.entities?.nics?.items || []).some(n => (n.properties?.ips || []).includes(target.ip)));
+        if (hit) server = { id: hit.id, name: hit.properties?.name, type: hit.properties?.type };
+      } catch (_) {}
+    }
+    const n = target.name;
+    const steps = [
+      'Confirm a fresh etcd snapshot exists (use "Take etcd snapshot").',
+      `Cordon and drain: oc adm cordon ${n} && oc adm drain ${n} --ignore-daemonsets --delete-emptydir-data --force`,
+      `Find the etcd member id: oc -n openshift-etcd rsh -c etcdctl etcd-${remaining[0]?.name || '<other-master>'} etcdctl member list -w table   (pick the member named ${n})`,
+      'Remove the member: ... etcdctl member remove <member-id>   — do this from a DIFFERENT master, then wait until "oc get etcd cluster" reports all remaining members healthy.',
+      `Remove the node from the cluster: oc delete node ${n}`,
+      `Delete the VM${server ? ` at IONOS: server ${server.name} (${server.id})` : ' at IONOS (find the server by IP ' + target.ip + ')'} — only after the member is gone.`,
+      `Verify: oc get nodes · oc get co · the API load balancer targets (the provider drops ${target.ip} once the node is gone).`,
+    ];
+    res.json({ node: n, ip: target.ip, server, quorum: { before: g.masters.length, after: remaining.length, healthyAfter }, blockers, warnings, steps, executable: false,
+               note: 'Dry run only — nothing has been changed. Executing a retire is a separate, explicitly approved step.' });
+  } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
 app.get('/download/env-example', (req, res) => {
@@ -4465,6 +4814,9 @@ app.post('/api/upload-rhcos-image', async (req, res) => {
   const {
     ionosToken, datacenterId,
     ocpVersion, imageName: reqImageName,
+    // role 'master': derive the image from the existing patched WORKER image (same proven patching) and
+    // only change the Ignition URL worker.ign -> master.ign. The worker image itself is never modified.
+    role = 'worker', baseRawGz = '/root/rhcos-4.18-qemu-v2.raw.gz',
     ftpUser, ftpPass,
     mgmtHost, mgmtSshKey, mgmtSshUser = 'root', sshPassphrase,
     bootstrapGateway: reqGateway,
@@ -4473,7 +4825,8 @@ app.post('/api/upload-rhcos-image', async (req, res) => {
 
   // Sanitise inputs
   const safeVersion = ocpVersion.replace(/[^0-9.]/g, '');
-  const finalName   = (reqImageName || `rhcos-${safeVersion}-qemu`).replace(/[^a-zA-Z0-9._-]/g, '-');
+  const isMasterImage = role === 'master';
+  const finalName   = (reqImageName || (isMasterImage ? `rhcos-${safeVersion}-qemu-v2-master` : `rhcos-${safeVersion}-qemu`)).replace(/[^a-zA-Z0-9._-]/g, '-');
   const localDir    = '/tmp/rhcos-upload';
   const localRaw    = `${localDir}/${finalName}.raw`;
   const localQcow2  = `${localDir}/rhcos-qemu-temp.qcow2`;
@@ -4517,6 +4870,46 @@ app.post('/api/upload-rhcos-image', async (req, res) => {
     conn = await sshConnect(mgmtHost, mgmtSshUser, mgmtSshKey, sshPassphrase || undefined);
     step('SSH connected', 'ok');
 
+    if (isMasterImage) {
+      // ── Master image: derive from the proven worker image ────────────────────────
+      step('Preparing the master image from the worker image…', 'working');
+      const mountDirM = '/mnt/rhcos-master-fix';
+      log(`Base: ${baseRawGz}  →  ${localRaw}  (only the Ignition URL changes: worker.ign → master.ign)\n`);
+      const prep = await sshRunScriptStreaming(conn, `
+set -e
+export PATH=$PATH:/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin
+BASE="${baseRawGz}"
+if [ ! -f "$BASE" ]; then echo "BASE_MISSING: $BASE"; exit 1; fi
+mkdir -p ${localDir}
+FREE_GB=$(df -BG --output=avail ${localDir} | tail -1 | tr -dc 0-9)
+if [ "$FREE_GB" -lt 25 ]; then echo "NOT_ENOUGH_SPACE: only $FREE_GB GB free in ${localDir}, need 25"; exit 1; fi
+rm -f "${localRaw}"
+echo "Decompressing (about 17 GB)…"
+gunzip -c "$BASE" > "${localRaw}"
+echo "RAW_OK:$(stat -c%s "${localRaw}")"
+LOOP=$(losetup -f --show -P "${localRaw}")
+cleanup() { umount "${mountDirM}" 2>/dev/null || true; losetup -d "$LOOP" 2>/dev/null || true; }
+trap cleanup EXIT
+mkdir -p "${mountDirM}"
+if [ -b "\${LOOP}p3" ]; then BOOT_PART="\${LOOP}p3"; elif [ -b "\${LOOP}p2" ]; then BOOT_PART="\${LOOP}p2"; else echo "PART_FAIL"; exit 1; fi
+mount "$BOOT_PART" "${mountDirM}"
+BLS_FILE=$(find "${mountDirM}/loader/entries" -name "ostree-*.conf" 2>/dev/null | head -1)
+if [ -z "$BLS_FILE" ]; then echo "BLS_FAIL: no ostree-*.conf"; exit 1; fi
+echo "BLS before:"; grep -o "ignition[.a-z]*=[^ ]*" "$BLS_FILE" || true
+if ! grep -qE 'ignition[.]config[.]url=[^ ]*/worker[.]ign' "$BLS_FILE"; then
+  echo "URL_NOT_FOUND: the base image boot entry has no ignition.config.url ending in /worker.ign - refusing to guess"; cat "$BLS_FILE"; exit 1
+fi
+sed -i 's#/worker[.]ign#/master.ign#g' "$BLS_FILE"
+echo "BLS after:"; grep -o "ignition[.a-z]*=[^ ]*" "$BLS_FILE"
+if grep -q 'worker[.]ign' "$BLS_FILE" || ! grep -q 'master[.]ign' "$BLS_FILE"; then echo "PATCH_VERIFY_FAIL"; exit 1; fi
+sync
+echo "MASTER_BLS_OK"
+`, chunk => { log(chunk); });
+      if (!prep.stdout.includes('MASTER_BLS_OK')) throw new Error('Master image preparation failed:\n' + prep.stdout.slice(-1500));
+      step('Master image prepared (Ignition URL → master.ign)', 'ok');
+    }
+
+    if (!isMasterImage) {
     // ── Step 3: Download RHCOS QEMU qcow2 image (skip if .raw already present) ──
     step(`Checking for RHCOS ${safeVersion} QEMU image on management host…`, 'working');
 
@@ -4668,6 +5061,7 @@ echo "BLS_PATCH_OK"
       throw new Error(`BLS patching failed. Output:\n${blsOut}\n${blsResult.stderr || ''}`);
     }
     step('BLS boot entry patched', 'ok');
+    } // end worker-only steps 3-5
 
     // ── Step 6: FTP upload via lftp ───────────────────────────────────────────
     step(`Uploading to IONOS (${ftpHost}) via lftp…`, 'working');
