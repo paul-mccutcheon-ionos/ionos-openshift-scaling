@@ -357,7 +357,9 @@ const PROVIDER_CLUSTERROLE_RULES = [
   // patch/update on nodes: the provider writes providerID + machine annotation onto the Node
   { apiGroups: [''],                     resources: ['nodes'],                  verbs: ['get','list','watch','patch','update','delete'] },
   { apiGroups: ['coordination.k8s.io'],  resources: ['leases'],                 verbs: ['get','list','watch','create','update','patch','delete'] },
-  { apiGroups: [''],                     resources: ['events'],                 verbs: ['create','patch'] }
+  { apiGroups: [''],                     resources: ['events'],                 verbs: ['create','patch'] },
+  // cluster ingress domain: lets the provider's NLB syncer recognise this cluster's load balancer
+  { apiGroups: ['config.openshift.io'],  resources: ['ingresses'],              verbs: ['get'] }
 ];
 
 const APPROVER_CLUSTERROLE_RULES = [
@@ -599,7 +601,7 @@ const POST_UPGRADE_STEPS = [
         if (lack.length) missing.push(`${want.resources[0]}: ${lack.join('/')}`);
       }
       return missing.length
-        ? { status: 'drift', detail: `Missing verbs — ${missing.join('; ')}. Without node patch the provider cannot set providerID, so scale-down breaks.` }
+        ? { status: 'drift', detail: `Missing verbs — ${missing.join('; ')}. Missing node patch/update stops the provider setting providerID (scale-down breaks); missing ingress read stops its load-balancer sync from recognising the cluster's NLB.` }
         : { status: 'ok', detail: 'All required verbs present.' };
     },
     async fix(ctx) {
@@ -706,7 +708,7 @@ const POST_UPGRADE_STEPS = [
       const st = await nlbIngressState(ctx);
       for (const r of st.rules) {
         const targets = st.want.map(ip => ({ ...r.template, ip }));
-        await ionosPatch(`/datacenters/${ctx.ionos.dc}/networkloadbalancers/${st.nlbId}/forwardingrules/${r.id}`, ctx.ionos.token, { targets });
+        await ionosPatch(`/datacenters/${r.dc}/networkloadbalancers/${r.nlbId}/forwardingrules/${r.id}`, ctx.ionos.token, { targets });
       }
       return `NLB ports 80/443 now target all workers: ${st.want.join(', ')}.`;
     }
@@ -761,26 +763,49 @@ async function findNodeLinkDrift(ctx) {
 // drops nodes without a router, so the routers can move freely and nodes can come and go.
 async function nlbIngressState(ctx) {
   const nodes = await ocpGet(ctx.apiUrl, '/api/v1/nodes', ctx.token);
+  const ipOf = n => (n.status?.addresses || []).find(a => a.type === 'InternalIP')?.address;
+  const clusterIPs = new Set(nodes.items.map(ipOf).filter(Boolean));         // every role: fingerprints the API rules
   const want = nodes.items
     .filter(n => {
       const l = n.metadata.labels || {};
-      return 'node-role.kubernetes.io/worker' in l && !('node-role.kubernetes.io/control-plane' in l) && !('node-role.kubernetes.io/master' in l) &&
-             (n.status?.conditions || []).some(c => c.type === 'Ready' && c.status === 'True');
+      return 'node-role.kubernetes.io/worker' in l && !('node-role.kubernetes.io/control-plane' in l) &&
+             !('node-role.kubernetes.io/master' in l) && !n.metadata.deletionTimestamp;
     })
-    .map(n => (n.status?.addresses || []).find(a => a.type === 'InternalIP')?.address)
-    .filter(Boolean).sort();
-  const nlbs = await ionosGet(`/datacenters/${ctx.ionos.dc}/networkloadbalancers?depth=4`, ctx.ionos.token);
+    .map(ipOf).filter(Boolean).sort();                                         // Ready or not: the NLB health check copes
+
+  // Where does the cluster's *.apps wildcard point? (best effort — node-IP fingerprint still works without it)
+  const appsIPs = new Set();
+  try {
+    const ing = await ocpGet(ctx.apiUrl, '/apis/config.openshift.io/v1/ingresses/cluster', ctx.token);
+    if (ing.spec?.domain) (await require('dns').promises.resolve4('oauth-openshift.' + ing.spec.domain)).forEach(a => appsIPs.add(a));
+  } catch (_) {}
+
+  // Datacenters to search: the connected VDC plus every VDC the cluster's IONOS Machines name.
+  const dcs = new Set([ctx.ionos.dc]);
+  try {
+    const ms = await ocpGet(ctx.apiUrl, `/apis/machine.openshift.io/v1beta1/namespaces/${MAPI_NS}/machines`, ctx.token);
+    for (const m of ms.items || []) { const d = m.spec?.providerSpec?.value?.datacenterID; if (d) dcs.add(d); }
+  } catch (_) {}
+
+  // A load balancer is THIS cluster's if a rule listens on the apps address or targets one of our nodes;
+  // another cluster's NLB in the same VDC is never touched.
   const rules = [];
-  let nlbId = null;
-  for (const lb of nlbs.items || []) {
-    for (const r of lb.entities?.forwardingrules?.items || []) {
-      const p = r.properties;
-      if (![80, 443].includes(p.listenerPort) || !p.targets?.length) continue;
-      nlbId = lb.id;
-      rules.push({ id: r.id, port: p.listenerPort, have: p.targets.map(t => t.ip).sort(), template: p.targets[0] });
+  for (const dc of dcs) {
+    let nlbs;
+    try { nlbs = await ionosGet(`/datacenters/${dc}/networkloadbalancers?depth=4`, ctx.ionos.token); }
+    catch (e) { if (dc === ctx.ionos.dc) throw e; continue; }
+    for (const lb of nlbs.items || []) {
+      const rs = lb.entities?.forwardingrules?.items || [];
+      const ours = rs.some(r => appsIPs.has(r.properties.listenerIp) || (r.properties.targets || []).some(t => clusterIPs.has(t.ip)));
+      if (!ours) continue;
+      for (const r of rs) {
+        const p = r.properties;
+        if (![80, 443].includes(p.listenerPort) || !p.targets?.length) continue;
+        rules.push({ dc, nlbId: lb.id, id: r.id, port: p.listenerPort, have: p.targets.map(t => t.ip).sort(), template: p.targets[0] });
+      }
     }
   }
-  return { want, rules, nlbId };
+  return { want, rules };
 }
 
 function postUpgradeCtx(body) {
