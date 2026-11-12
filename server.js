@@ -2723,9 +2723,13 @@ app.get('/api/ionos/gpu-templates', async (req, res) => {
         cores:     t.properties.cores,
         ramGiB:    Math.round((t.properties.ram || 0) / 1024),
         storageGB: t.properties.storageSize,
-        gpus:      GPU_TEMPLATE_GPUS[t.properties.name],
+        // Each size exists once per storage type (e.g. "PERFORMANCE" and "SSD Premium") with a
+        // different template ID — the type must be visible or the list looks duplicated.
+        storageType: t.properties.storageType || '',
+        gpus:      t.properties.gpus?.[0]?.count || GPU_TEMPLATE_GPUS[t.properties.name],
       }))
-      .sort((a, b) => order.indexOf(a.name) - order.indexOf(b.name));
+      .sort((a, b) => (order.indexOf(a.name) - order.indexOf(b.name)) ||
+                      ((b.storageType === 'SSD Premium') - (a.storageType === 'SSD Premium')));
     res.json({ templates, locations: GPU_LOCATIONS });
   } catch (err) {
     res.status(err.status || 502).json({ error: err.message });

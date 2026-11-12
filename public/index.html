@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.8.1</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.8.2</span>
   </div>
 
   <div class="banner-actions">
@@ -4192,7 +4192,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
       if (!templates || !templates.length) { sel.innerHTML = '<option value="">No H200 templates found</option>'; return; }
       const prev = sel.value;
       sel.innerHTML = templates.map(t =>
-        `<option value="${escHtml(t.id)}">${escHtml(t.name)}  (${t.gpus}× H200 / ${t.cores} vCPU / ${t.ramGiB} GiB / ${t.storageGB} GB)</option>`
+        `<option value="${escHtml(t.id)}">${escHtml(t.name)} · ${escHtml(t.storageType || 'storage n/a')}  (${t.gpus}× H200 / ${t.cores} vCPU / ${t.ramGiB} GiB / ${t.storageGB} GB)</option>`
       ).join('');
       if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
     } catch (e) {
