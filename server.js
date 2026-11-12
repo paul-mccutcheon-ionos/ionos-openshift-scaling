@@ -2261,7 +2261,11 @@ echo "ALT_WRITE_OK"
               labels: {
                 [msLabelKey]: targetMsName,
                 'machine.openshift.io/cluster-api-machine-role': 'worker',
-                'machine.openshift.io/cluster-api-machine-type': 'worker'
+                'machine.openshift.io/cluster-api-machine-type': 'worker',
+                // The console's Machines list reads these two for its Region / Availability zone
+                // columns (and they are the standard Machine API labels). Without them both show "-".
+                ...(effectiveRegion ? { 'machine.openshift.io/region': ionosZoneFromLocation(effectiveRegion) } : {}),
+                ...(az ? { 'machine.openshift.io/zone': az } : {})
               }
             },
             spec: {
