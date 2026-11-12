@@ -690,6 +690,28 @@ const POST_UPGRADE_STEPS = [
     }
   },
   {
+    id: 'nlb-targets', title: 'Load balancer ingress targets (ports 80/443) match the workers', fixable: true,
+    async run(ctx) {
+      if (!ctx.ionos) throw Object.assign(new Error('IONOS token / datacenter not supplied (connect to IONOS first).'), { skip: true });
+      const st = await nlbIngressState(ctx);
+      if (!st.rules.length) return { status: 'warn', detail: 'No NLB forwarding rules on ports 80/443 found in this datacenter.' };
+      if (!st.want.length) return { status: 'warn', detail: 'No Ready worker nodes found — refusing to judge the load balancer.' };
+      const drifted = st.rules.filter(r => [...r.have].sort().join() !== [...st.want].sort().join());
+      return drifted.length
+        ? { status: 'drift', detail: `Port ${drifted.map(r => r.port).join('/')} targets [${drifted[0].have.join(', ')}] but the workers are [${st.want.join(', ')}]. ` +
+            'Traffic is sent to nodes that no longer exist or have no router, so the console and apps become unreachable.' }
+        : { status: 'ok', detail: `Ports 80/443 target all ${st.want.length} workers (${st.want.join(', ')}); the NLB health check skips nodes without a router.` };
+    },
+    async fix(ctx) {
+      const st = await nlbIngressState(ctx);
+      for (const r of st.rules) {
+        const targets = st.want.map(ip => ({ ...r.template, ip }));
+        await ionosPatch(`/datacenters/${ctx.ionos.dc}/networkloadbalancers/${st.nlbId}/forwardingrules/${r.id}`, ctx.ionos.token, { targets });
+      }
+      return `NLB ports 80/443 now target all workers: ${st.want.join(', ')}.`;
+    }
+  },
+  {
     id: 'stuck-machines', title: 'Machines stuck outside Running', fixable: false,
     async run(ctx) {
       const ms = await ocpGet(ctx.apiUrl, `/apis/machine.openshift.io/v1beta1/namespaces/${MAPI_NS}/machines`, ctx.token);
@@ -734,8 +756,36 @@ async function findNodeLinkDrift(ctx) {
   return out;
 }
 
+// Ingress routers run host-networked on whichever workers they land on, and the NLB forwards 80/443
+// to fixed IPs. Targeting EVERY Ready worker is therefore the robust setting: the NLB health check
+// drops nodes without a router, so the routers can move freely and nodes can come and go.
+async function nlbIngressState(ctx) {
+  const nodes = await ocpGet(ctx.apiUrl, '/api/v1/nodes', ctx.token);
+  const want = nodes.items
+    .filter(n => {
+      const l = n.metadata.labels || {};
+      return 'node-role.kubernetes.io/worker' in l && !('node-role.kubernetes.io/control-plane' in l) && !('node-role.kubernetes.io/master' in l) &&
+             (n.status?.conditions || []).some(c => c.type === 'Ready' && c.status === 'True');
+    })
+    .map(n => (n.status?.addresses || []).find(a => a.type === 'InternalIP')?.address)
+    .filter(Boolean).sort();
+  const nlbs = await ionosGet(`/datacenters/${ctx.ionos.dc}/networkloadbalancers?depth=4`, ctx.ionos.token);
+  const rules = [];
+  let nlbId = null;
+  for (const lb of nlbs.items || []) {
+    for (const r of lb.entities?.forwardingrules?.items || []) {
+      const p = r.properties;
+      if (![80, 443].includes(p.listenerPort) || !p.targets?.length) continue;
+      nlbId = lb.id;
+      rules.push({ id: r.id, port: p.listenerPort, have: p.targets.map(t => t.ip).sort(), template: p.targets[0] });
+    }
+  }
+  return { want, rules, nlbId };
+}
+
 function postUpgradeCtx(body) {
   return {
+    ionos: body.ionosToken && body.datacenterId ? { token: body.ionosToken, dc: body.datacenterId } : null,
     apiUrl: body.clusterApiUrl, token: body.ocpToken,
     ssh: body.mgmtHost && body.sshKey ? { host: body.mgmtHost, user: body.sshUser || 'root', key: body.sshKey, pass: body.sshPassphrase } : null
   };
