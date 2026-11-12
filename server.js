@@ -1379,7 +1379,7 @@ app.post('/api/setup-autoscaler', async (req, res) => {
           ionosToken, datacenterId,
           ionosImageId, cpuFamily, availabilityZone, diskAvailabilityZone,
           machCores, machRamGiB, machDiskGB, machDiskType, machLanId,
-          serverType, region, gpuTemplateId,
+          serverType, region, gpuTemplateId, cubeTemplateId,
           deployProvider,
           // Container registry for provider image
           registryType, registryImage, registryUsername, registryPassword,
@@ -2192,6 +2192,7 @@ echo "ALT_WRITE_OK"
       const srvType    = serverType           || 'ENTERPRISE';
       const isVcpu     = srvType === 'VCPU';
       const isGpu      = srvType === 'GPU';
+      const isCube     = srvType === 'CUBE';
 
       // GPU VMs are sized entirely by their template — read cores/RAM from it so
       // the providerSpec and autoscaler annotations match what IONOS provisions.
@@ -2207,6 +2208,19 @@ echo "ALT_WRITE_OK"
         ramMB = tpl.properties.ram;
       }
 
+      // Cube VMs are also sized entirely by their template (cores, RAM and the built-in DAS storage), so
+      // no separate disk is provisioned. Read the template so the providerSpec and the autoscaler's
+      // scale-from-zero annotations match what IONOS creates.
+      let cubeStorageGB = 0;
+      if (isCube) {
+        if (!cubeTemplateId) throw new Error('A Cube template (e.g. Basic Cube M) must be selected.');
+        const tpl = await ionosGet(`/templates/${encodeURIComponent(cubeTemplateId)}`, ionosToken);
+        if (!isCubeTemplate(tpl)) throw new Error(`Template ${cubeTemplateId} (${tpl.properties?.name}) is not a Cube template.`);
+        cores         = tpl.properties.cores;
+        ramMB         = tpl.properties.ram;
+        cubeStorageGB = tpl.properties.storageSize;
+      }
+
       // providerSpec raw value — serialised into the MachineSet spec.
       // Uses the ionoscloudproviderconfig.openshift.io/v1alpha1 API that the
       // IONOS Cloud Machine API provider (machine-api-provider-ionos) understands.
@@ -2216,16 +2230,17 @@ echo "ALT_WRITE_OK"
         datacenterID:      effectiveDcId,
         cores,
         ram:               ramMB,
-        ...(isVcpu || isGpu ? {} : { cpuFamily: cpuFam }),
+        ...(isVcpu || isGpu || isCube ? {} : { cpuFamily: cpuFam }),
         serverType:        srvType,
-        ...(isGpu ? { templateUuid: gpuTemplateId } : {}),
+        ...(isGpu ? { templateUuid: gpuTemplateId } : isCube ? { templateUuid: cubeTemplateId } : {}),
         ...(effectiveRegion ? { region: effectiveRegion } : {}),
         availabilityZone:  az,
         image:             effectiveImageId || ionosImageId,
         disk: {
           name:             `${targetMsName}-boot`,
-          size:             diskGB,
-          type:             diskType,
+          // Cube: the template includes the storage (DAS) — informational only, the provider ignores size/type.
+          size:             isCube ? cubeStorageGB : diskGB,
+          type:             isCube ? 'DAS' : diskType,
           availabilityZone: diskAz
         },
         nics: [
@@ -2238,7 +2253,7 @@ echo "ALT_WRITE_OK"
       };
 
       const msLabelKey = 'machine.openshift.io/cluster-api-machineset';
-      const fraAnnotations = (frankfurtDiversity || isGpu) ? {
+      const fraAnnotations = (frankfurtDiversity || isGpu || isCube) ? {
         'machine.openshift.io/vCPU':     String(cores),
         'machine.openshift.io/memoryMb': String(ramMB),
         'machine.openshift.io/GPU':      String(gpuCount),
@@ -2285,11 +2300,14 @@ echo "ALT_WRITE_OK"
       await ocpApply(msApiBase, targetMsName, ionosMs);
       log(`MachineSet "${targetMsName}" created with IONOS providerSpec\n`);
       log(`  Image: ${effectiveImageId || ionosImageId}${effectiveImageId && effectiveImageId !== ionosImageId ? ` (copied to ${effectiveRegion})` : ''}\n`);
-      log(isGpu
+      log(isCube
+        ? `  Cube template ${cubeTemplateId}: ${cores} vCPU / ${Math.round(ramMB / 1024)} GiB RAM / ${cubeStorageGB} GB built-in storage (DAS, no separate disk) / LAN ${lanId}
+`
+        : isGpu
         ? `  GPU template ${gpuTemplateId}: ${gpuCount}× H200 / ${cores} cores / ${Math.round(ramMB / 1024)} GiB RAM (storage attached by template; image applied to it) / LAN ${lanId}\n`
         : `  ${cores} cores / ${machRamGiB} GiB RAM / ${diskGB} GB ${diskType} / LAN ${lanId}\n`);
       log(`  VDC: ${effectiveDcId}${effectiveRegion ? ` (${effectiveRegion})` : ''}\n`);
-      log(`  Type: ${srvType}${isVcpu || isGpu ? '' : ` / CPU: ${cpuFam}`} / AZ: ${az}\n`);
+      log(`  Type: ${srvType}${isVcpu || isGpu || isCube ? '' : ` / CPU: ${cpuFam}`} / AZ: ${az}\n`);
       step(`IONOS MachineSet "${targetMsName}" created`, 'ok');
 
       // Delete any stale Machines that belong to this MachineSet but have a different
@@ -2830,6 +2848,12 @@ app.post('/api/ionos/location-cpu-families', async (req, res) => {
   }
 });
 
+// A Cube template is one of the "Basic" / "Memory" Cube sizes — not a GPU (H200) template.
+function isCubeTemplate(t) {
+  const p = t?.properties || {};
+  return /cube/i.test(p.name || '') && !/gpu/i.test(p.category || '');
+}
+
 // GET /api/ionos/templates?token=...
 // Lists IONOS Cube templates (id, name, cores, ram, storage) — this catalog
 // is global, not scoped to a datacenter location like images/CPU families.
@@ -2838,13 +2862,15 @@ app.get('/api/ionos/templates', async (req, res) => {
   if (!token) return res.status(400).json({ error: 'token required' });
   try {
     const data = await ionosGet('/templates?depth=1', token);
-    const templates = (data.items || []).map(t => ({
+    // The catalog also holds GPU templates; only Cube ones belong here.
+    const templates = (data.items || []).filter(isCubeTemplate).map(t => ({
       id:        t.id,
       name:      t.properties?.name || t.id,
+      category:  t.properties?.category || '',
       cores:     t.properties?.cores,
       ramGB:     Math.round((t.properties?.ram || 0) / 1024),
       storageGB: t.properties?.storageSize,
-    }));
+    })).sort((a, b) => (a.cores - b.cores) || (a.ramGB - b.ramGB) || a.name.localeCompare(b.name));
     res.json({ templates });
   } catch (err) {
     res.status(err.status || 502).json({ error: err.message });

@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.8.7</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.9.0</span>
   </div>
 
   <div class="banner-actions">
@@ -1240,9 +1240,17 @@
           <select id="as-ionos-server-type">
             <option value="ENTERPRISE" selected>Dedicated Core</option>
             <option value="VCPU">vCPU</option>
+            <option value="CUBE">Cube (fixed template, storage included)</option>
             <option value="GPU" id="as-ionos-gpu-option" disabled>GPU (NVIDIA H200) — de/fra/2, gb/bhx only</option>
           </select>
-          <div class="field-note">Dedicated Core = physical CPU cores; vCPU = shared virtual cores (no CPU family selection); GPU = NVIDIA H200 template (only at de/fra/2 and gb/bhx)</div>
+          <div class="field-note">Dedicated Core = physical CPU cores; vCPU = shared virtual cores (no CPU family selection); Cube = fixed T-shirt size with its own storage; GPU = NVIDIA H200 template (only at de/fra/2 and gb/bhx)</div>
+        </div>
+        <div class="form-group" id="as-ionos-cube-group" style="display:none">
+          <label for="as-ionos-cube-template">Cube Template</label>
+          <select id="as-ionos-cube-template">
+            <option value="">Loading…</option>
+          </select>
+          <div class="field-note">Cores, RAM and storage are fixed by the template (T-shirt size) and come with the VM &mdash; the RHCOS image is simply applied to the built-in storage (no separate disk is created). OpenShift workers need at least 2 vCPU and 8&nbsp;GB RAM, so Basic Cube XS and S are not selectable.</div>
         </div>
         <div class="form-group" id="as-ionos-gpu-group" style="display:none">
           <label for="as-ionos-gpu-template">GPU Template</label>
@@ -4165,20 +4173,24 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     document.getElementById('as-ionos-gpu-option').disabled = !gpuOk;
     if (sel.value === 'GPU' && !gpuOk) sel.value = 'ENTERPRISE';
     const isGpu = sel.value === 'GPU';
+    const isCube = sel.value === 'CUBE';
     const isDedicatedCore = sel.value === 'ENTERPRISE';
     document.getElementById('as-ionos-cpu-family-group').style.display = isDedicatedCore ? '' : 'none';
     document.getElementById('as-ionos-gpu-group').style.display = isGpu ? '' : 'none';
-    document.querySelectorAll('.as-ionos-sized').forEach(el => { el.style.display = isGpu ? 'none' : ''; });
+    document.getElementById('as-ionos-cube-group').style.display = isCube ? '' : 'none';
+    // GPU and Cube are sized entirely by their template (cores, RAM, storage) — hide the manual size fields.
+    document.querySelectorAll('.as-ionos-sized').forEach(el => { el.style.display = (isGpu || isCube) ? 'none' : ''; });
     if (isDedicatedCore && document.getElementById('as-ionos-cpu-family').options.length <= 1) {
       loadIonosCpuFamilies();
     }
     if (isGpu) loadIonosGpuTemplates();
+    if (isCube) loadIonosCubeTemplates();
     detectPrivateLan();
 
     // Naming convention: <type>-ionos, used for both the MachineSet and its MachineAutoscaler.
     const nameEl   = document.getElementById('as-ionos-ms-name');
-    const suggest  = isGpu ? 'gpu-ionos' : isDedicatedCore ? 'dcore-ionos' : 'vcpu-ionos';
-    const known    = ['dcore-ionos', 'vcpu-ionos', 'gpu-ionos'];
+    const suggest  = isGpu ? 'gpu-ionos' : isCube ? 'cube-ionos' : isDedicatedCore ? 'dcore-ionos' : 'vcpu-ionos';
+    const known    = ['dcore-ionos', 'vcpu-ionos', 'gpu-ionos', 'cube-ionos'];
     nameEl.placeholder = `e.g. ${suggest}`;
     if (!nameEl.value.trim() || known.includes(nameEl.value.trim())) nameEl.value = suggest;
   }
@@ -4207,6 +4219,28 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     } catch (e) {
       lanDetectedFor = '';
       note.textContent = 'Could not detect the private LAN (' + e.message + ') — enter the cluster network LAN ID.';
+    }
+  }
+
+  // Cube templates (T-shirt sizes). The template fixes cores, RAM and the built-in storage.
+  async function loadIonosCubeTemplates() {
+    const sel = document.getElementById('as-ionos-cube-template');
+    if (!ionosToken) { sel.innerHTML = '<option value="">Connect to IONOS first</option>'; return; }
+    try {
+      const r = await fetch(`/api/ionos/templates?token=${encodeURIComponent(ionosToken)}`);
+      const { templates, error } = await r.json();
+      if (error) throw new Error(error);
+      if (!templates || !templates.length) { sel.innerHTML = '<option value="">No Cube templates found</option>'; return; }
+      const prev = sel.value;
+      // OpenShift worker minimum: 2 vCPU / 8 GB — smaller Cubes are listed but not selectable.
+      const tooSmall = t => (t.cores || 0) < 2 || (t.ramGB || 0) < 8;
+      sel.innerHTML = templates.map(t =>
+        `<option value="${escHtml(t.id)}"${tooSmall(t) ? ' disabled' : ''}>${escHtml(t.name)}  (${t.cores} vCPU / ${t.ramGB} GB RAM / ${t.storageGB} GB storage included)${tooSmall(t) ? ' — too small for an OpenShift worker' : ''}</option>`
+      ).join('');
+      if ([...sel.options].some(o => o.value === prev && !o.disabled)) sel.value = prev;
+      else { const first = [...sel.options].find(o => !o.disabled); if (first) sel.value = first.value; }
+    } catch (e) {
+      sel.innerHTML = `<option value="">Failed to load templates: ${escHtml(e.message)}</option>`;
     }
   }
 
@@ -4403,6 +4437,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     const ionosServerType   = document.getElementById('as-ionos-server-type').value;
     const ionosCpuFamily    = ionosServerType === 'ENTERPRISE' ? document.getElementById('as-ionos-cpu-family').value : '';
     const ionosGpuTemplate  = ionosServerType === 'GPU' ? document.getElementById('as-ionos-gpu-template').value : '';
+    const ionosCubeTemplate = ionosServerType === 'CUBE' ? document.getElementById('as-ionos-cube-template').value : '';
     const ionosAz           = document.getElementById('as-ionos-az').value;
     const ionosDiskAz       = document.getElementById('as-ionos-disk-az').value;
     const deployProvider    = document.getElementById('as-deploy-provider')?.checked || false;
@@ -4443,6 +4478,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
       if (!ionosMsName) { showError('as-error', 'Enter a MachineSet name for the IONOS MachineSet.'); return; }
       if (!ionosImageId) { showError('as-error', 'Enter the RHCOS image UUID (use Browse Images to find it).'); return; }
       if (ionosServerType === 'GPU' && !ionosGpuTemplate) { showError('as-error', 'Select a GPU template (H200-S, H200-M, H200-L or H200-XL).'); return; }
+      if (ionosServerType === 'CUBE' && !ionosCubeTemplate) { showError('as-error', 'Select a Cube template (Basic Cube M or larger).'); return; }
       if (!ionosToken) { showError('as-error', 'IONOS API token is required for IONOS MachineSet creation.'); return; }
       if (!datacenterId) { showError('as-error', 'Connect to a VDC first (IONOS Datacenter ID is required).'); return; }
       if (!ionosLanId) { showError('as-error', 'Enter the LAN ID of the cluster\'s private worker network (it is filled in automatically once the cluster is detected).'); return; }
@@ -4538,6 +4574,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
           ionosImageId,
           serverType:           ionosServerType,
           gpuTemplateId:        ionosGpuTemplate,
+          cubeTemplateId:       ionosCubeTemplate,
           cpuFamily:            ionosCpuFamily,
           region:               effectiveRegion,
           availabilityZone:     ionosAz,
