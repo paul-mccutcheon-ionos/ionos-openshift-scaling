@@ -341,6 +341,444 @@ function requireFields(res, body, fields) {
 
 // ── Routes — OpenShift ─────────────────────────────────────────────────────
 
+// ══ Machine API provider / CSR auto-approver — shared definitions ══════════
+// Single source of truth used by deploy-provider, setup-autoscaler AND the
+// post-upgrade repair, so a fix made once is never missed in another copy.
+const MAPI_NS = 'openshift-machine-api';
+
+const PROVIDER_CLUSTERROLE_RULES = [
+  { apiGroups: ['machine.openshift.io'], resources: ['machines'],               verbs: ['get','list','watch','create','update','patch','delete'] },
+  { apiGroups: ['machine.openshift.io'], resources: ['machines/status'],        verbs: ['get','patch','update'] },
+  { apiGroups: ['machine.openshift.io'], resources: ['machines/finalizers'],    verbs: ['patch','update'] },
+  { apiGroups: ['machine.openshift.io'], resources: ['machinesets'],            verbs: ['get','list','watch','patch','update'] },
+  { apiGroups: ['machine.openshift.io'], resources: ['machinesets/status'],     verbs: ['get','patch','update'] },
+  { apiGroups: ['machine.openshift.io'], resources: ['machinesets/finalizers'], verbs: ['patch','update'] },
+  { apiGroups: [''],                     resources: ['secrets'],                verbs: ['get','list','watch'] },
+  // patch/update on nodes: the provider writes providerID + machine annotation onto the Node
+  { apiGroups: [''],                     resources: ['nodes'],                  verbs: ['get','list','watch','patch','update','delete'] },
+  { apiGroups: ['coordination.k8s.io'],  resources: ['leases'],                 verbs: ['get','list','watch','create','update','patch','delete'] },
+  { apiGroups: [''],                     resources: ['events'],                 verbs: ['create','patch'] }
+];
+
+const APPROVER_CLUSTERROLE_RULES = [
+  { apiGroups: ['certificates.k8s.io'], resources: ['certificatesigningrequests'],           verbs: ['get','list','watch'] },
+  { apiGroups: ['certificates.k8s.io'], resources: ['certificatesigningrequests/approval'],  verbs: ['update','patch'] },
+  { apiGroups: ['certificates.k8s.io'], resources: ['signers'],
+    resourceNames: ['kubernetes.io/kube-apiserver-client-kubelet','kubernetes.io/kubelet-serving'],
+    verbs: ['approve'] }
+];
+
+// Last-resort image (4.19.55 release payload `cli`). Normally the image is resolved from the
+// cluster's own openshift/cli ImageStream so the client always matches the cluster version.
+const APPROVER_FALLBACK_IMAGE = 'quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:139bb9a6234835efdfbb3890021ed3442632d277d2da9c3b462d2e62b7acc871';
+
+// --request-timeout stops one hung API call blocking the loop forever, and errors are logged
+// (not discarded). The cluster's own `oc` image is used because an unpinned bitnami/kubectl:latest
+// moved to kubectl v1.37 and wedged/failed against OCP 4.19 / Kubernetes 1.32.
+const APPROVER_SCRIPT = [
+  'echo "ionos-machine-auto-approver started"',
+  'while true; do',
+  '  OUT=$(oc get csr --request-timeout=30s --no-headers 2>&1) || echo "list failed: $OUT"',
+  '  echo "$OUT" | while read name age signer requestor dur cond; do',
+  '    if [ "$cond" = "Pending" ]; then',
+  '      echo "Approving CSR: $name"',
+  '      oc adm certificate approve "$name" --request-timeout=30s 2>&1 || true',
+  '    fi',
+  '  done',
+  '  sleep 30',
+  'done'
+].join('\n');
+
+// 50m CPU / 64Mi was far too small: API discovery (264 resources on OCP 4.19) was CPU-throttled
+// ~89% of the time and the loop wedged.
+const APPROVER_RESOURCES = { requests: { cpu: '50m', memory: '64Mi' }, limits: { cpu: '500m', memory: '256Mi' } };
+
+function buildApproverDeployment(image) {
+  return {
+    apiVersion: 'apps/v1', kind: 'Deployment',
+    metadata: { name: 'ionos-machine-auto-approver', namespace: MAPI_NS, labels: { app: 'ionos-machine-auto-approver' } },
+    spec: {
+      replicas: 1, selector: { matchLabels: { app: 'ionos-machine-auto-approver' } },
+      template: {
+        metadata: { labels: { app: 'ionos-machine-auto-approver' } },
+        spec: {
+          serviceAccountName: 'ionos-machine-auto-approver',
+          priorityClassName:  'system-cluster-critical',
+          nodeSelector: { 'node-role.kubernetes.io/master': '' },
+          tolerations: [
+            { key: 'node-role.kubernetes.io/master', effect: 'NoSchedule' },
+            { key: 'node.kubernetes.io/not-ready',   effect: 'NoExecute', tolerationSeconds: 120 },
+            { key: 'node.kubernetes.io/unreachable', effect: 'NoExecute', tolerationSeconds: 120 }
+          ],
+          containers: [{
+            name: 'approver', image, imagePullPolicy: 'IfNotPresent',
+            command: ['/bin/sh', '-c'], args: [APPROVER_SCRIPT],
+            env: [{ name: 'HOME', value: '/tmp' }],
+            resources: APPROVER_RESOURCES,
+            securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'] } }
+          }],
+          securityContext: { runAsNonRoot: true, seccompProfile: { type: 'RuntimeDefault' } },
+          terminationGracePeriodSeconds: 10
+        }
+      }
+    }
+  };
+}
+
+// The release payload's `cli` image, via the CVO-managed openshift/cli ImageStream.
+// Returns a digest-pinned pullspec, or null if it can't be read.
+async function resolveClusterCliImage(apiUrl, token) {
+  try {
+    const is   = await ocpGet(apiUrl, '/apis/image.openshift.io/v1/namespaces/openshift/imagestreams/cli', token);
+    const tags = is.status?.tags || [];
+    const t    = tags.find(x => x.tag === 'latest') || tags[0];
+    const ref  = t?.items?.[0]?.dockerImageReference;
+    return ref && ref.includes('@sha256:') ? ref : null;
+  } catch (_) { return null; }
+}
+
+// Create-or-replace one object. `base` is the collection path (no host).
+async function ocpApplyObj(apiUrl, token, base, name, body) {
+  let existing = null;
+  try { existing = await ocpGet(apiUrl, `${base}/${encodeURIComponent(name)}`, token); }
+  catch (e) { if (e.status !== 404) throw e; }
+  if (existing) {
+    body.metadata.resourceVersion = existing.metadata.resourceVersion;
+    return ocpPut(apiUrl, `${base}/${encodeURIComponent(name)}`, token, body);
+  }
+  const r = await fetch(`${apiUrl}${base}`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify(body), agent: INSECURE_AGENT
+  });
+  if (!r.ok) throw new Error(`POST ${base} returned ${r.status}: ${await r.text()}`);
+  return r.json();
+}
+
+// ══ Post-upgrade check / repair ═════════════════════════════════════════════
+// Replays, as idempotent checks with optional fixes, everything that had to be done by hand to get
+// autoscaling working again after the 4.18 → 4.19 upgrade.
+const IGN_DIR = '/root/ignition-serve';
+const IGN_BACKUP_DIR = '/root/ign-backups';          // outside the HTTP docroot on purpose
+const MIN_PROVISION_MINUTES = 30;                    // IONOS VM + volume + image boot can take 15–20 min
+
+function durMinutes(s) {
+  if (!s) return null;
+  let m = 0, x; const re = /(\d+(?:\.\d+)?)(h|m|s)/g;
+  while ((x = re.exec(s))) m += x[2] === 'h' ? +x[1] * 60 : x[2] === 'm' ? +x[1] : +x[1] / 60;
+  return m;
+}
+const pemNorm = s => (s || '').replace(/\s+/g, '');
+const shortHash = s => require('crypto').createHash('sha256').update(pemNorm(s)).digest('hex').slice(0, 12);
+
+function decodeDataUrl(src) {
+  const m = /^data:([^,]*),([\s\S]*)$/.exec(src || '');
+  if (!m) return null;
+  return /;base64/.test(m[1]) ? Buffer.from(m[2], 'base64').toString('utf8') : decodeURIComponent(m[2]);
+}
+function encodeDataUrl(pem, oldSrc) {
+  const m = /^(data:[^,]*,)/.exec(oldSrc || '');
+  const prefix = m && /;base64/.test(m[1]) ? m[1] : 'data:text/plain;charset=utf-8;base64,';
+  return prefix + Buffer.from(pem).toString('base64');
+}
+const ignCas = ign => ign?.ignition?.security?.tls?.certificateAuthorities || [];
+
+// The CA the Machine Config Server currently presents — from the worker user-data secret.
+async function referenceMcsCa(ctx) {
+  if (ctx._refCa) return ctx._refCa;
+  let secret = null;
+  for (const name of ['worker-user-data-managed', 'worker-user-data']) {
+    try { secret = await ocpGet(ctx.apiUrl, `/api/v1/namespaces/${MAPI_NS}/secrets/${name}`, ctx.token); break; }
+    catch (e) { if (e.status !== 404) throw e; }
+  }
+  if (!secret) throw new Error('worker-user-data(-managed) secret not found in openshift-machine-api');
+  const ign = JSON.parse(Buffer.from(secret.data.userData, 'base64').toString('utf8'));
+  const src = ignCas(ign)[0]?.source;
+  const pem = decodeDataUrl(src);
+  if (!pem || !pem.includes('BEGIN CERTIFICATE')) throw new Error('could not extract the MCS CA from the worker user-data secret');
+  return (ctx._refCa = pem);
+}
+
+async function withMgmtSsh(ctx, fn) {
+  if (!ctx.ssh?.host || !ctx.ssh?.key) throw Object.assign(new Error('management host SSH details not supplied'), { skip: true });
+  const conn = await sshConnect(ctx.ssh.host, ctx.ssh.user || 'root', ctx.ssh.key, ctx.ssh.pass);
+  try { return await fn(conn); } finally { conn.end(); }
+}
+
+async function readIgnStubs(conn) {
+  const out = (await sshRunScript(conn,
+    `for f in ${IGN_DIR}/*.ign; do [ -f "$f" ] && { echo "@@FILE $f"; cat "$f"; echo; }; done; true`)).stdout;
+  return out.split('@@FILE ').slice(1).map(chunk => {
+    const nl = chunk.indexOf('\n');
+    const file = chunk.slice(0, nl).trim();
+    let json = null, err = null;
+    try { json = JSON.parse(chunk.slice(nl + 1).trim()); } catch (e) { err = e.message; }
+    return { file, json, err };
+  });
+}
+
+function stubCaState(stub, refPem) {
+  if (!stub.json) return { file: stub.file, state: 'unparseable', detail: stub.err };
+  const cas = ignCas(stub.json);
+  const idx = cas.findIndex(c => (decodeDataUrl(c.source) || '').includes('BEGIN CERTIFICATE'));
+  if (idx < 0) return { file: stub.file, state: 'no-ca' };       // e.g. plain-HTTP stub: nothing to rotate
+  const pem = decodeDataUrl(cas[idx].source);
+  return { file: stub.file, idx, state: pemNorm(pem) === pemNorm(refPem) ? 'ok' : 'stale', hash: shortHash(pem) };
+}
+
+const POST_UPGRADE_STEPS = [
+  {
+    id: 'version', title: 'Cluster version & upgrade state', fixable: false,
+    async run(ctx) {
+      const cv = await ocpGet(ctx.apiUrl, '/apis/config.openshift.io/v1/clusterversions/version', ctx.token);
+      const cond = t => (cv.status?.conditions || []).find(c => c.type === t);
+      const ver = cv.status?.desired?.version || '?';
+      ctx.progressing = cond('Progressing')?.status === 'True';
+      if (ctx.progressing) return { status: 'warn', detail: `${ver} — upgrade still in progress; wait for it to finish before repairing.` };
+      const up = cond('Upgradeable');
+      return { status: 'ok', detail: `${ver}, upgrade complete.` + (up?.status === 'False' ? ` Next minor blocked: ${up.message}` : '') };
+    }
+  },
+  {
+    id: 'ignition-ca', title: 'Worker Ignition stubs carry the current Machine Config Server CA', fixable: true,
+    async run(ctx) {
+      const ref = await referenceMcsCa(ctx);
+      const stubs = await withMgmtSsh(ctx, readIgnStubs);
+      const states = stubs.map(s => stubCaState(s, ref));
+      const stale = states.filter(s => s.state === 'stale'), bad = states.filter(s => s.state === 'unparseable');
+      const base = f => f.split('/').pop();
+      if (!states.length) return { status: 'warn', detail: `No *.ign files in ${IGN_DIR} on the management host.` };
+      if (stale.length || bad.length) {
+        return { status: 'drift', detail: `Cluster CA ${shortHash(ref)}. Stale: ${stale.map(s => `${base(s.file)} (${s.hash})`).join(', ') || 'none'}.` +
+          (bad.length ? ` Unparseable: ${bad.map(s => base(s.file)).join(', ')}.` : '') +
+          ' New nodes booting from a stale stub loop on "x509: certificate signed by unknown authority".' };
+      }
+      return { status: 'ok', detail: `${states.filter(s => s.state === 'ok').length} stub(s) match cluster CA ${shortHash(ref)}.` };
+    },
+    async fix(ctx) {
+      const ref = await referenceMcsCa(ctx);
+      return withMgmtSsh(ctx, async conn => {
+        const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+        const fixed = [];
+        for (const stub of await readIgnStubs(conn)) {
+          const st = stubCaState(stub, ref);
+          if (st.state !== 'stale') continue;
+          const ign = stub.json;
+          ign.ignition.security.tls.certificateAuthorities[st.idx].source =
+            encodeDataUrl(ref, ign.ignition.security.tls.certificateAuthorities[st.idx].source);
+          const b64 = Buffer.from(JSON.stringify(ign)).toString('base64');
+          const name = stub.file.split('/').pop();
+          await sshRunScript(conn, [
+            'set -e', `mkdir -p ${IGN_BACKUP_DIR}`,
+            `cp -p '${stub.file}' '${IGN_BACKUP_DIR}/${name}.bak-${stamp}'`,
+            `echo '${b64}' | base64 -d > '${stub.file}.tmp'`,
+            `chmod --reference='${stub.file}' '${stub.file}.tmp'`,
+            `mv '${stub.file}.tmp' '${stub.file}'`
+          ].join('\n'));
+          fixed.push(name);
+        }
+        // verify what is actually on disk now
+        const after = (await readIgnStubs(conn)).map(s => stubCaState(s, ref)).filter(s => s.state === 'stale');
+        if (after.length) throw new Error(`still stale after rewrite: ${after.map(s => s.file).join(', ')}`);
+        return `Rewrote CA in ${fixed.length} stub(s): ${fixed.join(', ') || 'none'} (backups in ${IGN_BACKUP_DIR}).`;
+      });
+    }
+  },
+  {
+    id: 'provider-rbac', title: 'Provider ClusterRole (incl. node patch/update)', fixable: true,
+    async run(ctx) {
+      let cr;
+      try { cr = await ocpGet(ctx.apiUrl, '/apis/rbac.authorization.k8s.io/v1/clusterroles/ionos-machine-api-provider', ctx.token); }
+      catch (e) { if (e.status === 404) return { status: 'drift', detail: 'ClusterRole ionos-machine-api-provider not found.' }; throw e; }
+      const missing = [];
+      for (const want of PROVIDER_CLUSTERROLE_RULES) {
+        const have = new Set((cr.rules || [])
+          .filter(r => r.resources?.includes(want.resources[0]) && r.apiGroups?.includes(want.apiGroups[0]))
+          .flatMap(r => r.verbs || []));
+        const lack = want.verbs.filter(v => !have.has(v) && !have.has('*'));
+        if (lack.length) missing.push(`${want.resources[0]}: ${lack.join('/')}`);
+      }
+      return missing.length
+        ? { status: 'drift', detail: `Missing verbs — ${missing.join('; ')}. Without node patch the provider cannot set providerID, so scale-down breaks.` }
+        : { status: 'ok', detail: 'All required verbs present.' };
+    },
+    async fix(ctx) {
+      const body = { apiVersion: 'rbac.authorization.k8s.io/v1', kind: 'ClusterRole',
+                     metadata: { name: 'ionos-machine-api-provider' }, rules: PROVIDER_CLUSTERROLE_RULES };
+      await ocpApplyObj(ctx.apiUrl, ctx.token, '/apis/rbac.authorization.k8s.io/v1/clusterroles', 'ionos-machine-api-provider', body);
+      return 'ClusterRole ionos-machine-api-provider reapplied.';
+    }
+  },
+  {
+    id: 'approver', title: 'CSR auto-approver (image, script, resources)', fixable: true,
+    async run(ctx) {
+      ctx.cliImage = ctx.cliImage !== undefined ? ctx.cliImage : await resolveClusterCliImage(ctx.apiUrl, ctx.token);
+      let dep;
+      try { dep = await ocpGet(ctx.apiUrl, `/apis/apps/v1/namespaces/${MAPI_NS}/deployments/ionos-machine-auto-approver`, ctx.token); }
+      catch (e) { if (e.status === 404) return { status: 'drift', detail: 'Deployment ionos-machine-auto-approver not found.' }; throw e; }
+      const c = dep.spec?.template?.spec?.containers?.[0] || {};
+      const want = approverImageFor(ctx, c.image);
+      const issues = [];
+      if (c.image !== want) issues.push(`image ${(c.image || '').slice(0, 60)}… ≠ cluster cli image`);
+      if ((c.args || [])[0] !== APPROVER_SCRIPT) issues.push('script differs (no request timeouts / error logging)');
+      if (c.resources?.limits?.cpu !== APPROVER_RESOURCES.limits.cpu) issues.push(`CPU limit ${c.resources?.limits?.cpu || 'none'} (needs ${APPROVER_RESOURCES.limits.cpu})`);
+      if ((dep.status?.readyReplicas || 0) < 1) issues.push('no ready replica');
+      const note = ctx.cliImage ? '' : ' (cluster cli ImageStream unreadable — image check is best-effort)';
+      return issues.length ? { status: 'drift', detail: issues.join('; ') + note }
+                           : { status: 'ok', detail: 'Running with current cluster oc image.' + note };
+    },
+    async fix(ctx) {
+      ctx.cliImage = ctx.cliImage !== undefined ? ctx.cliImage : await resolveClusterCliImage(ctx.apiUrl, ctx.token);
+      let current = '';
+      try { current = (await ocpGet(ctx.apiUrl, `/apis/apps/v1/namespaces/${MAPI_NS}/deployments/ionos-machine-auto-approver`, ctx.token))
+                        .spec?.template?.spec?.containers?.[0]?.image || ''; } catch (_) {}
+      const image = approverImageFor(ctx, current);
+      const a = ctx.apiUrl, t = ctx.token;
+      await ocpApplyObj(a, t, `/api/v1/namespaces/${MAPI_NS}/serviceaccounts`, 'ionos-machine-auto-approver',
+        { apiVersion: 'v1', kind: 'ServiceAccount', metadata: { name: 'ionos-machine-auto-approver', namespace: MAPI_NS } });
+      await ocpApplyObj(a, t, '/apis/rbac.authorization.k8s.io/v1/clusterroles', 'ionos-machine-auto-approver',
+        { apiVersion: 'rbac.authorization.k8s.io/v1', kind: 'ClusterRole', metadata: { name: 'ionos-machine-auto-approver' }, rules: APPROVER_CLUSTERROLE_RULES });
+      await ocpApplyObj(a, t, '/apis/rbac.authorization.k8s.io/v1/clusterrolebindings', 'ionos-machine-auto-approver',
+        { apiVersion: 'rbac.authorization.k8s.io/v1', kind: 'ClusterRoleBinding', metadata: { name: 'ionos-machine-auto-approver' },
+          roleRef: { apiGroup: 'rbac.authorization.k8s.io', kind: 'ClusterRole', name: 'ionos-machine-auto-approver' },
+          subjects: [{ kind: 'ServiceAccount', name: 'ionos-machine-auto-approver', namespace: MAPI_NS }] });
+      await ocpApplyObj(a, t, `/apis/apps/v1/namespaces/${MAPI_NS}/deployments`, 'ionos-machine-auto-approver', buildApproverDeployment(image));
+      return `Approver redeployed with image ${image.slice(image.indexOf('@') >= 0 ? image.indexOf('@') - 20 : 0)}.`;
+    }
+  },
+  {
+    id: 'autoscaler-timeout', title: `ClusterAutoscaler maxNodeProvisionTime ≥ ${MIN_PROVISION_MINUTES}m`, fixable: true,
+    async run(ctx) {
+      let ca;
+      try { ca = await ocpGet(ctx.apiUrl, '/apis/autoscaling.openshift.io/v1/clusterautoscalers/default', ctx.token); }
+      catch (e) { if (e.status === 404) return { status: 'skipped', detail: 'No ClusterAutoscaler "default" in this cluster.' }; throw e; }
+      const v = ca.spec?.maxNodeProvisionTime;
+      const mins = durMinutes(v) ?? 15;      // autoscaler default is 15m
+      return mins >= MIN_PROVISION_MINUTES
+        ? { status: 'ok', detail: `maxNodeProvisionTime = ${v}.` }
+        : { status: 'drift', detail: `maxNodeProvisionTime = ${v || '(unset → 15m default)'}; IONOS nodes take 15–20 min to appear, so the autoscaler deletes them as "unregistered".` };
+    },
+    async fix(ctx) {
+      await ocpPatch(ctx.apiUrl, '/apis/autoscaling.openshift.io/v1/clusterautoscalers/default', ctx.token,
+        { spec: { maxNodeProvisionTime: `${MIN_PROVISION_MINUTES}m` } });
+      return `maxNodeProvisionTime set to ${MIN_PROVISION_MINUTES}m.`;
+    }
+  },
+  {
+    id: 'node-links', title: 'Nodes linked to their Machines (providerID, annotation, nodeRef)', fixable: true,
+    async run(ctx) {
+      const found = await findNodeLinkDrift(ctx);
+      if (!found.length) return { status: 'ok', detail: 'All autoscaled nodes are linked to their Machines.' };
+      return { status: 'drift', detail: found.map(f => `${f.node}: ${f.needs.join(', ')}`).join('; ') +
+        '. Unlinked nodes are never scaled down by the autoscaler.' };
+    },
+    async fix(ctx) {
+      const found = await findNodeLinkDrift(ctx), done = [];
+      for (const f of found) {
+        if (f.needs.includes('providerID') || f.needs.includes('machine annotation')) {
+          const patch = { metadata: { annotations: { 'machine.openshift.io/machine': `${MAPI_NS}/${f.machine}` } } };
+          if (f.needs.includes('providerID')) patch.spec = { providerID: f.pid };
+          await ocpPatch(ctx.apiUrl, `/api/v1/nodes/${encodeURIComponent(f.node)}`, ctx.token, patch);
+        }
+        if (f.needs.includes('machine nodeRef')) {
+          await ocpPatch(ctx.apiUrl, `/apis/machine.openshift.io/v1beta1/namespaces/${MAPI_NS}/machines/${encodeURIComponent(f.machine)}/status`,
+            ctx.token, { status: { nodeRef: { kind: 'Node', name: f.node, uid: f.uid } } });
+        }
+        done.push(f.node);
+      }
+      return `Linked ${done.length} node(s): ${done.join(', ') || 'none'}.`;
+    }
+  },
+  {
+    id: 'stuck-machines', title: 'Machines stuck outside Running', fixable: false,
+    async run(ctx) {
+      const ms = await ocpGet(ctx.apiUrl, `/apis/machine.openshift.io/v1beta1/namespaces/${MAPI_NS}/machines`, ctx.token);
+      const stuck = (ms.items || []).filter(m => m.status?.phase && m.status.phase !== 'Running' &&
+        Date.now() - Date.parse(m.metadata.creationTimestamp) > 30 * 60000);
+      return stuck.length
+        ? { status: 'warn', detail: stuck.map(m => `${m.metadata.name} (${m.status.phase})`).join(', ') + ' — investigate or delete; not auto-fixed.' }
+        : { status: 'ok', detail: 'No machines stuck.' };
+    }
+  }
+];
+
+function approverImageFor(ctx, current) {
+  if (ctx.cliImage) return ctx.cliImage;
+  if (current && current.includes('@sha256:') && !/bitnami/.test(current)) return current;   // keep a pinned one
+  return APPROVER_FALLBACK_IMAGE;
+}
+
+async function findNodeLinkDrift(ctx) {
+  const [machines, nodes] = await Promise.all([
+    ocpGet(ctx.apiUrl, `/apis/machine.openshift.io/v1beta1/namespaces/${MAPI_NS}/machines`, ctx.token),
+    ocpGet(ctx.apiUrl, '/api/v1/nodes', ctx.token)
+  ]);
+  const byName = new Map(nodes.items.map(n => [n.metadata.name, n]));
+  const byIp = new Map();
+  for (const n of nodes.items) for (const a of n.status?.addresses || []) if (a.type === 'InternalIP') byIp.set(a.address, n);
+  const out = [];
+  for (const m of machines.items) {
+    if (!(m.metadata.ownerReferences || []).some(r => r.kind === 'MachineSet')) continue;   // autoscaled workers only
+    const pid = m.spec?.providerID;
+    if (!pid) continue;                                                                      // not provisioned yet
+    const ip = (m.status?.addresses || []).find(a => a.type === 'InternalIP')?.address;
+    const n = byName.get(m.status?.nodeRef?.name) || byName.get(m.metadata.name) || (ip && byIp.get(ip));
+    if (!n) continue;                                                                        // node not joined yet
+    const needs = [];
+    if (!n.spec?.providerID) needs.push('providerID');
+    else if (n.spec.providerID !== pid) continue;                                            // immutable & different: leave alone
+    if (n.metadata.annotations?.['machine.openshift.io/machine'] !== `${MAPI_NS}/${m.metadata.name}`) needs.push('machine annotation');
+    if (!m.status?.nodeRef) needs.push('machine nodeRef');
+    if (needs.length) out.push({ machine: m.metadata.name, node: n.metadata.name, uid: n.metadata.uid, pid, needs });
+  }
+  return out;
+}
+
+function postUpgradeCtx(body) {
+  return {
+    apiUrl: body.clusterApiUrl, token: body.ocpToken,
+    ssh: body.mgmtHost && body.sshKey ? { host: body.mgmtHost, user: body.sshUser || 'root', key: body.sshKey, pass: body.sshPassphrase } : null
+  };
+}
+async function runPostUpgradeStep(step, ctx) {
+  try { return { id: step.id, title: step.title, fixable: step.fixable, ...(await step.run(ctx)) }; }
+  catch (e) {
+    return e.skip ? { id: step.id, title: step.title, fixable: step.fixable, status: 'skipped', detail: e.message }
+                  : { id: step.id, title: step.title, fixable: step.fixable, status: 'error', detail: e.message };
+  }
+}
+
+app.post('/api/post-upgrade/check', async (req, res) => {
+  if (!req.body.clusterApiUrl || !req.body.ocpToken) return res.status(400).json({ error: 'clusterApiUrl and ocpToken are required.' });
+  const ctx = postUpgradeCtx(req.body);
+  const checks = [];
+  for (const step of POST_UPGRADE_STEPS) checks.push(await runPostUpgradeStep(step, ctx));
+  res.json({ checks, progressing: !!ctx.progressing, drift: checks.filter(c => c.status === 'drift').length });
+});
+
+app.post('/api/post-upgrade/repair', async (req, res) => {
+  if (!req.body.clusterApiUrl || !req.body.ocpToken) return res.status(400).json({ error: 'clusterApiUrl and ocpToken are required.' });
+  const ctx = postUpgradeCtx(req.body);
+  const wanted = Array.isArray(req.body.steps) && req.body.steps.length ? new Set(req.body.steps) : null;
+  const results = [];
+  try {
+    await POST_UPGRADE_STEPS[0].run(ctx);       // sets ctx.progressing
+    if (ctx.progressing && !req.body.force)
+      return res.status(409).json({ error: 'The cluster upgrade is still in progress. Wait for it to complete (or pass force).' });
+    for (const step of POST_UPGRADE_STEPS) {
+      if (!step.fix || (wanted && !wanted.has(step.id))) continue;
+      const before = await runPostUpgradeStep(step, ctx);
+      if (before.status !== 'drift') { results.push({ id: step.id, title: step.title, ok: true, changed: false, message: `No change needed (${before.status}).` }); continue; }
+      try { results.push({ id: step.id, title: step.title, ok: true, changed: true, message: await step.fix(ctx) }); }
+      catch (e) { results.push({ id: step.id, title: step.title, ok: false, changed: false, message: e.message }); }
+    }
+    ctx._refCa = undefined; ctx.cliImage = undefined;
+    const checks = [];
+    for (const step of POST_UPGRADE_STEPS) checks.push(await runPostUpgradeStep(step, ctx));
+    res.json({ results, checks, drift: checks.filter(c => c.status === 'drift').length });
+  } catch (e) { res.status(502).json({ error: e.message, results }); }
+});
+
 app.get('/download/env-example', (req, res) => {
   res.download(path.join(__dirname, '.env.example'), '.env.example', { dotfiles: 'allow' });
 });
@@ -677,18 +1115,7 @@ app.post('/api/deploy-provider', async (req, res) => {
     await ocpApply(crBase, 'ionos-machine-api-provider', {
       apiVersion: 'rbac.authorization.k8s.io/v1', kind: 'ClusterRole',
       metadata: { name: 'ionos-machine-api-provider' },
-      rules: [
-        { apiGroups: ['machine.openshift.io'], resources: ['machines'],              verbs: ['get','list','watch','create','update','patch','delete'] },
-        { apiGroups: ['machine.openshift.io'], resources: ['machines/status'],       verbs: ['get','patch','update'] },
-        { apiGroups: ['machine.openshift.io'], resources: ['machines/finalizers'],   verbs: ['patch','update'] },
-        { apiGroups: ['machine.openshift.io'], resources: ['machinesets'],           verbs: ['get','list','watch','patch','update'] },
-        { apiGroups: ['machine.openshift.io'], resources: ['machinesets/status'],    verbs: ['get','patch','update'] },
-        { apiGroups: ['machine.openshift.io'], resources: ['machinesets/finalizers'],verbs: ['patch','update'] },
-        { apiGroups: [''],                     resources: ['secrets'],               verbs: ['get','list','watch'] },
-        { apiGroups: [''],                     resources: ['nodes'],                 verbs: ['get','list','watch','patch','update','delete'] },
-        { apiGroups: ['coordination.k8s.io'],  resources: ['leases'],               verbs: ['get','list','watch','create','update','patch','delete'] },
-        { apiGroups: [''],                     resources: ['events'],                verbs: ['create','patch'] }
-      ]
+      rules: PROVIDER_CLUSTERROLE_RULES
     });
     log.push('ClusterRole "ionos-machine-api-provider" created/updated');
 
@@ -770,13 +1197,7 @@ app.post('/api/deploy-provider', async (req, res) => {
     await ocpApply(crBase, 'ionos-machine-auto-approver', {
       apiVersion: 'rbac.authorization.k8s.io/v1', kind: 'ClusterRole',
       metadata: { name: 'ionos-machine-auto-approver' },
-      rules: [
-        { apiGroups: ['certificates.k8s.io'], resources: ['certificatesigningrequests'],          verbs: ['get','list','watch'] },
-        { apiGroups: ['certificates.k8s.io'], resources: ['certificatesigningrequests/approval'], verbs: ['update','patch'] },
-        { apiGroups: ['certificates.k8s.io'], resources: ['signers'],
-          resourceNames: ['kubernetes.io/kube-apiserver-client-kubelet','kubernetes.io/kubelet-serving'],
-          verbs: ['approve'] }
-      ]
+      rules: APPROVER_CLUSTERROLE_RULES
     });
     log.push('ClusterRole "ionos-machine-auto-approver" created/updated');
 
@@ -788,57 +1209,9 @@ app.post('/api/deploy-provider', async (req, res) => {
     });
     log.push('ClusterRoleBinding "ionos-machine-auto-approver" created/updated');
 
-    const approverScript = [
-      'echo "ionos-machine-auto-approver started"',
-      'while true; do',
-      // --request-timeout stops one hung API call blocking the loop forever, and errors are
-      // logged (not discarded). Uses the cluster's own `oc` CLI image so the client version
-      // always matches the cluster (an unpinned bitnami/kubectl:latest moved to kubectl v1.37
-      // and wedged/failed against OCP 4.19 / Kubernetes 1.32).
-      '  OUT=$(oc get csr --request-timeout=30s --no-headers 2>&1) || echo "list failed: $OUT"',
-      '  echo "$OUT" | while read name age signer requestor dur cond; do',
-      '    if [ "$cond" = "Pending" ]; then',
-      '      echo "Approving CSR: $name"',
-      '      oc adm certificate approve "$name" --request-timeout=30s 2>&1 || true',
-      '    fi',
-      '  done',
-      '  sleep 30',
-      'done'
-    ].join('\n');
-    // Digest of the 4.19.55 release payload's `cli` image (oc adm release info --image-for=cli).
-    // Update this to the CLI image of your cluster's release when deploying elsewhere.
-    const approverImage = 'quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:139bb9a6234835efdfbb3890021ed3442632d277d2da9c3b462d2e62b7acc871';
-    await ocpApply(depBase, 'ionos-machine-auto-approver', {
-      apiVersion: 'apps/v1', kind: 'Deployment',
-      metadata: { name: 'ionos-machine-auto-approver', namespace: ns, labels: { app: 'ionos-machine-auto-approver' } },
-      spec: {
-        replicas: 1, selector: { matchLabels: { app: 'ionos-machine-auto-approver' } },
-        template: {
-          metadata: { labels: { app: 'ionos-machine-auto-approver' } },
-          spec: {
-            serviceAccountName: 'ionos-machine-auto-approver',
-            priorityClassName:  'system-cluster-critical',
-            nodeSelector: { 'node-role.kubernetes.io/master': '' },
-            tolerations: [
-              { key: 'node-role.kubernetes.io/master',    effect: 'NoSchedule' },
-              { key: 'node.kubernetes.io/not-ready',      effect: 'NoExecute', tolerationSeconds: 120 },
-              { key: 'node.kubernetes.io/unreachable',    effect: 'NoExecute', tolerationSeconds: 120 }
-            ],
-            containers: [{
-              name: 'approver', image: approverImage, imagePullPolicy: 'IfNotPresent',
-              command: ['/bin/sh', '-c'], args: [approverScript],
-              env: [{ name: 'HOME', value: '/tmp' }],
-              // 50m CPU / 64Mi was far too small: kubectl API discovery (264 API resources on
-              // OCP 4.19) was CPU-throttled ~89% of the time and the loop wedged.
-              resources: { requests: { cpu: '50m', memory: '64Mi' }, limits: { cpu: '500m', memory: '256Mi' } },
-              securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'] } }
-            }],
-            securityContext: { runAsNonRoot: true, seccompProfile: { type: 'RuntimeDefault' } },
-            terminationGracePeriodSeconds: 10
-          }
-        }
-      }
-    });
+    // Image = the cluster's own release-payload oc CLI (resolved live; falls back to a pinned 4.19 digest).
+    const approverImage = (await resolveClusterCliImage(clusterApiUrl, ocpToken)) || APPROVER_FALLBACK_IMAGE;
+    await ocpApply(depBase, 'ionos-machine-auto-approver', buildApproverDeployment(approverImage));
     log.push('Deployment "ionos-machine-auto-approver" created/updated (image: cluster oc CLI, digest-pinned)');
     } // end else (approverRunning)
 
@@ -1018,18 +1391,7 @@ app.post('/api/setup-autoscaler', async (req, res) => {
       const cr = {
         apiVersion: 'rbac.authorization.k8s.io/v1', kind: 'ClusterRole',
         metadata: { name: 'ionos-machine-api-provider' },
-        rules: [
-          { apiGroups: ['machine.openshift.io'], resources: ['machines'],               verbs: ['get','list','watch','create','update','patch','delete'] },
-          { apiGroups: ['machine.openshift.io'], resources: ['machines/status'],       verbs: ['get','patch','update'] },
-          { apiGroups: ['machine.openshift.io'], resources: ['machines/finalizers'],   verbs: ['patch','update'] },
-          { apiGroups: ['machine.openshift.io'], resources: ['machinesets'],           verbs: ['get','list','watch','patch','update'] },
-          { apiGroups: ['machine.openshift.io'], resources: ['machinesets/status'],    verbs: ['get','patch','update'] },
-          { apiGroups: ['machine.openshift.io'], resources: ['machinesets/finalizers'],verbs: ['patch','update'] },
-          { apiGroups: [''],                     resources: ['secrets'],               verbs: ['get','list','watch'] },
-          { apiGroups: [''],                     resources: ['nodes'],                 verbs: ['get','list','watch','patch','update','delete'] },
-          { apiGroups: ['coordination.k8s.io'],  resources: ['leases'],               verbs: ['get','list','watch','create','update','patch','delete'] },
-          { apiGroups: [''],                     resources: ['events'],                verbs: ['create','patch'] }
-        ]
+        rules: PROVIDER_CLUSTERROLE_RULES
       };
       await ocpApply(crBase, 'ionos-machine-api-provider', cr);
       log('ClusterRole "ionos-machine-api-provider" created/updated\n');
@@ -1125,13 +1487,7 @@ app.post('/api/setup-autoscaler', async (req, res) => {
       const aaCr = {
         apiVersion: 'rbac.authorization.k8s.io/v1', kind: 'ClusterRole',
         metadata: { name: 'ionos-machine-auto-approver' },
-        rules: [
-          { apiGroups: ['certificates.k8s.io'], resources: ['certificatesigningrequests'],          verbs: ['get','list','watch'] },
-          { apiGroups: ['certificates.k8s.io'], resources: ['certificatesigningrequests/approval'], verbs: ['update','patch'] },
-          { apiGroups: ['certificates.k8s.io'], resources: ['signers'],
-            resourceNames: ['kubernetes.io/kube-apiserver-client-kubelet','kubernetes.io/kubelet-serving'],
-            verbs: ['approve'] }
-        ]
+        rules: APPROVER_CLUSTERROLE_RULES
       };
       await ocpApply(crBase, 'ionos-machine-auto-approver', aaCr);
       log('ClusterRole "ionos-machine-auto-approver" created/updated\n');
@@ -1145,64 +1501,10 @@ app.post('/api/setup-autoscaler', async (req, res) => {
       await ocpApply(crbBase, 'ionos-machine-auto-approver', aaCrb);
       log('ClusterRoleBinding "ionos-machine-auto-approver" created/updated\n');
 
-      // Shell loop: list CSRs, approve any in Pending state, sleep 30s
-      const approverScript = [
-        'echo "ionos-machine-auto-approver started"',
-        'while true; do',
-        '  kubectl get csr --no-headers 2>/dev/null | while read name age signer requestor dur cond; do',
-        '    if [ "$cond" = "Pending" ]; then',
-        '      echo "Approving CSR: $name"',
-        '      kubectl certificate approve "$name" 2>&1 || true',
-        '    fi',
-        '  done',
-        '  sleep 30',
-        'done'
-      ].join('\n');
-
-      const aaDep = {
-        apiVersion: 'apps/v1', kind: 'Deployment',
-        metadata: { name: 'ionos-machine-auto-approver', namespace: 'openshift-machine-api',
-                    labels: { app: 'ionos-machine-auto-approver' } },
-        spec: {
-          replicas: 1,
-          selector: { matchLabels: { app: 'ionos-machine-auto-approver' } },
-          template: {
-            metadata: { labels: { app: 'ionos-machine-auto-approver' } },
-            spec: {
-              serviceAccountName: 'ionos-machine-auto-approver',
-              priorityClassName:  'system-cluster-critical',
-              nodeSelector: { 'node-role.kubernetes.io/master': '' },
-              tolerations: [
-                { key: 'node-role.kubernetes.io/master',    effect: 'NoSchedule' },
-                { key: 'node.kubernetes.io/not-ready',      effect: 'NoExecute', tolerationSeconds: 120 },
-                { key: 'node.kubernetes.io/unreachable',    effect: 'NoExecute', tolerationSeconds: 120 }
-              ],
-              containers: [{
-                name:            'approver',
-                image:           'bitnami/kubectl:latest',
-                imagePullPolicy: 'Always',
-                command:         ['/bin/sh', '-c'],
-                args:            [approverScript],
-                resources: {
-                  requests: { cpu: '10m', memory: '32Mi' },
-                  limits:   { cpu: '50m', memory: '64Mi' }
-                },
-                securityContext: {
-                  allowPrivilegeEscalation: false,
-                  capabilities: { drop: ['ALL'] }
-                }
-              }],
-              securityContext: {
-                runAsNonRoot:   true,
-                seccompProfile: { type: 'RuntimeDefault' }
-              },
-              terminationGracePeriodSeconds: 10
-            }
-          }
-        }
-      };
-      await ocpApply(depBase, 'ionos-machine-auto-approver', aaDep);
-      log('Deployment "ionos-machine-auto-approver" created/updated (image: bitnami/kubectl:latest)\n');
+      // Shared definition (cluster oc image, request timeouts, adequate CPU) — see buildApproverDeployment().
+      const aaImage = (await resolveClusterCliImage(clusterApiUrl, ocpToken)) || APPROVER_FALLBACK_IMAGE;
+      await ocpApply(depBase, 'ionos-machine-auto-approver', buildApproverDeployment(aaImage));
+      log('Deployment "ionos-machine-auto-approver" created/updated (image: cluster oc CLI, digest-pinned)\n');
       step('ionos-machine-auto-approver deployed', 'ok');
     }
 

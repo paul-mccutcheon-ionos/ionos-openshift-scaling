@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.7.0</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.8.0</span>
   </div>
 
   <div class="banner-actions">
@@ -863,6 +863,31 @@
   <div id="autoscaling-connect-hint" style="text-align:center;padding:3rem 1rem;color:#4b5563;font-size:0.9rem">
     <div style="font-size:2rem;margin-bottom:0.75rem">&#128279;</div>
     Connect to your cluster first using the <strong style="color:#64748b">Cluster Connection</strong> tab.
+  </div>
+
+  <!-- ── Card: Post-Upgrade Repair ─────────────────────────────────────── -->
+  <div class="card hidden" id="post-upgrade-card">
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.5rem;margin-bottom:0.75rem">
+      <h2 style="margin:0">&#128295; Post-Upgrade Repair</h2>
+      <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+        <button id="post-upgrade-check-btn" onclick="postUpgradeCheck()"
+          style="background:#1e3a5f;color:#93c5fd;border:1px solid #2563eb;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;cursor:pointer">
+          &#8635; Check after upgrade
+        </button>
+        <button id="post-upgrade-repair-btn" onclick="postUpgradeRepair()" disabled
+          style="background:#14532d;color:#86efac;border:1px solid #166534;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;cursor:pointer;opacity:0.5">
+          &#9881; Repair
+        </button>
+      </div>
+    </div>
+    <p style="font-size:0.82rem;color:#64748b;margin:0 0 0.75rem">
+      Run after a cluster version upgrade. Checks everything that has to be re-aligned for autoscaling to keep
+      working: the Machine Config Server CA in the worker Ignition stubs on the management host, the provider
+      ClusterRole, the CSR auto-approver (uses the new release&rsquo;s <code style="color:#38bdf8">oc</code> image),
+      the autoscaler provisioning timeout, and node&nbsp;&harr;&nbsp;Machine links. <strong style="color:#94a3b8">Check</strong>
+      only reads; <strong style="color:#94a3b8">Repair</strong> fixes only what the check found drifted, and Ignition stubs are backed up first.
+    </p>
+    <div id="post-upgrade-result" style="font-size:0.85rem"></div>
   </div>
 
   <!-- ── Card: Machine API Provider Status ─────────────────────────────── -->
@@ -2327,7 +2352,7 @@
   const NAV_GROUPS = {
     connection:  ['connect-card', 'overview-card', 'machinesets-card', 'nodes-card'],
     manual:      ['manual-connect-hint', 'scaling-action-card', 'scale-in-card', 'add-node-card', 'csrs-card'],
-    autoscaling:  ['autoscaling-connect-hint', 'machine-api-status-card', 'autoscale-card'],
+    autoscaling:  ['autoscaling-connect-hint', 'post-upgrade-card', 'machine-api-status-card', 'autoscale-card'],
     healthchecks:    ['healthchecks-connect-hint', 'mhc-list-card', 'mhc-create-card'],
     'install-cluster': ['new-cluster-card'],
     compliance:      ['opct-preflight-card', 'opct-start-card', 'opct-status-card', 'opct-report-card'],
@@ -2625,6 +2650,60 @@
       btn.disabled = false;
       label.textContent = '✓ RBAC Check';
       spinner.classList.add('hidden');
+    }
+  }
+
+  // ── Post-upgrade check / repair ────────────────────────────────────────────
+  function postUpgradeBody(extra) {
+    return Object.assign({ clusterApiUrl, ocpToken, mgmtHost, sshUser, sshKey, sshPassphrase }, extra || {});
+  }
+  function renderPostUpgrade(checks, repairResults) {
+    const out = document.getElementById('post-upgrade-result');
+    const sty = {
+      ok:      ['&#10003;', '#6ee7b7'], drift: ['&#9888;', '#fbbf24'], warn: ['&#9888;', '#fbbf24'],
+      error:   ['&#10007;', '#f87171'], skipped: ['&ndash;', '#64748b']
+    };
+    let html = '';
+    if (repairResults && repairResults.length) {
+      html += '<div style="background:#0d2a1a;border:1px solid #065f46;border-radius:8px;padding:0.6rem 0.85rem;margin-bottom:0.75rem">' +
+        '<div style="color:#6ee7b7;font-weight:600;margin-bottom:0.3rem">Repair results</div>' +
+        repairResults.map(r => `<div style="color:${r.ok ? '#94a3b8' : '#f87171'}">${r.ok ? (r.changed ? '&#10003;' : '&middot;') : '&#10007;'} ` +
+          `<strong>${escHtml(r.title)}</strong> &mdash; ${escHtml(r.message)}</div>`).join('') + '</div>';
+    }
+    html += checks.map(c => {
+      const [icon, color] = sty[c.status] || sty.warn;
+      return `<div style="display:flex;gap:0.6rem;margin:0.35rem 0;align-items:baseline">
+        <span style="color:${color};font-weight:700;width:1rem;flex-shrink:0">${icon}</span>
+        <span><span style="color:#e2e8f0">${escHtml(c.title)}</span>
+        <div style="color:#64748b;font-size:0.8rem">${escHtml(c.detail || '')}</div></span></div>`;
+    }).join('');
+    out.innerHTML = html;
+    const drift = checks.filter(c => c.status === 'drift').length;
+    const rb = document.getElementById('post-upgrade-repair-btn');
+    rb.disabled = drift === 0; rb.style.opacity = drift === 0 ? '0.5' : '1';
+    rb.innerHTML = drift ? `&#9881; Repair ${drift} item${drift > 1 ? 's' : ''}` : '&#9881; Repair';
+  }
+  async function postUpgradeCheck() {
+    const btn = document.getElementById('post-upgrade-check-btn');
+    const out = document.getElementById('post-upgrade-result');
+    btn.disabled = true; out.innerHTML = '<div style="color:#64748b">Checking cluster and management host&hellip;</div>';
+    try {
+      const d = await apiPost('/api/post-upgrade/check', postUpgradeBody());
+      renderPostUpgrade(d.checks);
+    } catch (e) {
+      out.innerHTML = `<div style="color:#f87171">Check failed: ${escHtml(e.message)}</div>`;
+    } finally { btn.disabled = false; }
+  }
+  async function postUpgradeRepair() {
+    if (!confirm('Apply fixes for the drifted items? This changes cluster objects (ClusterRole, approver Deployment, ClusterAutoscaler, node/Machine links) and rewrites Ignition stubs on the management host (with backup).')) return;
+    const rb = document.getElementById('post-upgrade-repair-btn');
+    const out = document.getElementById('post-upgrade-result');
+    rb.disabled = true; out.innerHTML = '<div style="color:#64748b">Repairing&hellip;</div>';
+    try {
+      const d = await apiPost('/api/post-upgrade/repair', postUpgradeBody());
+      renderPostUpgrade(d.checks, d.results);
+    } catch (e) {
+      out.innerHTML = `<div style="color:#f87171">Repair failed: ${escHtml(e.message)}</div>`;
     }
   }
 
@@ -3033,6 +3112,7 @@
 
       renderAll(state);
       document.getElementById('scaling-action-card').classList.remove('hidden');
+      document.getElementById('post-upgrade-card').classList.remove('hidden');
       document.getElementById('machine-api-status-card').classList.remove('hidden');
       document.getElementById('autoscale-card').classList.remove('hidden');
       // Refresh nav hints state after connection
@@ -3072,7 +3152,7 @@
     hideError('connect-error');
 
     ['overview-card','machinesets-card','nodes-card','csrs-card',
-     'scaling-action-card','scale-in-card','autoscale-card','add-node-card','machine-api-status-card',
+     'scaling-action-card','scale-in-card','autoscale-card','add-node-card','machine-api-status-card','post-upgrade-card',
      'mhc-list-card','mhc-create-card'].forEach(id =>
       document.getElementById(id).classList.add('hidden')
     );
