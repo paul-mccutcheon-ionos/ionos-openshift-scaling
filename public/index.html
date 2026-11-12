@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.8.0</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.8.1</span>
   </div>
 
   <div class="banner-actions">
@@ -1025,7 +1025,8 @@
       <div class="form-grid">
         <div class="form-group">
           <label for="as-ionos-ms-name">MachineSet Name</label>
-          <input type="text" id="as-ionos-ms-name" placeholder="e.g. worker-ionos" style="width:100%" oninput="this.value=this.value.toLowerCase()" />
+          <input type="text" id="as-ionos-ms-name" placeholder="e.g. dcore-ionos" style="width:100%" oninput="this.value=this.value.toLowerCase()" />
+          <div class="field-note">Naming convention: <code>dcore-ionos</code> (Dedicated Core), <code>vcpu-ionos</code>, <code>gpu-ionos</code>. The MachineAutoscaler uses the same name.</div>
           <div class="field-note">Name for the new MachineSet (must be unique in openshift-machine-api) — lowercase only</div>
         </div>
         <div class="form-group">
@@ -4172,6 +4173,13 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
       loadIonosCpuFamilies();
     }
     if (isGpu) loadIonosGpuTemplates();
+
+    // Naming convention: <type>-ionos, used for both the MachineSet and its MachineAutoscaler.
+    const nameEl   = document.getElementById('as-ionos-ms-name');
+    const suggest  = isGpu ? 'gpu-ionos' : isDedicatedCore ? 'dcore-ionos' : 'vcpu-ionos';
+    const known    = ['dcore-ionos', 'vcpu-ionos', 'gpu-ionos'];
+    nameEl.placeholder = `e.g. ${suggest}`;
+    if (!nameEl.value.trim() || known.includes(nameEl.value.trim())) nameEl.value = suggest;
   }
 
   async function loadIonosGpuTemplates() {
