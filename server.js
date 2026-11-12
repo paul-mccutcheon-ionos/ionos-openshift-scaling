@@ -2420,17 +2420,32 @@ echo "ALT_WRITE_OK"
 
     // ── ClusterAutoscaler ─────────────────────────────────────────────────────
     step('Applying ClusterAutoscaler…', 'working');
+    // MERGE into the existing object: a whole-object replace silently dropped fields this form does not
+    // manage — notably maxNodeProvisionTime, which put the autoscaler back on its 15 min default.
+    let existingCa = null;
+    try { existingCa = await ocpGet(clusterApiUrl, '/apis/autoscaling.openshift.io/v1/clusterautoscalers/default', ocpToken); }
+    catch (e) { if (e.status !== 404) throw e; }
+    const exSpec = existingCa?.spec || {};
+    // IONOS VMs take 15–20 min to appear as nodes; with the 15 min default the autoscaler deletes them as
+    // "unregistered" first. Keep at least 30 min (and never shorten a longer value someone set).
+    const exProvMin = durMinutes(exSpec.maxNodeProvisionTime);
+    const maxNodeProvisionTime = (exProvMin !== null && exProvMin >= MIN_PROVISION_MINUTES)
+      ? exSpec.maxNodeProvisionTime : `${MIN_PROVISION_MINUTES}m`;
     const caSpec = {
       apiVersion: 'autoscaling.openshift.io/v1',
       kind:       'ClusterAutoscaler',
       metadata:   { name: 'default' },
       spec: {
+        ...exSpec,
+        maxNodeProvisionTime,
         resourceLimits: {
+          ...(exSpec.resourceLimits || {}),
           maxNodesTotal: parseInt(maxNodes, 10) || 10,
           cores:   { min: 0, max: parseInt(maxCores,      10) || 64  },
           memory:  { min: 0, max: (parseInt(maxMemoryGiB, 10) || 256) * 1024 }
         },
         scaleDown: {
+          ...(exSpec.scaleDown || {}),
           enabled:       scaleDown !== false,
           delayAfterAdd: delayAfterAdd || '10m',
           unneededTime:  unneededTime  || '10m'
