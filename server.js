@@ -348,7 +348,7 @@ const MAPI_NS = 'openshift-machine-api';
 
 // Default provider image for new installs. Includes the NLB ingress-target syncer; the older
 // ':ionos-machine-api-provider' tag (no NLB sync / Cube / labels) is kept in the registry for rollback.
-const PROVIDER_DEFAULT_IMAGE = 'paulmcc50/myrepo:ionos-machine-api-provider-cube-2';
+const PROVIDER_DEFAULT_IMAGE = 'paulmcc50/myrepo:ionos-machine-api-provider-cp-1';
 
 const PROVIDER_CLUSTERROLE_RULES = [
   { apiGroups: ['machine.openshift.io'], resources: ['machines'],               verbs: ['get','list','watch','create','update','patch','delete'] },
