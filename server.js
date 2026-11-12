@@ -346,6 +346,10 @@ function requireFields(res, body, fields) {
 // post-upgrade repair, so a fix made once is never missed in another copy.
 const MAPI_NS = 'openshift-machine-api';
 
+// Default provider image for new installs. Includes the NLB ingress-target syncer; the older
+// ':ionos-machine-api-provider' tag (no syncer) is kept in the registry for rollback.
+const PROVIDER_DEFAULT_IMAGE = 'paulmcc50/myrepo:ionos-machine-api-provider-nlbsync-1';
+
 const PROVIDER_CLUSTERROLE_RULES = [
   { apiGroups: ['machine.openshift.io'], resources: ['machines'],               verbs: ['get','list','watch','create','update','patch','delete'] },
   { apiGroups: ['machine.openshift.io'], resources: ['machines/status'],        verbs: ['get','patch','update'] },
@@ -1202,7 +1206,7 @@ app.post('/api/deploy-provider', async (req, res) => {
     });
     log.push('ClusterRoleBinding "ionos-machine-api-provider" created/updated');
 
-    const providerImage   = (registryImage && registryImage.trim()) || 'paulmcc50/myrepo:ionos-machine-api-provider';
+    const providerImage   = (registryImage && registryImage.trim()) || PROVIDER_DEFAULT_IMAGE;
     const pullSecretName  = 'ionos-machine-api-provider-pullsecret';
     let   hasPullSecret   = false;
     if (registryUsername && registryPassword) {
@@ -1481,7 +1485,7 @@ app.post('/api/setup-autoscaler', async (req, res) => {
       log('ClusterRoleBinding "ionos-machine-api-provider" created/updated\n');
 
       // Resolve image and optional pull secret
-      const providerImage = (registryImage && registryImage.trim()) || 'paulmcc50/myrepo:ionos-machine-api-provider';
+      const providerImage = (registryImage && registryImage.trim()) || PROVIDER_DEFAULT_IMAGE;
       const pullSecretName = 'ionos-machine-api-provider-pullsecret';
       let hasPullSecret = false;
 
