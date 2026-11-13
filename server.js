@@ -6880,11 +6880,19 @@ app.get('/api/compliance/status', async (req, res) => {
   try {
     const conn = await sshConnect(opctState.mgmtHost, 'root', opctState.sshKey, opctState.sshPassphrase);
     try {
-      const tail = await sshRunScript(conn, `tail -n 80 "${opctState.logFile}" 2>/dev/null || echo "(log file not found)"`);
+      // The run may have been started outside the app (e.g. from the CLI), so the saved
+      // logFile/startedAt can belong to an older run. Prefer the newest opct-run log on the
+      // host, and the live creation time of the opct namespace for the start time.
+      const tail = await sshRunScript(conn, `f="$(ls -t /root/opct-run-*.log 2>/dev/null | head -1)"; [ -z "$f" ] && f="${opctState.logFile}"; tail -n 80 "$f" 2>/dev/null || echo "(log file not found)"`);
       logTail = tail.stdout.trim();
       try {
-        const st = await sshRunScript(conn, `export KUBECONFIG="${opctState.kubeconfigPath}"; opct status 2>&1`);
-        opctStatusOut = st.stdout;
+        const st = await sshRunScript(conn, `export KUBECONFIG="${opctState.kubeconfigPath}"; opct status 2>&1; echo "__OPCT_NS__$(oc get ns opct -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null)"`);
+        const nsm = st.stdout.match(/__OPCT_NS__(\S+)/);
+        opctStatusOut = st.stdout.replace(/__OPCT_NS__.*/, '');
+        if (nsm) {
+          const t = Date.parse(nsm[1]);
+          if (t && Math.abs(t - (opctState.startedAt || 0)) > 600000) opctState.startedAt = t;
+        }
       } catch (e) { opctStatusError = e.message; }
     } finally { conn.end(); }
   } catch (e) {
