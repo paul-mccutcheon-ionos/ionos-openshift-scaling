@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.10.1</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.11.0</span>
   </div>
 
   <div class="banner-actions">
@@ -2020,6 +2020,14 @@
           &#128196; Download PDF Report
         </button>
       </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:0.6rem;flex-wrap:wrap;margin-bottom:1rem">
+      <label for="opct-report-select" style="font-size:0.82rem;color:#94a3b8;font-weight:600">Report</label>
+      <select id="opct-report-select" style="min-width:320px;max-width:100%;background:#0a0c12;color:#e2e8f0;border:1px solid #2d3348;border-radius:6px;padding:0.45rem 0.7rem;font-size:0.85rem">
+        <option value="">Loading reports…</option>
+      </select>
+      <button id="opct-report-list-refresh" type="button" title="Re-scan the management host for result archives" style="background:#0f2035;color:#94a3b8;border:1px solid #2d3348;border-radius:6px;padding:0.4rem 0.7rem;font-size:0.85rem;cursor:pointer">&#8635;</button>
+      <span id="opct-report-select-msg" style="font-size:0.78rem;color:#64748b"></span>
     </div>
     <p style="font-size:0.78rem;color:#64748b;margin:-0.5rem 0 1rem">
       The raw report is the untouched <code style="background:#1e2333;padding:0.1rem 0.35rem;border-radius:3px">opct report -s</code> output — use this one for Red Hat provider certification submissions. The PDF is a branded summary for internal/stakeholder use.
@@ -6169,6 +6177,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
         errEl
       });
       await opctLoadReport();
+      await opctLoadReportList();
       await opctRefreshStatus();
     } catch (e) {
       errEl.textContent = e.message;
@@ -6209,8 +6218,60 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
       }
 
       document.getElementById('opct-report-raw').textContent = rep.raw || '';
+
+      // keep the dropdown in step with whichever archive is active
+      const sel = document.getElementById('opct-report-select');
+      const cur = (rep.tarballPath || '').split('/').pop();
+      if (cur && [...sel.options].some(o => o.value === cur)) sel.value = cur;
     } catch (_) { /* no report yet */ }
   }
+
+  // ── Report picker: every archive saved on the management host ───────────────
+  function opctReportLabel(r) {
+    const when = r.runStart ? new Date(r.runStart) : new Date(r.retrievedAt);
+    const stamp = when.toLocaleString(undefined, { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+    return `${r.runStart ? 'Run started' : 'Retrieved'} ${stamp} · ${(r.size / 1048576).toFixed(1)} MB · ${r.name.slice(0, 30)}…`;
+  }
+
+  async function opctLoadReportList() {
+    const sel = document.getElementById('opct-report-select');
+    const msg = document.getElementById('opct-report-select-msg');
+    try {
+      const r = await fetch('/api/compliance/reports');
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+      if (!data.reports.length) { return; }   // nothing to pick yet — keep the card as it was
+      document.getElementById('opct-report-card').classList.remove('hidden');
+      sel.innerHTML = (data.selected ? '' : '<option value="">Select a report…</option>') +
+        data.reports.map(x => `<option value="${escHtml(x.name)}">${escHtml(opctReportLabel(x))}</option>`).join('');
+      if (data.selected && data.reports.some(x => x.name === data.selected)) sel.value = data.selected;
+      msg.textContent = `${data.reports.length} report${data.reports.length === 1 ? '' : 's'} available`;
+    } catch (e) {
+      msg.textContent = 'Could not list reports: ' + e.message;
+    }
+  }
+
+  document.getElementById('opct-report-select').addEventListener('change', async (ev) => {
+    const sel = ev.target, msg = document.getElementById('opct-report-select-msg');
+    if (!sel.value) return;
+    sel.disabled = true; msg.textContent = 'Loading report — this can take a minute the first time…';
+    try {
+      const r = await fetch('/api/compliance/reports/select', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ archive: sel.value })
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+      await opctLoadReport();
+      msg.textContent = 'Loaded.';
+    } catch (e) {
+      msg.textContent = 'Failed: ' + e.message;
+    } finally {
+      sel.disabled = false;
+    }
+  });
+  document.getElementById('opct-report-list-refresh').addEventListener('click', opctLoadReportList);
+  document.querySelector('.nav-item[data-section="compliance"]').addEventListener('click', opctLoadReportList);
 
   document.getElementById('opct-download-raw-btn').addEventListener('click', async () => {
     const btn = document.getElementById('opct-download-raw-btn');

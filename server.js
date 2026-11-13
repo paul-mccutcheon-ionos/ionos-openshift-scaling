@@ -863,7 +863,7 @@ app.post('/api/post-upgrade/repair', async (req, res) => {
 // control-plane nodes are added ALONGSIDE them as Machine-API-managed machines (a MachineSet per machine type,
 // like the workers), so etcd keeps its quorum the whole time and the old nodes can be retired later, one by
 // one. Each step is gated on cluster health and nothing is ever removed automatically.
-const CP_MAX_MEMBERS = 5;                                     // etcd: 3 or 5 members; never go beyond 5 here
+const CP_MAX_MEMBERS = 6;                                     // etcd: 3 or 5 is the steady state; 6 is allowed only transiently while swapping nodes (quorum 4, tolerates 2 failures, same as 5)
 const CP_SETS = { dcore: 'control-dcore-ionos', cube: 'control-cube-ionos' };
 const CP_WATCHED_OPERATORS = ['etcd', 'kube-apiserver', 'kube-controller-manager', 'kube-scheduler', 'openshift-apiserver', 'authentication', 'machine-config', 'network', 'dns'];
 
@@ -950,7 +950,7 @@ async function cpChecks(ctx, g) {
     `${g.etcd.podsReady}/${g.etcd.pods} etcd pods ready for ${g.masters.length} control-plane node(s). ${g.etcd.message}`);
 
   add('members-cap', `Fewer than ${CP_MAX_MEMBERS} control-plane nodes`, g.masters.length < CP_MAX_MEMBERS ? 'ok' : 'block',
-    `${g.masters.length} control-plane node(s) now; this feature adds up to ${CP_MAX_MEMBERS} (etcd runs best with 3 or 5 members).`);
+    `${g.masters.length} control-plane node(s) now; this feature adds up to ${CP_MAX_MEMBERS} (etcd runs best with 3 or 5 members; an even count such as 4 or 6 is only a transitional state while swapping nodes).`);
   add('master-secret', 'Master user-data secret exists', g.masterSecret ? 'ok' : 'block', g.masterSecret ? 'master-user-data-managed found.' : 'Secret master-user-data-managed is missing in openshift-machine-api.');
   add('approver', 'CSR auto-approver is running', g.approverReady ? 'ok' : 'block', g.approverReady ? 'ionos-machine-auto-approver is ready.' : 'Without it the new node cannot join (its CSRs would wait for manual approval).');
   add('provider', 'Machine API provider is running', g.providerReady ? 'ok' : 'block', g.providerImage);
@@ -967,8 +967,11 @@ async function cpChecks(ctx, g) {
       const st = stubCaState(stub, ref);
       const src = stub.json?.ignition?.config?.merge?.[0]?.source || '';
       const roleOk = /[/]config[/]master$/.test(src);
-      add('stub', 'master.ign Ignition stub on the management host', st.state === 'ok' && roleOk ? 'ok' : 'block',
-        st.state === 'ok' && roleOk ? `Present, merges ${src}, CA matches the cluster.` : `Present but ${st.state !== 'ok' ? 'its CA is ' + st.state : 'it does not merge /config/master (' + src + ')'} — use "Prepare".`);
+      const routeOk = (stub.json?.storage?.files || []).some(f => f.path === CP_ROUTE_SCRIPT_PATH);
+      const ok = st.state === 'ok' && roleOk && routeOk;
+      add('stub', 'master.ign Ignition stub on the management host', ok ? 'ok' : 'block',
+        ok ? `Present, merges ${src}, CA matches the cluster, installs the IONOS default-route script.`
+          : `Present but ${st.state !== 'ok' ? 'its CA is ' + st.state : !roleOk ? 'it does not merge /config/master (' + src + ')' : 'it lacks the IONOS default-route script (new control-plane nodes would have no gateway and never join)'} — use "Prepare".`);
     }
   } catch (e) {
     add('stub', 'master.ign Ignition stub on the management host', e.skip ? 'warn' : 'block', e.skip ? 'Management host SSH details not supplied — cannot verify.' : e.message);
@@ -985,6 +988,15 @@ async function cpChecks(ctx, g) {
 
   return { items, images, canAdd: !items.some(i => i.status === 'block') };
 }
+
+const CP_ROUTE_SCRIPT_PATH = '/etc/NetworkManager/dispatcher.d/20-ionos-default-route';
+const CP_ROUTE_SCRIPT = `#!/bin/bash
+# Add IONOS private LAN default route when the OVN-K bridge comes up.
+# OVN-K creates ovs-if-br-ex with DHCP but IONOS DHCP does not supply a gateway.
+[ "$1" = "br-ex" ] || exit 0
+[ "$2" = "up" ]    || exit 0
+ip route show default | grep -q default || ip route add default via 10.7.224.1 metric 48
+`;
 
 app.post('/api/control-plane/status', async (req, res) => {
   if (!req.body.clusterApiUrl || !req.body.ocpToken) return res.status(400).json({ error: 'clusterApiUrl and ocpToken are required.' });
@@ -1033,6 +1045,12 @@ app.post('/api/control-plane/prepare', async (req, res) => {
       master.ignition.config.merge[0].source = merge.source.replace(/[/]config[/]worker$/, '/config/master');
       const idx = ignCas(master).findIndex(c => (decodeDataUrl(c.source) || '').includes('BEGIN CERTIFICATE'));
       if (idx >= 0) master.ignition.security.tls.certificateAuthorities[idx].source = encodeDataUrl(ref, master.ignition.security.tls.certificateAuthorities[idx].source);
+      // IONOS DHCP supplies no gateway. Workers get their default route from the worker-only MachineConfig
+      // 99-worker-ionos-default-route; a new control-plane node never receives it, so carry it in the stub.
+      master.storage = master.storage || {};
+      master.storage.files = (master.storage.files || []).filter(f => f.path !== CP_ROUTE_SCRIPT_PATH);
+      master.storage.files.push({ path: CP_ROUTE_SCRIPT_PATH, mode: 0o755, overwrite: true,
+        contents: { source: 'data:text/plain;charset=utf-8;base64,' + Buffer.from(CP_ROUTE_SCRIPT).toString('base64') } });
       const b64 = Buffer.from(JSON.stringify(master)).toString('base64');
       await sshRunScript(conn, ['set -e', `echo '${b64}' | base64 -d > '${IGN_DIR}/master.ign.tmp'`, `chmod --reference='${IGN_DIR}/worker.ign' '${IGN_DIR}/master.ign.tmp'`, `mv '${IGN_DIR}/master.ign.tmp' '${IGN_DIR}/master.ign'`].join('\n'));
       const check = await sshRunScript(conn, "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/master.ign || true");
@@ -6968,10 +6986,8 @@ opct retrieve .`, chunk => log(chunk));
   }
 });
 
-// GET /api/compliance/report — JSON of the last collected report
-app.get('/api/compliance/report', (req, res) => {
-  if (!opctState || !opctState.reportRaw) return res.status(404).json({ error: 'No report collected yet.' });
-  res.json({
+function opctReportPayload() {
+  return {
     mgmtHost:    opctState.mgmtHost,
     startedAt:   opctState.startedAt,
     collectedAt: opctState.collectedAt,
@@ -6980,7 +6996,89 @@ app.get('/api/compliance/report', (req, res) => {
     grade:       opctState.grade,
     table:       opctState.reportTable,
     raw:         opctState.reportRaw
-  });
+  };
+}
+
+// GET /api/compliance/report — JSON of the currently selected / last collected report
+app.get('/api/compliance/report', (req, res) => {
+  if (!opctState || !opctState.reportRaw) return res.status(404).json({ error: 'No report collected yet.' });
+  res.json(opctReportPayload());
+});
+
+// ── Selectable OPCT reports ──────────────────────────────────────────────────
+// Every results archive that `opct retrieve` has saved on the management host
+// can be chosen in the Compliance Results card. Archives are named
+// opct_<YYYYMMDDHHMM>_<uuid>.tar.gz (the stamp is the run's start time, UTC).
+const OPCT_RESULTS_DIR = '/root/opct-results';
+const OPCT_ARCHIVE_RE  = /^[A-Za-z0-9._-]+\.tar\.gz$/;
+const opctReportCache  = new Map(); // archive name -> { raw, table, grade, parsedAt }
+
+function opctArchiveRunStart(name) {
+  const m = /^opct_(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})_/.exec(name);
+  return m ? `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:00Z` : null;
+}
+
+async function opctListArchives(conn) {
+  const r = await sshRunScript(conn, `ls -l --time-style=+%s ${OPCT_RESULTS_DIR}/*.tar.gz 2>/dev/null || true`);
+  const out = [];
+  for (const line of r.stdout.split(/\r?\n/)) {
+    const m = /^\S+\s+\d+\s+\S+\s+\S+\s+(\d+)\s+(\d+)\s+(\S+)$/.exec(line.trim());
+    if (!m) continue;
+    const name = m[3].split('/').pop();
+    if (!OPCT_ARCHIVE_RE.test(name)) continue;
+    out.push({ name, size: Number(m[1]), retrievedAt: Number(m[2]) * 1000, runStart: opctArchiveRunStart(name) });
+  }
+  out.sort((a, b) => (b.runStart || '').localeCompare(a.runStart || '') || b.retrievedAt - a.retrievedAt);
+  return out;
+}
+
+// GET /api/compliance/reports — archives available on the management host
+app.get('/api/compliance/reports', async (req, res) => {
+  if (!opctState || !opctState.mgmtHost || !opctState.sshKey) return res.json({ reports: [], selected: null });
+  let conn;
+  try {
+    conn = await sshConnect(opctState.mgmtHost, 'root', opctState.sshKey, opctState.sshPassphrase);
+    const reports = await opctListArchives(conn);
+    res.json({ reports, selected: opctState.tarballPath ? opctState.tarballPath.split('/').pop() : null });
+  } catch (e) {
+    console.error('[compliance/reports] Failed:', e.message);
+    res.status(502).json({ error: `Could not list reports on the management host: ${e.message}` });
+  } finally {
+    if (conn) try { conn.end(); } catch (_) {}
+  }
+});
+
+// POST /api/compliance/reports/select { archive } — make an archive the active
+// report. The raw/PDF downloads and the results table then use it.
+app.post('/api/compliance/reports/select', async (req, res) => {
+  const archive = String((req.body && req.body.archive) || '');
+  if (!OPCT_ARCHIVE_RE.test(archive)) return res.status(400).json({ error: 'Invalid archive name.' });
+  if (!opctState || !opctState.mgmtHost || !opctState.sshKey) return res.status(409).json({ error: 'No management host is configured for OPCT yet.' });
+  let conn;
+  try {
+    let entry = opctReportCache.get(archive);
+    if (!entry) {
+      conn = await sshConnect(opctState.mgmtHost, 'root', opctState.sshKey, opctState.sshPassphrase);
+      const known = await opctListArchives(conn);
+      if (!known.some(a => a.name === archive)) return res.status(404).json({ error: 'That archive is not on the management host.' });
+      const rep = await sshRunScript(conn, `opct report "${OPCT_RESULTS_DIR}/${archive}" 2>&1`);
+      const parsed = parseOpctReport(rep.stdout);
+      entry = { raw: rep.stdout, table: parsed.main, grade: parsed.grade, parsedAt: Date.now() };
+      opctReportCache.set(archive, entry);
+    }
+    opctState.tarballPath = `${OPCT_RESULTS_DIR}/${archive}`;
+    opctState.reportRaw   = entry.raw;
+    opctState.reportTable = entry.table;
+    opctState.grade       = entry.grade;
+    opctState.collectedAt = entry.parsedAt;
+    saveOpctState(opctState);
+    res.json(opctReportPayload());
+  } catch (e) {
+    console.error('[compliance/reports/select] Failed:', e.message);
+    res.status(502).json({ error: `Could not load that report: ${e.message}` });
+  } finally {
+    if (conn) try { conn.end(); } catch (_) {}
+  }
 });
 
 // GET /api/compliance/report/raw.txt — untouched `opct report -s` output, suitable
