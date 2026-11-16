@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.11.1</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.11.2</span>
   </div>
 
   <div class="banner-actions">
@@ -1733,6 +1733,14 @@
         <label for="cp-count">How many</label>
         <input type="number" id="cp-count" value="1" min="1" max="2" style="width:90px" />
       </div>
+      <div class="form-group">
+        <label for="cp-zone-mode">Availability zone</label>
+        <select id="cp-zone-mode">
+          <option value="auto" selected>Auto (IONOS chooses)</option>
+          <option value="spread">Spread across zones 1 and 2</option>
+        </select>
+        <div class="field-note">Spread places new nodes one at a time on Zone 1 / Zone 2, always choosing the zone with fewer control-plane servers.</div>
+      </div>
       <div class="form-group cp-dcore" style="display:none">
         <label for="cp-cores">Cores</label>
         <input type="number" id="cp-cores" value="8" min="4" style="width:90px" />
@@ -1742,9 +1750,9 @@
         <input type="number" id="cp-ram" value="16" min="16" style="width:90px" />
       </div>
       <div class="form-group cp-dcore" style="display:none">
-        <label for="cp-disk">Disk (GB, SSD Premium)</label>
-        <input type="number" id="cp-disk" value="480" min="120" style="width:100px" />
-        <div class="field-note">480 GB matches the storage built into Basic Cube L, so the two variants are comparable.</div>
+        <label for="cp-disk">Disk (GB, SSD Premium performance)</label>
+        <input type="number" id="cp-disk" value="600" min="120" style="width:100px" />
+        <div class="field-note">Default 600 GB SSD Premium: IONOS block-storage performance depends on volume size, so smaller volumes are throttled and are not suitable for etcd.</div>
       </div>
       <div class="form-group cp-dcore" style="display:none">
         <label for="cp-cpufamily">CPU family</label>
@@ -2968,10 +2976,10 @@
     if (!lanId) { err.textContent = 'The private cluster LAN could not be detected — enter it in the LAN ID field on the Autoscaling tab.'; err.style.display = 'block'; return; }
     const count = parseInt(document.getElementById('cp-count').value, 10) || 1;
     const what = type === 'cube' ? 'Cube (' + (document.getElementById('cp-cube-template').selectedOptions[0]?.text || '') + ')' : `Dedicated Core ${document.getElementById('cp-cores').value} vCPU / ${document.getElementById('cp-ram').value} GiB`;
-    if (!confirm(`Add ${count} control-plane node(s): ${what}\n\nThey join NEXT TO the existing control-plane nodes and become etcd members. Nothing is removed. Continue?`)) return;
+    if (!confirm(`Add ${count} control-plane node(s): ${what}\n\nZone placement: ${document.getElementById('cp-zone-mode').value === 'spread' ? 'spread across zones 1 and 2' : 'Auto'}.\n\nThey join NEXT TO the existing control-plane nodes and become etcd members. Nothing is removed. Continue?`)) return;
     const btn = document.getElementById('cp-add-btn'); btn.disabled = true; btn.style.opacity = '0.5';
     await cpStream('/api/control-plane/add', cpBody({
-      machineType: type, count, lanId, imageId: document.getElementById('cp-image').value, backupConfirmed: document.getElementById('cp-backup-ok').checked,
+      machineType: type, count, lanId, zoneMode: document.getElementById('cp-zone-mode').value, imageId: document.getElementById('cp-image').value, backupConfirmed: document.getElementById('cp-backup-ok').checked,
       cores: document.getElementById('cp-cores').value, ramGiB: document.getElementById('cp-ram').value, diskGB: document.getElementById('cp-disk').value,
       cpuFamily: document.getElementById('cp-cpufamily').value.trim(), cubeTemplateId: document.getElementById('cp-cube-template').value }), log,
       (msg) => { done.innerHTML = '<strong>&#10003; Done.</strong> ' + escHtml(msg); done.classList.remove('hidden'); cpStatus(); },
@@ -3170,7 +3178,22 @@
     const reader = new FileReader();
     reader.onload = e => {
       const decodeKey = v => v.replace(/\\n/g, '\n').replace(/^["']|["']$/g, '');
-      for (const line of e.target.result.split('\n')) {
+      // Join a multi-line private-key block (KEY=-----BEGIN ... -----END ...-----) into one line with \n.
+      const rawLines = e.target.result.split(/\r?\n/), joined = [];
+      for (let i = 0; i < rawLines.length; i++) {
+        let l = rawLines[i];
+        // KEY= alone on a line, key block starting on the next line
+        if (/^\s*[A-Za-z_][A-Za-z0-9_]*\s*=\s*$/.test(l) && /^\s*["']?-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(rawLines[i + 1] || '')) {
+          l = l.trim() + rawLines[i + 1].trim(); i++;
+        }
+        if (/^\s*[A-Za-z_][A-Za-z0-9_]*\s*=\s*["']?-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(l) && !/-----END [A-Z ]*PRIVATE KEY-----/.test(l)) {
+          let j = i, buf = l.trim();
+          while (!/-----END [A-Z ]*PRIVATE KEY-----/.test(buf) && j + 1 < rawLines.length) buf += '\\n' + rawLines[++j].trim();
+          l = buf; i = j;
+        }
+        joined.push(l);
+      }
+      for (const line of joined) {
         const trimmed = line.trim();
         if (!trimmed || trimmed.startsWith('#')) continue;
         const eq = trimmed.indexOf('=');

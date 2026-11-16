@@ -1,10 +1,36 @@
-require('dotenv').config();
+const dotenv          = require('dotenv');
 const express         = require('express');
 const fetch           = require('node-fetch');
 const https           = require('https');
 const path            = require('path');
 const fs              = require('fs');
-const dotenv          = require('dotenv');
+
+// Load .env, additionally accepting a PEM/OpenSSH private key pasted as a normal
+// multi-line block (KEY=-----BEGIN ... newline ... -----END ...-----), which dotenv
+// alone would truncate to the first line. Quoted and \n-escaped forms still work.
+function loadEnv() {
+  dotenv.config({ override: true, quiet: true });
+  let text;
+  try { text = fs.readFileSync(path.join(__dirname, '.env'), 'utf8'); } catch { return; }
+  const lines = text.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+    if (!m) continue;
+    let j = i, first = m[2].trim();
+    // KEY= on its own line with the key block starting on the next line
+    if (!first && j + 1 < lines.length && /^["']?-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(lines[j + 1].trim())) first = lines[++j].trim();
+    if (!/^["']?-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(first)) continue;
+    const parts = [first];
+    while (!/-----END [A-Z ]*PRIVATE KEY-----/.test(parts[parts.length - 1]) && j + 1 < lines.length) {
+      j++;
+      parts.push(lines[j].trim());
+    }
+    if (!/-----END [A-Z ]*PRIVATE KEY-----/.test(parts[parts.length - 1])) continue;
+    process.env[m[1]] = parts.join('\n').replace(/^["']|["']$/g, '');
+    i = j;
+  }
+}
+loadEnv();
 const bcrypt          = require('bcryptjs');
 const { Client: Ssh } = require('ssh2');
 const PDFDocument     = require('pdfkit');
@@ -1138,21 +1164,46 @@ app.post('/api/control-plane/add', async (req, res) => {
       if (!isCubeTemplate(tpl)) throw new Error('The selected template is not a Cube template.');
       Object.assign(spec, { serverType: 'CUBE', templateUuid: b.cubeTemplateId, cores: tpl.properties.cores, ramMB: tpl.properties.ram, diskGB: tpl.properties.storageSize, diskType: 'DAS' });
     } else {
-      Object.assign(spec, { serverType: 'ENTERPRISE', cores: parseInt(b.cores, 10) || 8, ramMB: (parseInt(b.ramGiB, 10) || 16) * 1024, diskGB: parseInt(b.diskGB, 10) || 200,
+      Object.assign(spec, { serverType: 'ENTERPRISE', cores: parseInt(b.cores, 10) || 8, ramMB: (parseInt(b.ramGiB, 10) || 16) * 1024, diskGB: parseInt(b.diskGB, 10) || 600,
                             diskType: 'SSD_PREMIUM', cpuFamily: b.cpuFamily || 'INTEL_SIERRAFOREST' });
     }
     if (spec.cores < 4 || spec.ramMB < 16 * 1024) throw new Error('A control-plane node needs at least 4 vCPU and 16 GiB RAM.');
     log(`Type ${spec.serverType}: ${spec.cores} vCPU / ${Math.round(spec.ramMB / 1024)} GiB / ${spec.diskGB} GB ${spec.diskType} · image ${img.name} · LAN ${lan} · ${region}\n`);
 
     // 3. Create or scale the MachineSet (never an autoscaler: the control plane is scaled deliberately)
-    step(`Creating control-plane MachineSet "${name}" (+${count})…`, 'working');
+    // Placement. 'auto' lets IONOS pick (one MachineSet). 'spread' places the new nodes one at a time
+    // on ZONE_1 / ZONE_2, always choosing the zone holding fewer control-plane servers (ties → ZONE_1);
+    // a MachineSet has a single zone, so each zone gets its own "<name>-z1" / "<name>-z2" MachineSet.
+    const plan = [];
+    if (b.zoneMode === 'spread') {
+      const srvs = await ionosGet(`/datacenters/${encodeURIComponent(ctx.ionos.dc)}/servers?depth=1`, ctx.ionos.token);
+      const zoneOf = new Map((srvs.items || []).map(s => [s.properties.name, s.properties.availabilityZone]));
+      const used = { ZONE_1: 0, ZONE_2: 0 };
+      g.masters.forEach(m => { const z = zoneOf.get(m.machine || m.name) || zoneOf.get(m.name); if (used[z] !== undefined) used[z]++; });
+      log(`Control-plane servers per zone now: ZONE_1=${used.ZONE_1}, ZONE_2=${used.ZONE_2}\n`);
+      for (let i = 0; i < count; i++) {
+        const z = used.ZONE_1 <= used.ZONE_2 ? 'ZONE_1' : 'ZONE_2';
+        used[z]++;
+        plan.push({ setName: `${name}-${z === 'ZONE_1' ? 'z1' : 'z2'}`, az: z });
+      }
+      log(`Placement: ${plan.map(p => p.az).join(', ')}\n`);
+    } else {
+      for (let i = 0; i < count; i++) plan.push({ setName: name, az: spec.az });
+    }
+    const groups = new Map();
+    plan.forEach(p => { const x = groups.get(p.setName) || { setName: p.setName, az: p.az, n: 0 }; x.n++; groups.set(p.setName, x); });
+    const setNames = new Set(groups.keys());
+
+    step(`Creating control-plane MachineSet(s) ${[...setNames].map(s => `"${s}"`).join(', ')} (+${count})…`, 'working');
     const msPath = `/apis/machine.openshift.io/v1beta1/namespaces/${MAPI_NS}/machinesets`;
-    let existing = null;
-    try { existing = await ocpGet(A, `${msPath}/${name}`, T); } catch (e) { if (e.status !== 404) throw e; }
-    spec.replicas = (existing?.spec?.replicas || 0) + count;
     const before = new Set(g.masters.map(m => m.name));
-    await ocpApplyObj(A, T, msPath, name, cpBuildMachineSet(spec));
-    step(`MachineSet "${name}" at ${spec.replicas} replica(s)`, 'ok');
+    for (const grp of groups.values()) {
+      let existing = null;
+      try { existing = await ocpGet(A, `${msPath}/${grp.setName}`, T); } catch (e) { if (e.status !== 404) throw e; }
+      const replicas = (existing?.spec?.replicas || 0) + grp.n;
+      await ocpApplyObj(A, T, msPath, grp.setName, cpBuildMachineSet({ ...spec, name: grp.setName, az: grp.az, replicas }));
+      step(`MachineSet "${grp.setName}" (${grp.az}) at ${replicas} replica(s)`, 'ok');
+    }
 
     // 4. Watch the machine(s) become nodes and etcd members. Poll; never roll anything back automatically.
     const deadline = Date.now() + 40 * 60000;
@@ -1164,7 +1215,7 @@ app.post('/api/control-plane/add', async (req, res) => {
       await new Promise(r => setTimeout(r, 20000));
       const cur = await cpGather(ctx);
       const fresh = cur.masters.filter(m => !before.has(m.name));
-      const ms = cur.masterMachines.filter(m => m.machineSet === name);
+      const ms = cur.masterMachines.filter(m => setNames.has(m.machineSet));
       ms.forEach(m => say('m:' + m.name + m.phase, `machine ${m.name}: ${m.phase || 'pending'}`));
       fresh.forEach(m => {
         say('n:' + m.name, `node ${m.name} registered (${m.ip})`);
@@ -1234,9 +1285,9 @@ app.get('/download/env-example', (req, res) => {
 app.get('/api/env-prefill', async (req, res) => {
   // Re-read .env on every request so a token refresh in the file is picked up
   // without needing a server restart.
-  dotenv.config({ override: true });
+  loadEnv();
 
-  const hash       = process.env.AUTH_PASSWORD_HASH || '';
+  const hash      = process.env.AUTH_PASSWORD_HASH || '';
   const contractId = process.env.AUTH_CONTRACT_ID   || '';
 
   if (hash) {
