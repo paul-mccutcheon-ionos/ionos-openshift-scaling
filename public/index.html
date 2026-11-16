@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.11.6</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.11.7</span>
   </div>
 
   <div class="banner-actions">
@@ -2216,7 +2216,8 @@
             </div>
           </div>
           <div>
-            <h4 style="margin-bottom:0.6rem;color:#94a3b8;font-size:0.85rem;text-transform:uppercase;letter-spacing:0.05em">Initial Worker MachineSet (×N vCPU)</h4>
+            <h4 style="margin-bottom:0.6rem;color:#94a3b8;font-size:0.85rem;text-transform:uppercase;letter-spacing:0.05em">Workers (planned)</h4>
+            <div id="ncw-w-note" class="field-note" style="margin-bottom:0.6rem">The wizard installs the 3 control-plane nodes. Workers are added afterwards under Machine Autoscaling Management (vCPU or Cube).</div>
             <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:0.75rem">
               <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
                 Replicas
@@ -3176,6 +3177,30 @@
     }
   }
 
+  // Install-wizard values from .env (NCW_*) whose <select> options load asynchronously are held here
+  // and applied once the options exist (OCP versions, CPU families).
+  const ncwEnvPending = {};
+  function ncwApplyEnvPending() {
+    const verSel = document.getElementById('ncw-ocp-version');
+    if (ncwEnvPending.version && verSel) {
+      const o = [...verSel.options].find(o => o.value === ncwEnvPending.version || o.value.startsWith(ncwEnvPending.version + '.'));
+      if (o) { verSel.value = o.value; delete ncwEnvPending.version; }
+    }
+    const famSel = document.getElementById('ncw-cp-cpu-family');
+    if (ncwEnvPending.cpuFamily && famSel) {
+      const o = [...famSel.options].find(o => o.value === ncwEnvPending.cpuFamily);
+      if (o) { famSel.value = o.value; delete ncwEnvPending.cpuFamily; }
+    }
+  }
+
+  function ncwShowWorkerNote() {
+    const el = document.getElementById('ncw-w-note');
+    if (!el || !ncwEnvPending.workerType) return;
+    const n = document.getElementById('ncw-w-replicas')?.value || '2';
+    el.textContent = `From .env: ${n}× ${ncwEnvPending.workerType === 'CUBE' ? 'Cube (' + (ncwEnvPending.workerTemplate || 'template to choose') + ')' : 'vCPU'}. ` +
+      'The wizard installs the 3 control-plane nodes; add the workers afterwards under Machine Autoscaling Management.';
+  }
+
   // ── Client-side .env file upload — parsed entirely in browser, never sent to server ──
   document.getElementById('env-file-upload').addEventListener('change', function () {
     const file = this.files[0];
@@ -3210,7 +3235,11 @@
           case 'OCP_CLUSTER_API_URL':      document.getElementById('api-url').value          = val; break;
           case 'OCP_BEARER_TOKEN':         document.getElementById('ocp-token').value         = val; break;
           case 'OCP_MGMT_HOST':            document.getElementById('mgmt-host').value         = val; break;
-          case 'OCP_MGMT_HOST_SSH_KEY':    document.getElementById('ssh-key').value           = decodeKey(val); break;
+          case 'OCP_MGMT_HOST_SSH_KEY': {
+            document.getElementById('ssh-key').value = decodeKey(val);
+            const w = document.getElementById('ncw-mgmt-ssh-priv'); if (w && !w.value.trim()) w.value = decodeKey(val);
+            break;
+          }
           case 'OCP_WORKER_SSH_KEY':       document.getElementById('worker-ssh-key').value    = decodeKey(val); break;
           case 'OCP_WORKER_NAME_PREFIX':   document.getElementById('worker-name').value       = val; break;
           case 'IONOS_API_TOKEN': {
@@ -3238,10 +3267,35 @@
           case 'REGISTRY_IMAGE':    { const el = document.getElementById('as-registry-image');    if (el) el.value = val; break; }
           case 'REGISTRY_USERNAME': { const el = document.getElementById('as-registry-username'); if (el) el.value = val; break; }
           case 'REGISTRY_PASSWORD': { const el = document.getElementById('as-registry-password'); if (el) el.value = val; break; }
+          case 'NCW_CLUSTER_NAME':   { const el = document.getElementById('ncw-cluster-name'); if (el) el.value = val; break; }
+          case 'NCW_BASE_DOMAIN':    { const el = document.getElementById('ncw-base-domain');  if (el) el.value = val; break; }
+          case 'NCW_VDC_NAME':       { const el = document.getElementById('ncw-vdc-name');     if (el) el.value = val; break; }
+          case 'NCW_VDC_LOCATION': {
+            const el = document.getElementById('ncw-vdc-location');
+            if (el && [...el.options].some(o => o.value === val)) { el.value = val; el.dispatchEvent(new Event('change')); }
+            break;
+          }
+          case 'NCW_OCP_VERSION':    ncwEnvPending.version = val; break;
+          case 'NCW_CP_SERVER_TYPE': {
+            const el = document.getElementById('ncw-cp-server-type');
+            if (el && [...el.options].some(o => o.value === val.toUpperCase())) { el.value = val.toUpperCase(); el.dispatchEvent(new Event('change')); }
+            break;
+          }
+          case 'NCW_CP_CPU_FAMILY':  ncwEnvPending.cpuFamily = val; break;
+          case 'NCW_CP_CORES':       { const el = document.getElementById('ncw-cp-cores'); if (el) el.value = val; break; }
+          case 'NCW_CP_RAM_GB':      { const el = document.getElementById('ncw-cp-ram');   if (el) el.value = val; break; }
+          case 'NCW_CP_DISK_GB':     { const el = document.getElementById('ncw-cp-disk');  if (el) el.value = val; break; }
+          case 'NCW_W_REPLICAS':     { const el = document.getElementById('ncw-w-replicas'); if (el) el.value = val; break; }
+          case 'NCW_W_SERVER_TYPE':  ncwEnvPending.workerType = val.toUpperCase(); break;
+          case 'NCW_W_CUBE_TEMPLATE': ncwEnvPending.workerTemplate = val; break;
+          case 'NCW_MGMT_SSH_PUBKEY': { const el = document.getElementById('ncw-mgmt-ssh-pub'); if (el) el.value = val; break; }
+          case 'NCW_OCP_SSH_PUBKEY':  { const el = document.getElementById('ncw-ocp-ssh-pub');  if (el) el.value = val; break; }
           case 'OCP_ADMIN_USERNAME': { const el = document.getElementById('ocp-admin-username'); if (el) el.value = val; break; }
           case 'OCP_ADMIN_PASSWORD': { const el = document.getElementById('ocp-admin-password'); if (el) el.value = val; break; }
         }
       }
+      ncwApplyEnvPending();
+      ncwShowWorkerNote();
       document.getElementById('env-file-banner').style.display = '';
       this.value = '';
     };
@@ -5460,8 +5514,9 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
         `                   ${c.controlCores || 8} cores / ${c.controlRamGB || 16} GB RAM / ${c.controlDiskGB || 600} GB Performance SSD`,
       ]),
       ``,
-      `Workers (initial): ${c.workerReplicas || 2}× vCPU`,
-      `                   ${c.workerCores || 4} cores / ${c.workerRamGB || 8} GB RAM / ${c.workerDiskGB || 120} GB Balanced SSD`,
+      ncwEnvPending.workerType === 'CUBE'
+        ? `Workers (planned, added after install): ${c.workerReplicas || 2}× Cube ${ncwEnvPending.workerTemplate || ''}`
+        : `Workers (planned, added after install): ${c.workerReplicas || 2}× vCPU ${c.workerCores || 4} cores / ${c.workerRamGB || 8} GB RAM / ${c.workerDiskGB || 120} GB Balanced SSD`,
       ``,
       `IONOS Token:       ${c.ionosToken ? '✓ provided' : '✗ missing'}`,
       `FTP Credentials:   ${c.ionosFtpUser ? `${c.ionosFtpUser}  /  ****` : '✗ missing'}`,
@@ -5760,6 +5815,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
           sel.innerHTML = versions.map(v =>
             `<option value="${escHtml(v.version)}">${escHtml(v.label)}</option>`
           ).join('');
+          ncwApplyEnvPending();
         })
         .catch(() => {
           document.getElementById('ncw-ocp-version').innerHTML =
@@ -5821,6 +5877,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
           return `<option value="${escHtml(f.family)}">${escHtml(label)}</option>`;
         }).join('');
         if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+        ncwApplyEnvPending();
       }
     } catch (_) { /* keep current options */ }
     finally {
