@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.11.3</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.11.4</span>
   </div>
 
   <div class="banner-actions">
@@ -5437,6 +5437,10 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     document.getElementById('ncw-btn-next').innerHTML =
       ncwStep === NCW_TOTAL_STEPS - 1 ? '&#128640; Start Installation' : 'Next &#8594;';
     if (ncwStep === NCW_TOTAL_STEPS - 1) ncwBuildReview();
+    // Location-dependent lists must match the chosen VDC location even when the token was
+    // loaded from .env (no 'change' event fired). E.g. de/fra/1 has no AMD_EPYC.
+    if (ncwStep === 1) ncwLoadMgmtImages();
+    if (ncwStep === 2) { ncwLoadCpuFamilies(); ncwApplyCpServerType(); }
   }
 
   function ncwBuildReview() {
@@ -5759,6 +5763,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
         })
         .catch(() => {
           document.getElementById('ncw-ocp-version').innerHTML =
+            `<option value="4.20.x">4.20 (latest)</option>` +
             `<option value="4.19.x">4.19 (latest)</option>` +
             `<option value="4.18.x">4.18 (latest)</option>` +
             `<option value="4.17.x">4.17 (latest)</option>`;

@@ -8,8 +8,8 @@ const fs              = require('fs');
 // Load .env, additionally accepting a PEM/OpenSSH private key pasted as a normal
 // multi-line block (KEY=-----BEGIN ... newline ... -----END ...-----), which dotenv
 // alone would truncate to the first line. Quoted and \n-escaped forms still work.
-function loadEnv() {
-  dotenv.config({ override: true, quiet: true });
+function loadEnv(override = false) {
+  dotenv.config({ override, quiet: true });
   let text;
   try { text = fs.readFileSync(path.join(__dirname, '.env'), 'utf8'); } catch { return; }
   const lines = text.split(/\r?\n/);
@@ -26,6 +26,7 @@ function loadEnv() {
       parts.push(lines[j].trim());
     }
     if (!/-----END [A-Z ]*PRIVATE KEY-----/.test(parts[parts.length - 1])) continue;
+    if (!override && process.env[m[1]] !== undefined && process.env[m[1]] !== "") { i = j; continue; }
     process.env[m[1]] = parts.join('\n').replace(/^["']|["']$/g, '');
     i = j;
   }
@@ -1285,7 +1286,7 @@ app.get('/download/env-example', (req, res) => {
 app.get('/api/env-prefill', async (req, res) => {
   // Re-read .env on every request so a token refresh in the file is picked up
   // without needing a server restart.
-  loadEnv();
+  loadEnv(true);
 
   const hash      = process.env.AUTH_PASSWORD_HASH || '';
   const contractId = process.env.AUTH_CONTRACT_ID   || '';
@@ -5463,7 +5464,7 @@ app.get('/api/new-cluster/cpu-families', async (req, res) => {
 
 // GET /api/new-cluster/ocp-versions
 app.get('/api/new-cluster/ocp-versions', async (_req, res) => {
-  const minors = ['4.19', '4.18', '4.17'];
+  const minors = ['4.20', '4.19', '4.18', '4.17'];
   const out = [];
   for (const minor of minors) {
     try {
@@ -5509,8 +5510,15 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
     // be a blind 'AMD_EPYC' default, which fails outright at sites (like
     // de/fra/1) that don't offer that family at all. Cube servers have no
     // CPU-family concept (fixed by the template), so skip this entirely.
-    const resolvedCpuFamily = isCubeControlPlane ? null : (cpuFamily ||
-      (await resolveCpuFamiliesForLocation(vdcLocation, ionosToken)).families[0]?.family || 'AMD_EPYC');
+    let resolvedCpuFamily = null;
+    if (!isCubeControlPlane) {
+      const avail = (await resolveCpuFamiliesForLocation(vdcLocation, ionosToken)).families.map(f => f.family);
+      if (cpuFamily && avail.includes(cpuFamily)) resolvedCpuFamily = cpuFamily;
+      else {
+        resolvedCpuFamily = avail[0] || cpuFamily || 'AMD_EPYC';
+        if (cpuFamily) log(`CPU family ${cpuFamily} is not offered at ${vdcLocation} (available: ${avail.join(', ')}) — using ${resolvedCpuFamily}.\n`);
+      }
+    }
     // 1. Find or reserve IP blocks
     step('Reserve public IP addresses', 'running');
     log('Checking for existing IP address reservations...\n');
