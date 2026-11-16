@@ -190,6 +190,29 @@ async function ionosPatch(urlPath, ionosToken, body) {
   return res.json();
 }
 
+// PATCH that waits for IONOS's asynchronous request to finish and throws if it FAILED. A 202 only means "accepted":
+// e.g. making a legacy-BIOS volume the boot device of a Sierra Forest server is accepted and then fails in the
+// request, with the reason in the request status (and nothing changes).
+async function ionosPatchChecked(urlPath, ionosToken, body, timeoutMs = 180000) {
+  const res = await fetch(`${CLOUD_API}${urlPath}`, {
+    method: 'PATCH',
+    headers: { 'Authorization': `Bearer ${ionosToken}`, 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) throw new Error(`IONOS Cloud API PATCH ${urlPath} returned ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  const loc = res.headers.get('location');
+  if (!loc) return;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 3000));
+    const st = await (await fetch(loc, { headers: { 'Authorization': `Bearer ${ionosToken}`, 'Accept': 'application/json' } })).json().catch(() => ({}));
+    const s = st.metadata?.status;
+    if (s === 'DONE') return;
+    if (s === 'FAILED') throw new Error(`IONOS request failed for PATCH ${urlPath}: ${st.metadata?.message || 'no message'}`);
+  }
+  throw new Error(`Timed out waiting for IONOS to apply PATCH ${urlPath}`);
+}
+
 // Detach a volume or similar sub-resource without deleting the resource itself.
 async function ionosDetach(urlPath, ionosToken) {
   const res = await fetch(`${CLOUD_API}${urlPath}`, {
@@ -385,9 +408,11 @@ function requireFields(res, body, fields) {
 // post-upgrade repair, so a fix made once is never missed in another copy.
 const MAPI_NS = 'openshift-machine-api';
 
-// Default provider image for new installs. Includes the NLB ingress-target syncer; the older
-// ':ionos-machine-api-provider' tag (no NLB sync / Cube / labels) is kept in the registry for rollback.
-const PROVIDER_DEFAULT_IMAGE = 'paulmcc50/myrepo:ionos-machine-api-provider-cp-1';
+// Default provider image for new installs: ONE canonical tag that always holds the latest build (NLB ingress-target
+// syncer, Cube support, control-plane support). Publish a new build by moving this tag — do not create a new versioned
+// tag per feature, that made it easy to deploy an older build by mistake (ocp2: -nlbsync-1 sent a broken Cube request).
+// ':ionos-machine-api-provider-v2' is the old July build, kept only for rollback.
+const PROVIDER_DEFAULT_IMAGE = 'paulmcc50/myrepo:ionos-machine-api-provider';
 
 const PROVIDER_CLUSTERROLE_RULES = [
   { apiGroups: ['machine.openshift.io'], resources: ['machines'],               verbs: ['get','list','watch','create','update','patch','delete'] },
@@ -1597,15 +1622,23 @@ app.post('/api/deploy-provider', async (req, res) => {
   };
 
   // Check if a deployment is already running (has ≥1 ready replica)
-  const isRunning = async (name) => {
+  // A running deployment only counts as "up to date" if it also runs the requested image — otherwise a changed
+  // image (e.g. moving to a provider build with a fix) was silently ignored and the old build kept running.
+  const wantedProviderImage = (registryImage && registryImage.trim()) || PROVIDER_DEFAULT_IMAGE;
+  const isRunning = async (name, wantImage) => {
     const r = await ocpReq('GET', `${depBase}/${encodeURIComponent(name)}`, undefined);
     if (!r.ok || r.status === 404) return false;
-    return (r.data?.status?.readyReplicas || 0) >= 1;
+    if ((r.data?.status?.readyReplicas || 0) < 1) return false;
+    if (wantImage) {
+      const cur = r.data?.spec?.template?.spec?.containers?.[0]?.image;
+      if (cur !== wantImage) return false;
+    }
+    return true;
   };
 
   const log = [];
   try {
-    const providerRunning  = await isRunning('ionos-machine-api-provider');
+    const providerRunning  = await isRunning('ionos-machine-api-provider', wantedProviderImage);
     const approverRunning  = await isRunning('ionos-machine-auto-approver');
 
     if (providerRunning && approverRunning) {
@@ -1818,7 +1851,9 @@ app.post('/api/setup-autoscaler', async (req, res) => {
           frankfurtDiversity, frankfurtSubMode, frankfurtSecondarySite,
           frankfurtVdcName, frankfurtPccName, frankfurtPrimaryLanId,
           frankfurtExistingDcId, frankfurtExistingLanId,
-          frankfurtIgnitionIp, frankfurtStaticIp } = req.body;
+          frankfurtIgnitionIp, frankfurtStaticIp,
+          workerGateway,   // private-LAN gateway; IONOS DHCP supplies none, so workers get a default-route MachineConfig
+          } = req.body;
 
   if (!clusterApiUrl || !ocpToken || !targetMsName)
     return res.status(400).json({ error: 'clusterApiUrl, ocpToken and targetMsName are required.' });
@@ -2032,6 +2067,32 @@ app.post('/api/setup-autoscaler', async (req, res) => {
       await ocpApply(secretApiBase, 'ionoscloud-credentials', secret);
       log('Secret "ionoscloud-credentials" created/updated in openshift-machine-api\n');
       step('IONOS credentials secret ready', 'ok');
+
+      // ── Step 1b: default route for Machine API workers ─────────────────────
+      // IONOS DHCP hands out no gateway; OVN-Kubernetes then builds br-ex without a default route and a new
+      // worker can neither reach api-int nor pull images (it never joins). Same dispatcher script as the control plane.
+      if (/^\d{1,3}(\.\d{1,3}){3}$/.test((workerGateway || '').trim())) {
+        step('Applying worker default-route MachineConfig…', 'working');
+        const gw = workerGateway.trim();
+        const script = `#!/bin/bash
+# Add the IONOS private LAN default route when the OVN-K bridge comes up (IONOS DHCP supplies no gateway).
+[ "$1" = "br-ex" ] || exit 0
+[ "$2" = "up" ]    || exit 0
+ip route show default | grep -q default || ip route add default via ${gw} metric 48
+`;
+        const mc = {
+          apiVersion: 'machineconfiguration.openshift.io/v1', kind: 'MachineConfig',
+          metadata: { name: '99-worker-ionos-default-route', labels: { 'machineconfiguration.openshift.io/role': 'worker' } },
+          spec: { config: { ignition: { version: '3.2.0' }, storage: { files: [{
+            path: CP_ROUTE_SCRIPT_PATH, mode: 493, overwrite: true,
+            contents: { source: 'data:text/plain;charset=utf-8;base64,' + Buffer.from(script).toString('base64') } }] } } }
+        };
+        await ocpApply(`${clusterApiUrl}/apis/machineconfiguration.openshift.io/v1/machineconfigs`, '99-worker-ionos-default-route', mc);
+        log(`MachineConfig "99-worker-ionos-default-route" applied (default via ${gw}); the worker pool rolls it out when workers exist.\n`);
+        step('Worker default-route MachineConfig applied', 'ok');
+      } else {
+        log('NOTE: no worker gateway given — workers will have no default route on IONOS private LANs (set "Worker Gateway IP").\n');
+      }
 
       // ── Step 2: Check for worker-user-data secret ─────────────────────────
       step('Checking for worker-user-data secret…', 'working');
@@ -2455,7 +2516,7 @@ rm -f "${patchedFile}"`, chunk => { log(chunk); });
           step(`Waiting for IONOS to process "${imgName}" in ${otherLocation}…`, 'working');
           log(`Image submitted to IONOS. Processing typically takes 5–30 minutes for a 16 GB file.\n`);
           const uploadedAt  = Date.now();
-          const imgDeadline = uploadedAt + 45 * 60 * 1000;
+          const imgDeadline = uploadedAt + 90 * 60 * 1000;
           let newImageFound  = false;
           while (!newImageFound) {
             await new Promise(r => setTimeout(r, 30000));
@@ -2478,7 +2539,7 @@ rm -f "${patchedFile}"`, chunk => { log(chunk); });
             if (!newImageFound) {
               if (Date.now() > imgDeadline) {
                 const err = new Error(
-                  `Image did not become AVAILABLE in ${otherLocation} within 45 minutes. ` +
+                  `Image did not become AVAILABLE in ${otherLocation} within 90 minutes. ` +
                   `Check IONOS DCD → Images for "${imgName}" in ${otherLocation}.`
                 );
                 err.status = 504;
@@ -4903,7 +4964,10 @@ app.post('/api/upload-rhcos-image', async (req, res) => {
     ftpUser, ftpPass,
     mgmtHost, mgmtSshKey, mgmtSshUser = 'root', sshPassphrase,
     bootstrapGateway: reqGateway,
-    bootstrapDns: reqDns
+    bootstrapDns: reqDns,
+    // URL of the worker Ignition stub the node fetches on first boot (e.g. http://<mgmt-private-ip>/worker.ign).
+    // IONOS userData is NOT read on the 'metal' Ignition platform, so without this the node boots a bare OS and never joins.
+    ignitionUrl: reqIgnitionUrl
   } = req.body;
 
   // Sanitise inputs
@@ -4920,6 +4984,7 @@ app.post('/api/upload-rhcos-image', async (req, res) => {
   const dnsRaw    = (reqDns    || process.env.OCP_BOOTSTRAP_DNS      || '').trim();
   // Convert semicolon/comma separated DNS list to "nameserver=X nameserver=Y"
   const dnsKargs  = dnsRaw.split(/[;,\s]+/).filter(Boolean).map(d => `nameserver=${d}`).join(' ');
+  const ignitionUrl = /^https?:\/\/[A-Za-z0-9._:\/-]+$/.test((reqIgnitionUrl || '').trim()) ? reqIgnitionUrl.trim() : '';
 
   res.setHeader('Content-Type',  'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -4990,6 +5055,27 @@ echo "MASTER_BLS_OK"
 `, chunk => { log(chunk); });
       if (!prep.stdout.includes('MASTER_BLS_OK')) throw new Error('Master image preparation failed:\n' + prep.stdout.slice(-1500));
       step('Master image prepared (Ignition URL → master.ign)', 'ok');
+    }
+
+    if (!isMasterImage && ignitionUrl) {
+      // The node fetches this stub on first boot (ignition.config.url in the image's boot entry): it merges the real
+      // worker config from the machine-config server. Its content is the cluster's own worker-user-data secret.
+      step('Publishing the worker Ignition stub on the management VM…', 'working');
+      const stubName = ((ignitionUrl.split('/').pop() || 'worker.ign').replace(/[^A-Za-z0-9._-]/g, '')) || 'worker.ign';
+      const kc = (req.body.kubeconfigPath || '/opt/ocp-install/auth/kubeconfig').replace(/[^A-Za-z0-9._\/-]/g, '');
+      try {
+        const pub = await sshRunScript(conn, `set -e
+export KUBECONFIG=${kc}
+oc --insecure-skip-tls-verify=true -n openshift-machine-api get secret worker-user-data -o jsonpath='{.data.userData}' | base64 -d > /var/www/html/${stubName}
+chmod 644 /var/www/html/${stubName}
+echo "STUB_OK $(stat -c%s /var/www/html/${stubName}) bytes"
+curl -s -o /dev/null -w "FETCH_CHECK ${ignitionUrl} -> HTTP %{http_code}\\n" ${ignitionUrl} || true`);
+        log(pub.stdout.split('\n').filter(l => /STUB_OK|FETCH_CHECK/.test(l)).map(l => '  ' + l).join('\n') + '\n');
+        step('Worker Ignition stub published', 'ok');
+      } catch (e) {
+        log(`  WARNING: could not publish the stub automatically (${e.message.split('\n')[0]}). Make sure ${ignitionUrl} serves the worker Ignition stub.\n`);
+        step('Worker Ignition stub NOT published (see log)', 'ok');
+      }
     }
 
     if (!isMasterImage) {
@@ -5121,11 +5207,11 @@ echo "---"
 # 1. Fix platform.id: qemu → metal
 sed -i 's/ignition\\.platform\\.id=qemu/ignition.platform.id=metal/g' "$BLS_FILE"
 
-# 2. Append network kernel args to the options line (skip if already present)
-if ! grep -q 'rd.neednet=1' "$BLS_FILE"; then
-  NETARGS="rd.neednet=1 ip=dhcp${gateway ? ` rd.route=0.0.0.0/0:${gateway}` : ''} ${dnsKargs}"
-  sed -i "/^options /s|$| $NETARGS|" "$BLS_FILE"
-fi
+# 2. Set the network kernel args (and the Ignition stub URL) on the options line. Idempotent: earlier copies of
+#    these arguments are removed first, so re-patching an already patched image is safe.
+sed -i -E '/^options /s/ (rd\\.neednet|ip|rd\\.route|nameserver|ignition\\.config\\.url)=[^ ]*//g' "$BLS_FILE"
+NETARGS="rd.neednet=1 ip=dhcp${gateway ? ` rd.route=0.0.0.0/0:${gateway}` : ''} ${dnsKargs}${ignitionUrl ? ` ignition.config.url=${ignitionUrl}` : ''}"
+sed -i "/^options /s|$| $NETARGS|" "$BLS_FILE"
 
 echo "--- BLS after patch ---"
 cat "$BLS_FILE"
@@ -5189,7 +5275,9 @@ rm -f ${lftpScript}
     log(`Image submitted. IONOS processing typically takes 5–30 minutes.\n`);
 
     const uploadedAt = Date.now();
-    const maxWaitMs  = 45 * 60 * 1000;
+    // IONOS can take well over an hour to list a newly uploaded image (seen: ~53-58 min for the first upload in a
+    // location). Wait up to 90 min and never fail early or re-upload.
+    const maxWaitMs  = 90 * 60 * 1000;
     let imageId      = null;
 
     while (Date.now() - uploadedAt < maxWaitMs) {
@@ -5199,9 +5287,12 @@ rm -f ${lftpScript}
 
       try {
         const imagesData = await ionosGet('/images?depth=2', ionosToken);
+        // EXACT name in the datacenter's OWN location. (A prefix match without a location check once picked up an
+        // older image from another location, e.g. rhcos-...-v2-fra7.raw in de/fra, and patched the wrong image.)
         const match = (imagesData.items || []).find(img => {
           const n = (img.properties?.name || '').toLowerCase();
-          return n === `${finalName}.raw` || n === finalName || n.startsWith(finalName.toLowerCase());
+          const sameLoc = (img.properties?.location || '').toLowerCase() === location;
+          return sameLoc && (n === `${finalName}.raw`.toLowerCase() || n === finalName.toLowerCase());
         });
         if (match) {
           const state = match.metadata?.state;
@@ -5218,7 +5309,7 @@ rm -f ${lftpScript}
 
     if (!imageId) {
       throw new Error(
-        'Image did not become AVAILABLE within 45 minutes.\n' +
+        'Image did not become AVAILABLE within 90 minutes (IONOS can be slow to list new uploads).\n' +
         `Check the IONOS DCD → Resources → Images for an image named "${finalName}.raw" and copy its UUID manually.`
       );
     }
@@ -5805,6 +5896,31 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
     } finally { clearInterval(kaTimer); }
     log('  All VMs AVAILABLE\n');
     step('Provision VMs (Dedicated Core: 5–10 min)', 'done');
+
+    // Boot device. A server created with an empty volume has NO boot device, and IONOS refuses to make a legacy-BIOS
+    // volume the boot device of a UEFI-only CPU (Sierra Forest / Turin): "requires OVMF firmware but the boot device
+    // requires legacy BIOS". So enable UEFI on the volume first, then set it as the boot device. Done here, while the VMs
+    // are still empty, because enabling UEFI restarts a running VM (seen on ocp2: it rebooted a live control-plane node).
+    if (!isCubeControlPlane) {
+      step('Set control plane boot devices (UEFI + live scaling)', 'running');
+      for (const [i, cp] of cpSrvIds.entries()) {
+        const vols = await ionosGetRetry(`/datacenters/${dcId}/servers/${cp.id}/volumes?depth=1`, ionosToken, r => (r.items || []).length > 0);
+        const vol  = vols.items[0];
+        const srv  = await ionosGet(`/datacenters/${dcId}/servers/${cp.id}?depth=1`, ionosToken);
+        // UEFI plus Live Vertical Scaling (hot-plug) — the same set ocp1's control volumes have. Setting them together
+        // costs one VM restart; setting them separately costs one each (changing either restarts a running VM).
+        const volFlags = { requireLegacyBios: false, cpuHotPlug: true, ramHotPlug: true, nicHotPlug: true, nicHotUnplug: true, discVirtioHotPlug: true, discVirtioHotUnplug: true };
+        const flagsOk  = Object.entries(volFlags).every(([k, v]) => vol.properties?.[k] === v);
+        if (srv.properties?.bootVolume?.id === vol.id && flagsOk) { logFound(`control-${i} boot device already set`); continue; }
+        if (!flagsOk)
+          await ionosPatchChecked(`/datacenters/${dcId}/volumes/${vol.id}`, ionosToken, volFlags);
+        await ionosPatchChecked(`/datacenters/${dcId}/servers/${cp.id}`, ionosToken, { bootVolume: { id: vol.id } });
+        const chk = await ionosGet(`/datacenters/${dcId}/servers/${cp.id}?depth=1`, ionosToken);
+        if (chk.properties?.bootVolume?.id !== vol.id) throw new Error(`control-${i}: the boot device did not stick (bootVolume is empty after the change)`);
+        logCreated(`control-${i}: UEFI enabled, ${vol.properties?.name || vol.id} is the boot device`);
+      }
+      step('Set control plane boot devices (UEFI + live scaling)', 'done');
+    }
 
     // 8. Read NIC IPs + MACs
     step('Read control plane IP and MAC addresses', 'running');
@@ -6459,6 +6575,7 @@ echo "INSTALL_COMPLETE"
 
 // Phase H: TLS certificates (cert-manager + DNS-01 webhook + Let's Encrypt) — see dns-tls.js
 dnsTls.register({ app, makeSseHelpers, clusterInstallState, sshConnect, sshRunScript, sshRunScriptStreaming });
+require('./csi').register({ app, makeSseHelpers, clusterInstallState, sshConnect, sshRunScript });
 
 // GET /api/new-cluster/state/:clusterName — retrieve saved infra/credentials
 app.get('/api/new-cluster/state/:clusterName', (req, res) => {

@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.13.1</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.14.0</span>
   </div>
 
   <div class="banner-actions">
@@ -960,7 +960,7 @@
           </div>
           <div class="form-group" style="grid-column:span 2">
             <label for="as-registry-image">Image</label>
-            <input type="text" id="as-registry-image" placeholder="e.g. paulmcc50/myrepo:ionos-machine-api-provider-cp-1" style="width:100%" />
+            <input type="text" id="as-registry-image" placeholder="e.g. paulmcc50/myrepo:ionos-machine-api-provider" style="width:100%" />
             <div class="field-note" id="as-registry-image-hint">Docker Hub: <code>username/repo:tag</code></div>
           </div>
           <div class="form-group">
@@ -1208,6 +1208,11 @@
                   <label for="rhcos-gateway">Worker Gateway IP</label>
                   <input type="text" id="rhcos-gateway" placeholder="e.g. 10.7.224.1" style="width:100%" />
                   <div class="field-note">NAT gateway for the worker private LAN — embedded in BLS kernel args as <code style="color:#38bdf8">rd.route</code>. Pre-filled from .env.</div>
+                </div>
+                <div class="form-group">
+                  <label for="rhcos-ignition-url">Worker Ignition URL</label>
+                  <input type="text" id="rhcos-ignition-url" placeholder="e.g. http://10.7.222.11/worker.ign" style="width:100%" />
+                  <div class="field-note">Embedded in the image as <code style="color:#38bdf8">ignition.config.url</code>. IONOS user-data is not read on platform <em>metal</em>, so without this a new worker boots a bare OS and never joins. The stub (the cluster's worker-user-data) is published on the management host automatically. Pre-filled from the management host's private IP.</div>
                 </div>
                 <div class="form-group">
                   <label for="rhcos-dns">DNS Servers</label>
@@ -2469,6 +2474,21 @@
           </div>
         </div>
 
+        <div class="ncw-phase" id="ncw-phase-csi" data-status="pending">
+          <div class="ncw-phase-hdr" onclick="ncwTogglePhase('csi')" style="display:flex;align-items:center;gap:0.75rem;padding:0.75rem 1rem;background:#0b1e45;border:1px solid #1e3a5f;border-radius:8px;cursor:pointer">
+            <span class="ncw-phase-badge" style="width:1.6rem;height:1.6rem;border-radius:50%;background:#1e3a5f;display:flex;align-items:center;justify-content:center;font-size:0.72rem;font-weight:700;flex-shrink:0;color:#93c5fd">H</span>
+            <span style="flex:1;font-size:0.9rem;font-weight:600;color:#cbd5e1">Install the IONOS Block Storage CSI driver (StorageClasses)</span>
+            <span class="ncw-phase-status" style="font-size:0.78rem;color:#64748b">Pending</span>
+            <button class="ncw-run-btn" id="ncw-run-csi" onclick="event.stopPropagation();ncwRunPhase('csi')" disabled
+              style="padding:0.3rem 0.85rem;border-radius:5px;border:none;background:#374151;color:#9ca3af;cursor:not-allowed;font-size:0.78rem;font-weight:600">Run</button>
+          </div>
+          <div class="ncw-phase-body hidden" id="ncw-body-csi" style="border:1px solid #1e3a5f;border-top:none;border-radius:0 0 8px 8px;padding:0.75rem;background:#070f1e">
+            <div id="ncw-steps-csi" style="display:flex;flex-direction:column;gap:0.3rem;margin-bottom:0.5rem;font-size:0.82rem"></div>
+            <pre id="ncw-log-csi" class="hidden" style="background:#0b1220;border-radius:6px;padding:0.6rem;font-size:0.75rem;max-height:300px;overflow-y:auto;margin:0;color:#94a3b8;white-space:pre-wrap"></pre>
+            <div class="error-box hidden" id="ncw-err-csi" style="margin-top:0.5rem"></div>
+          </div>
+        </div>
+
       </div><!-- /ncw-phases -->
 
       <!-- Completion panel -->
@@ -2626,7 +2646,8 @@
     if (env.registryImage)    { const el = document.getElementById('as-registry-image');    if (el) el.value = env.registryImage; }
     if (env.registryUsername) { const el = document.getElementById('as-registry-username'); if (el) el.value = env.registryUsername; }
     if (env.registryPassword) { const el = document.getElementById('as-registry-password'); if (el) el.value = env.registryPassword; }
-    if (env.mgmtInternalIp)   { const el = document.getElementById('frankfurt-ignition-ip'); if (el && !el.value) el.value = env.mgmtInternalIp; }
+    if (env.mgmtInternalIp)   { const el = document.getElementById('frankfurt-ignition-ip'); if (el && !el.value) el.value = env.mgmtInternalIp;
+                                 const iu = document.getElementById('rhcos-ignition-url'); if (iu && !iu.value) iu.value = 'http://' + env.mgmtInternalIp + '/worker.ign'; }
     if (env.ocpAdminUsername) { const el = document.getElementById('ocp-admin-username'); if (el && !el.value) el.value = env.ocpAdminUsername; }
     if (env.ocpAdminPassword) { const el = document.getElementById('ocp-admin-password'); if (el && !el.value) el.value = env.ocpAdminPassword; }
   }
@@ -4816,6 +4837,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     const ftpPass         = document.getElementById('rhcos-ftp-pass').value;
     const bootstrapGateway = document.getElementById('rhcos-gateway').value.trim();
     const bootstrapDns     = document.getElementById('rhcos-dns').value.trim();
+    const ignitionUrl      = document.getElementById('rhcos-ignition-url').value.trim();
     // mgmt host creds come from the connection state
     const sshKey     = document.getElementById('ssh-key').value.trim();
     const sshUser    = document.getElementById('ssh-user').value.trim() || 'root';
@@ -4858,7 +4880,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
           ionosToken, datacenterId,
           ocpVersion, imageName,
           ftpUser, ftpPass,
-          bootstrapGateway, bootstrapDns,
+          bootstrapGateway, bootstrapDns, ignitionUrl,
           mgmtHost, mgmtSshKey: sshKey, mgmtSshUser: sshUser
         })
       });
@@ -5088,7 +5110,8 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
           frankfurtExistingDcId: frankfurtExistingDc,
           frankfurtExistingLanId: frankfurtExistingLan,
           frankfurtIgnitionIp,
-          frankfurtStaticIp
+          frankfurtStaticIp,
+          workerGateway: (document.getElementById('rhcos-gateway')?.value || '').trim()
         })
       });
 
@@ -5546,9 +5569,10 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     bootstrap:   'monitor-bootstrap',
     finalinstall:'monitor-install',
     certs:       'configure-certs',
+    csi:         'install-csi',
   };
   // Phase order for auto-advance
-  const NCW_PHASE_ORDER = ['infra','mgmt','geniso','upload','boot','bootstrap','finalinstall','certs'];
+  const NCW_PHASE_ORDER = ['infra','mgmt','geniso','upload','boot','bootstrap','finalinstall','certs','csi'];
 
   // ── Stepper navigation ────────────────────────────────────────────────
 
@@ -5893,7 +5917,9 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
       case 'finalinstall':
         if (data) ncwShowCredentials(data);
         ncwEnablePhaseBtn('certs');
+        ncwEnablePhaseBtn('csi');
         if (ncwConfig.tlsAuto) ncwRunPhase('certs');   // default: configure TLS as soon as the install completes
+        else ncwRunPhase('csi');
         break;
       case 'certs':
         if (data) {
@@ -5902,6 +5928,9 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
           note.innerHTML = '&#128274; <strong>TLS configured.</strong> The console and API now serve a Let\'s Encrypt certificate' + (data.staging ? ' (STAGING - not trusted by browsers)' : '') + '. Open <code>' + data.consoleUrl + '</code>.';
           document.getElementById('ncw-complete').appendChild(note);
         }
+        ncwRunPhase('csi');   // default: finish with the storage driver
+        break;
+      case 'csi':
         break;
     }
   }

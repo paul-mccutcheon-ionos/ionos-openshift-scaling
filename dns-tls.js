@@ -408,6 +408,169 @@ spec:
 `;
 }
 
+// ── DNS node-record sync (in-cluster CronJob) ────────────────────────────────
+// Keeps one A record per node (<node>.<cluster>.<domain> -> InternalIP) in the cluster's DNS zone as nodes come and go
+// (autoscaler, replacements). Runs inside the cluster so it keeps working with no one using this app. Plain Python
+// (stdlib only): the cluster's CLI image has oc/curl/python3 but no jq. IONOS consumer DNS only (Cloud DNS is tested separately).
+const DNS_SYNC_SCRIPT = `import json, os, ssl, sys, urllib.request, urllib.error
+APEX = os.environ["CLUSTER_APEX"].lower()
+ZONE = os.environ["DNS_ZONE"]
+API = "https://api.hosting.ionos.com/dns/v1"
+KEY = os.environ["DNS_API_KEY_PREFIX"] + "." + os.environ["DNS_API_KEY_SECRET"]
+RESERVED = {APEX, "api." + APEX, "api-int." + APEX}
+
+def dns(method, path, body=None):
+    req = urllib.request.Request(API + path, method=method, data=(json.dumps(body).encode() if body is not None else None),
+                                 headers={"X-API-Key": KEY, "Content-Type": "application/json", "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            t = r.read().decode()
+            return json.loads(t) if t.strip() else {}
+    except urllib.error.HTTPError as e:
+        raise SystemExit("IONOS DNS API %s %s -> %s %s" % (method, path, e.code, e.read().decode()[:200]))
+
+def private(ip):
+    p = ip.split(".")
+    return len(p) == 4 and (p[0] == "10" or (p[0] == "172" and 16 <= int(p[1]) <= 31) or (p[0] == "192" and p[1] == "168"))
+
+sa = "/var/run/secrets/kubernetes.io/serviceaccount/"
+ctx = ssl.create_default_context(cafile=sa + "ca.crt")
+rq = urllib.request.Request("https://kubernetes.default.svc/api/v1/nodes", headers={"Authorization": "Bearer " + open(sa + "token").read()})
+nodes = json.load(urllib.request.urlopen(rq, context=ctx, timeout=30))["items"]
+desired = {}
+for n in nodes:
+    ip = next((a["address"] for a in n["status"].get("addresses", []) if a["type"] == "InternalIP"), None)
+    name = n["metadata"]["name"].lower()
+    if ip:
+        desired[name if name.endswith("." + APEX) else name + "." + APEX] = ip
+if not desired:
+    raise SystemExit("no nodes with an InternalIP found - refusing to change DNS")
+
+zones = dns("GET", "/zones")
+zone = next((z for z in zones if z["name"] == ZONE), None)
+if not zone:
+    raise SystemExit("DNS zone %s not found in the IONOS DNS account" % ZONE)
+recs = dns("GET", "/zones/" + zone["id"]).get("records", [])
+
+# records this job may manage: A records exactly one label under the cluster name, private IP, not reserved
+depth = len(APEX.split(".")) + 1
+managed = [r for r in recs if r["type"] == "A" and r["name"].endswith("." + APEX) and r["name"] not in RESERVED
+           and len(r["name"].split(".")) == depth and not r["name"].startswith("*") and private(r["content"])]
+
+for fq, ip in sorted(desired.items()):
+    ex = next((r for r in recs if r["type"] == "A" and r["name"] == fq), None)
+    if ex and ex["content"] == ip:
+        print("unchanged", fq, ip)
+    elif ex:
+        dns("PUT", "/zones/%s/records/%s" % (zone["id"], ex["id"]), {"name": fq, "type": "A", "content": ip, "ttl": 3600, "disabled": False})
+        print("updated  ", fq, ip, "(was %s)" % ex["content"])
+    else:
+        dns("POST", "/zones/%s/records" % zone["id"], [{"name": fq, "type": "A", "content": ip, "ttl": 3600, "disabled": False}])
+        print("created  ", fq, ip)
+
+stale = [r for r in managed if r["name"] not in desired]
+if stale and len(stale) > max(2, len(managed) // 2):
+    raise SystemExit("refusing to delete %d of %d node records in one run - check the cluster/DNS first" % (len(stale), len(managed)))
+for r in stale:
+    dns("DELETE", "/zones/%s/records/%s" % (zone["id"], r["id"]))
+    print("deleted  ", r["name"], r["content"], "(no such node)")
+print("done:", len(desired), "nodes,", len(stale), "stale record(s) removed")
+`;
+
+function dnsSyncYaml({ apex, zone, keyPrefix, keySecret, image }) {
+  const indented = DNS_SYNC_SCRIPT.split('\n').map(l => '    ' + l).join('\n');
+  return `apiVersion: v1
+kind: Namespace
+metadata:
+  name: ionos-dns-sync
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dns-sync
+  namespace: ionos-dns-sync
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ionos-dns-sync-nodes
+rules:
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ionos-dns-sync-nodes
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ionos-dns-sync-nodes
+subjects:
+- kind: ServiceAccount
+  name: dns-sync
+  namespace: ionos-dns-sync
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ionos-dns-credentials
+  namespace: ionos-dns-sync
+type: Opaque
+stringData:
+  DNS_API_KEY_PREFIX: ${q(keyPrefix)}
+  DNS_API_KEY_SECRET: ${q(keySecret)}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ionos-dns-sync-script
+  namespace: ionos-dns-sync
+data:
+  sync.py: |
+${indented}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: ionos-dns-sync
+  namespace: ionos-dns-sync
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 240
+      template:
+        spec:
+          serviceAccountName: dns-sync
+          restartPolicy: Never
+          containers:
+          - name: sync
+            image: ${q(image)}
+            command: ["python3", "/scripts/sync.py"]
+            env:
+            - name: CLUSTER_APEX
+              value: ${q(apex)}
+            - name: DNS_ZONE
+              value: ${q(zone)}
+            envFrom:
+            - secretRef:
+                name: ionos-dns-credentials
+            volumeMounts:
+            - name: script
+              mountPath: /scripts
+          volumes:
+          - name: script
+            configMap:
+              name: ionos-dns-sync-script
+`;
+}
+
 // ── endpoint ─────────────────────────────────────────────────────────────────
 
 // deps: { app, makeSseHelpers, clusterInstallState, sshConnect, sshRunScript, sshRunScriptStreaming }
@@ -548,6 +711,22 @@ echo | openssl s_client -connect console-openshift-console.apps.${apex}:443 -ser
 cp ${kubeconfig} ${kubeconfig}.letsencrypt && sed -i '/certificate-authority-data:/d' ${kubeconfig}.letsencrypt && echo "kubeconfig for public-CA trust: ${kubeconfig}.letsencrypt"`);
       log(v.stdout.split('\n').map(l => '  ' + l).join('\n') + '\n');
       step('Verify the console and API certificates', 'done');
+
+      // Keep one A record per node in the DNS zone, continuously (CronJob inside the cluster).
+      step('Install the DNS node-record sync (every 5 min)', 'running');
+      if (provider !== 'consumer') {
+        log('  Skipped: the node-record sync is implemented for IONOS consumer DNS only (Cloud DNS is tested separately).\n');
+      } else {
+        const cliImage = (await oc(`oc adm release info --image-for=cli 2>/dev/null`)).stdout.trim();
+        if (!/^[A-Za-z0-9._:\/@-]+$/.test(cliImage)) throw new Error('could not determine the cluster CLI image for the DNS sync job');
+        await apply(dnsSyncYaml({ apex, zone: b.dnsDomain || baseDomain, keyPrefix: b.dnsApiKeyPrefix, keySecret: b.dnsApiKeySecret, image: cliImage }));
+        await oc(`oc -n ionos-dns-sync delete job ionos-dns-sync-now --ignore-not-found >/dev/null 2>&1; oc -n ionos-dns-sync create job ionos-dns-sync-now --from=cronjob/ionos-dns-sync`);
+        await waitFor('the first DNS sync run', `oc -n ionos-dns-sync get job ionos-dns-sync-now -o jsonpath='{.status.succeeded}{"/"}{.status.failed}' 2>/dev/null`, /^(1\/|\/1|1\/\d)/, 300);
+        const synced = await oc(`oc -n ionos-dns-sync logs job/ionos-dns-sync-now 2>&1 | tail -25`);
+        log(synced.stdout.split('\n').map(l => '  ' + l).join('\n') + '\n');
+        if (/Traceback|refusing|IONOS DNS API|not found in the IONOS/.test(synced.stdout)) throw new Error('the DNS sync run reported an error (see the log above)');
+      }
+      step('Install the DNS node-record sync (every 5 min)', 'done');
 
       clusterInstallState.set(clusterName, { ...(clusterInstallState.get(clusterName) || saved), certsConfigured: true, certProvider: provider });
       done('TLS certificates configured', { apex, provider, staging, issuer: ISSUER_NAME, consoleUrl: `https://console-openshift-console.apps.${apex}` });
