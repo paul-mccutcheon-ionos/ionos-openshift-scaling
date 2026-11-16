@@ -523,13 +523,16 @@ helm upgrade cert-manager-webhook-ionos-cloud --namespace cert-manager --install
       step('Request certificates (API server + ingress wildcard)', 'done');
 
       step('Apply certificates to the API server and the default ingress controller', 'running');
-      const rev0 = parseInt((await oc(`oc get kubeapiserver cluster -o jsonpath='{.status.latestAvailableRevision}'`)).stdout.trim(), 10) || 0;
       await oc(`oc patch apiserver cluster --type=merge -p '{"spec":{"servingCerts":{"namedCertificates":[{"names":["api.${apex}"],"servingCertificate":{"name":"api-cert-secret"}}]}}}'
 oc -n openshift-ingress-operator patch ingresscontroller default --type=merge -p '{"spec":{"defaultCertificate":{"name":"ingress-tls-secret"}}}'`);
       log('  APIServer and IngressController updated; waiting for the operators to roll the new certificates out...\n');
+      // Give the kube-apiserver operator a moment to notice the change (Progressing=True) but do not require it:
+      // nothing changes when the certificate was already applied (a rerun), and a rollout may already be in flight.
+      await waitFor('the kube-apiserver operator to pick up the change', `oc get co kube-apiserver -o jsonpath='{.status.conditions[?(@.type=="Progressing")].status}' 2>/dev/null`, /True/, 90).catch(() => {});
+      // Done when every node runs the latest revision AND the operator reports it is no longer progressing.
       await waitFor('the kube-apiserver rollout of the new certificate',
-        `oc get kubeapiserver cluster -o jsonpath='{.status.latestAvailableRevision}{" "}{range .status.nodeStatuses[*]}{.currentRevision}{" "}{end}' 2>/dev/null | awk -v r0=${rev0} '{ok=($1>r0); for(i=2;i<=NF;i++) if($i!=$1) ok=0; print ok?"ROLLED":"WAIT"}'`,
-        /ROLLED/, 1800, `oc get co kube-apiserver --no-headers 2>&1 | cut -c1-140`);
+        `oc get kubeapiserver cluster -o jsonpath='{.status.latestAvailableRevision}{" "}{range .status.nodeStatuses[*]}{.currentRevision}{" "}{end}' 2>/dev/null | awk '{ok=1; for(i=2;i<=NF;i++) if($i!=$1) ok=0; print ok?"ROLLED":"WAIT"}'; oc get co kube-apiserver -o jsonpath='{.status.conditions[?(@.type=="Progressing")].status}' 2>/dev/null`,
+        /ROLLED\s*False/, 1800, `oc get co kube-apiserver --no-headers 2>&1 | cut -c1-140`);
       await waitFor('cluster operators to settle', `oc get co --no-headers 2>/dev/null | awk '$3!="True"||$4!="False"||$5!="False"' | wc -l`, /^0$/, 1800,
         `oc get co --no-headers 2>/dev/null | awk '$3!="True"||$4!="False"||$5!="False"{print $1}' | tr '\\n' ' '`);
       step('Apply certificates to the API server and the default ingress controller', 'done');
