@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.12.0</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.13.0</span>
   </div>
 
   <div class="banner-actions">
@@ -2076,6 +2076,41 @@
 
       <!-- Step 0: Credentials -->
       <div id="ncw-panel-0">
+        <!-- DNS option: chosen first, because it decides how the cluster's DNS records and TLS certificates are handled -->
+        <h3 style="margin-bottom:0.6rem;color:#cbd5e1">DNS &amp; TLS</h3>
+        <p style="font-size:0.8rem;color:#64748b;margin-bottom:0.75rem">Where do the cluster's DNS records live? The wizard creates the records for you and, at the end of the install, sets up cert-manager so the console and API get a valid Let's Encrypt certificate.</p>
+        <div style="display:grid;gap:0.6rem;margin-bottom:1.25rem;padding:0.9rem;background:#0b1e45;border:1px solid #1e3a5f;border-radius:8px">
+          <label style="display:flex;gap:0.6rem;align-items:flex-start;font-size:0.85rem;color:#cbd5e1;cursor:pointer">
+            <input type="radio" name="ncw-dns-provider" id="ncw-dns-consumer" value="consumer" checked style="margin-top:0.2rem">
+            <span><strong>IONOS DNS (consumer)</strong> &mdash; the domain's zone is in your IONOS DNS account (<code>api.hosting.ionos.com</code>). Records and the Let's Encrypt DNS-01 challenge both use that account's DNS API key.</span>
+          </label>
+          <label style="display:flex;gap:0.6rem;align-items:flex-start;font-size:0.85rem;color:#cbd5e1;cursor:pointer">
+            <input type="radio" name="ncw-dns-provider" id="ncw-dns-cloud" value="cloud" style="margin-top:0.2rem">
+            <span><strong>IONOS Cloud DNS</strong> &mdash; a zone for <code>&lt;cluster&gt;.&lt;domain&gt;</code> is created in IONOS Cloud DNS. The customer must <em>delegate</em> that subdomain (NS records) from whichever DNS hosts the parent domain. Uses the IONOS Cloud API token. <span style="color:#fbbf24">(Not yet tested end to end.)</span></span>
+          </label>
+          <div id="ncw-dns-consumer-fields" style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;margin-top:0.25rem">
+            <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.82rem;color:#94a3b8">DNS API key &mdash; prefix
+              <input id="ncw-dns-prefix" type="text" autocomplete="off" placeholder="public prefix of the IONOS DNS API key" style="background:#070f1e;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.45rem 0.7rem;font-size:0.82rem">
+            </label>
+            <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.82rem;color:#94a3b8">DNS API key &mdash; secret
+              <input id="ncw-dns-secret" type="password" autocomplete="off" placeholder="secret part of the IONOS DNS API key" style="background:#070f1e;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.45rem 0.7rem;font-size:0.82rem">
+            </label>
+            <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.82rem;color:#94a3b8">DNS zone (domain in the IONOS DNS account)
+              <input id="ncw-dns-domain" type="text" placeholder="defaults to the base domain" style="background:#070f1e;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.45rem 0.7rem;font-size:0.82rem">
+            </label>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem">
+            <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.82rem;color:#94a3b8">Let's Encrypt account e-mail
+              <input id="ncw-acme-email" type="text" placeholder="admin@your-domain" style="background:#070f1e;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.45rem 0.7rem;font-size:0.82rem">
+            </label>
+            <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.82rem;color:#94a3b8">DNS-01 webhook image (consumer DNS)
+              <input id="ncw-cert-image" type="text" value="docker.io/paulmcc50/myrepo:cert-manager-webhook-ionos-1.2.2-custom" style="background:#070f1e;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.45rem 0.7rem;font-size:0.78rem">
+            </label>
+          </div>
+          <label style="display:flex;gap:0.5rem;align-items:center;font-size:0.82rem;color:#94a3b8;cursor:pointer"><input type="checkbox" id="ncw-tls-auto" checked> Configure TLS automatically when the install finishes</label>
+          <label style="display:flex;gap:0.5rem;align-items:center;font-size:0.82rem;color:#94a3b8;cursor:pointer"><input type="checkbox" id="ncw-acme-staging"> Use Let's Encrypt <em>staging</em> (testing only &mdash; certificates are not trusted by browsers)</label>
+        </div>
+
         <h3 style="margin-bottom:1rem;color:#cbd5e1">IONOS &amp; Red Hat Credentials</h3>
         <div style="display:grid;gap:0.85rem">
           <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
@@ -2416,6 +2451,21 @@
             <div id="ncw-steps-finalinstall" style="display:flex;flex-direction:column;gap:0.3rem;margin-bottom:0.5rem;font-size:0.82rem"></div>
             <pre id="ncw-log-finalinstall" class="hidden" style="background:#0b1220;border-radius:6px;padding:0.6rem;font-size:0.75rem;max-height:300px;overflow-y:auto;margin:0;color:#94a3b8;white-space:pre-wrap"></pre>
             <div class="error-box hidden" id="ncw-err-finalinstall" style="margin-top:0.5rem"></div>
+          </div>
+        </div>
+
+        <div class="ncw-phase" id="ncw-phase-certs" data-status="pending">
+          <div class="ncw-phase-hdr" onclick="ncwTogglePhase('certs')" style="display:flex;align-items:center;gap:0.75rem;padding:0.75rem 1rem;background:#0b1e45;border:1px solid #1e3a5f;border-radius:8px;cursor:pointer">
+            <span class="ncw-phase-badge" style="width:1.6rem;height:1.6rem;border-radius:50%;background:#1e3a5f;display:flex;align-items:center;justify-content:center;font-size:0.72rem;font-weight:700;flex-shrink:0;color:#93c5fd">G</span>
+            <span style="flex:1;font-size:0.9rem;font-weight:600;color:#cbd5e1">Configure TLS certificates (cert-manager, Let's Encrypt)</span>
+            <span class="ncw-phase-status" style="font-size:0.78rem;color:#64748b">Pending</span>
+            <button class="ncw-run-btn" id="ncw-run-certs" onclick="event.stopPropagation();ncwRunPhase('certs')" disabled
+              style="padding:0.3rem 0.85rem;border-radius:5px;border:none;background:#374151;color:#9ca3af;cursor:not-allowed;font-size:0.78rem;font-weight:600">Run</button>
+          </div>
+          <div class="ncw-phase-body hidden" id="ncw-body-certs" style="border:1px solid #1e3a5f;border-top:none;border-radius:0 0 8px 8px;padding:0.75rem;background:#070f1e">
+            <div id="ncw-steps-certs" style="display:flex;flex-direction:column;gap:0.3rem;margin-bottom:0.5rem;font-size:0.82rem"></div>
+            <pre id="ncw-log-certs" class="hidden" style="background:#0b1220;border-radius:6px;padding:0.6rem;font-size:0.75rem;max-height:300px;overflow-y:auto;margin:0;color:#94a3b8;white-space:pre-wrap"></pre>
+            <div class="error-box hidden" id="ncw-err-certs" style="margin-top:0.5rem"></div>
           </div>
         </div>
 
@@ -3234,7 +3284,8 @@
         if (!trimmed || trimmed.startsWith('#')) continue;
         const eq = trimmed.indexOf('=');
         if (eq < 1) continue;
-        const key = trimmed.slice(0, eq).trim();
+        let key = trimmed.slice(0, eq).trim();
+        if (/^DNS_(Provider|Domain|API_Key_Prefix|API_Key_Secret)$/i.test(key)) key = key.toUpperCase();
         const val = trimmed.slice(eq + 1).trim().replace(/^["']|["']$/g, '');
         if (!val) continue;
         switch (key) {
@@ -3263,6 +3314,18 @@
             const w = document.getElementById('ncw-ftp-pass'); if (w && !w.value.trim()) w.value = val;
             break;
           }
+          case 'DNS_PROVIDER': {
+            const v = val.toLowerCase();
+            const cloud = v === 'cloud' || v === 'ionoscloud' || v === 'ionos-cloud';
+            const el = document.getElementById(cloud ? 'ncw-dns-cloud' : 'ncw-dns-consumer');
+            if (el) { el.checked = true; el.dispatchEvent(new Event('change')); }
+            break;
+          }
+          case 'DNS_DOMAIN':         { const el = document.getElementById('ncw-dns-domain');  if (el) el.value = val; break; }
+          case 'DNS_API_KEY_PREFIX': { const el = document.getElementById('ncw-dns-prefix');  if (el) el.value = val; break; }
+          case 'DNS_API_KEY_SECRET': { const el = document.getElementById('ncw-dns-secret');  if (el) el.value = val; break; }
+          case 'ACME_EMAIL':         { const el = document.getElementById('ncw-acme-email');  if (el) el.value = val; break; }
+          case 'CERT_WEBHOOK_IMAGE': { const el = document.getElementById('ncw-cert-image');  if (el) el.value = val; break; }
           case 'RH_PULL_SECRET': {
             // accept the raw JSON or the install-config form  pullSecret: '{...}'
             const i = val.indexOf('{'), j = val.lastIndexOf('}');
@@ -5482,9 +5545,10 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     boot:        'attach-boot',
     bootstrap:   'monitor-bootstrap',
     finalinstall:'monitor-install',
+    certs:       'configure-certs',
   };
   // Phase order for auto-advance
-  const NCW_PHASE_ORDER = ['infra','mgmt','geniso','upload','boot','bootstrap','finalinstall'];
+  const NCW_PHASE_ORDER = ['infra','mgmt','geniso','upload','boot','bootstrap','finalinstall','certs'];
 
   // ── Stepper navigation ────────────────────────────────────────────────
 
@@ -5516,6 +5580,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
       `OCP Version:       ${c.ocpVersion || '—'}`,
       `VDC Name:          ${c.vdcName || '—'}`,
       `VDC Location:      ${c.vdcLocation || '—'}`,
+      `DNS / TLS:         ${c.dnsProvider === 'cloud' ? 'IONOS Cloud DNS (delegated subdomain)' : 'IONOS DNS (consumer)'} · Let's Encrypt ${c.acmeStaging ? 'STAGING' : 'production'}${c.tlsAuto ? ' · TLS set up automatically after install' : ''}`,
       ``,
       ...(c.controlServerType === 'CUBE' ? [
         `Control Plane:     3× Cube`,
@@ -5563,6 +5628,14 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
         ncwConfig.ionosFtpUser  = document.getElementById('ncw-ftp-user').value.trim();
         ncwConfig.ionosFtpPass  = document.getElementById('ncw-ftp-pass').value.trim();
         ncwConfig.pullSecret    = document.getElementById('ncw-pull-secret').value.trim();
+        ncwConfig.dnsProvider   = (document.querySelector('input[name="ncw-dns-provider"]:checked') || {}).value || 'consumer';
+        ncwConfig.dnsApiKeyPrefix = document.getElementById('ncw-dns-prefix').value.trim();
+        ncwConfig.dnsApiKeySecret = document.getElementById('ncw-dns-secret').value.trim();
+        ncwConfig.dnsDomain     = document.getElementById('ncw-dns-domain').value.trim();
+        ncwConfig.acmeEmail     = document.getElementById('ncw-acme-email').value.trim();
+        ncwConfig.acmeStaging   = document.getElementById('ncw-acme-staging').checked;
+        ncwConfig.certWebhookImage = document.getElementById('ncw-cert-image').value.trim();
+        ncwConfig.tlsAuto       = document.getElementById('ncw-tls-auto').checked;
         break;
       case 1: {
         ncwConfig.clusterName    = document.getElementById('ncw-cluster-name').value.trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
@@ -5755,8 +5828,30 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
   function ncwOnPhaseSuccess(key, data) {
     switch (key) {
       case 'infra': {
-        // Show DNS records notice, then enable mgmt phase
-        if (data) {
+        // DNS records are created by the wizard (step 'Create DNS records'); show what was created.
+        // IONOS Cloud DNS additionally needs the customer to delegate the subdomain — that confirmation is required.
+        if (data && data.dns) {
+          const d = data.dns;
+          const fqdn = r => d.provider === 'cloud' ? (r.name === '@' ? d.zoneName : r.name + '.' + d.zoneName) : r.name;
+          let txt = (d.records || []).map(r => fqdn(r) + '   IN ' + r.type + '  ' + r.content).join('\n');
+          if (d.provider === 'cloud') {
+            txt += '\n\nDelegate the subdomain ' + d.zoneName + ' from the parent domain\'s DNS with these NS records:\n' +
+              (d.nameservers && d.nameservers.length
+                ? d.nameservers.map(n => d.zoneName + '.   IN NS  ' + n + '.').join('\n')
+                : '(nameservers not returned by the API - see the zone in the IONOS Cloud DNS console)');
+          } else {
+            txt += '\n\n(created automatically in your IONOS DNS account - nothing to do)';
+          }
+          document.getElementById('ncw-dns-records').textContent = txt;
+          document.getElementById('ncw-dns-notice').classList.remove('hidden');
+          if (d.provider !== 'cloud') {
+            ncwEnablePhaseBtn('mgmt');
+            document.getElementById('ncw-dns-confirmed').checked = true;
+          } else {
+            // IONOS Cloud DNS: the nodes cannot resolve the cluster names until the subdomain is delegated
+            document.getElementById('ncw-dns-confirmed').addEventListener('change', function() { if (this.checked) ncwEnablePhaseBtn('mgmt'); });
+          }
+        } else if (data) {
           const dns = [
             `api.${ncwConfig.clusterName}.${ncwConfig.baseDomain}          IN A  ${data.nlbPubIp}`,
             `api-int.${ncwConfig.clusterName}.${ncwConfig.baseDomain}      IN A  ${data.nlbPubIp}`,
@@ -5797,6 +5892,16 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
         break;
       case 'finalinstall':
         if (data) ncwShowCredentials(data);
+        ncwEnablePhaseBtn('certs');
+        if (ncwConfig.tlsAuto) ncwRunPhase('certs');   // default: configure TLS as soon as the install completes
+        break;
+      case 'certs':
+        if (data) {
+          const note = document.createElement('div');
+          note.style.cssText = 'margin-top:0.75rem;padding:0.6rem 0.85rem;background:#052e16;border:1px solid #166534;border-radius:6px;font-size:0.8rem;color:#bbf7d0';
+          note.innerHTML = '&#128274; <strong>TLS configured.</strong> The console and API now serve a Let\'s Encrypt certificate' + (data.staging ? ' (STAGING - not trusted by browsers)' : '') + '. Open <code>' + data.consoleUrl + '</code>.';
+          document.getElementById('ncw-complete').appendChild(note);
+        }
         break;
     }
   }
@@ -5980,6 +6085,15 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     }
   }
   document.getElementById('ncw-cp-server-type').addEventListener('change', ncwApplyCpServerType);
+
+  // DNS option: the consumer-DNS key fields only apply to the consumer option
+  function ncwApplyDnsProvider() {
+    const cloud = document.getElementById('ncw-dns-cloud').checked;
+    document.getElementById('ncw-dns-consumer-fields').style.display = cloud ? 'none' : 'grid';
+    const img = document.getElementById('ncw-cert-image');
+    if (img) img.disabled = cloud;
+  }
+  document.querySelectorAll('input[name="ncw-dns-provider"]').forEach(r => r.addEventListener('change', ncwApplyDnsProvider));
 
   // ═══════════════════════════════════════════════════════════════════════
   // Compliance Report (OPCT)

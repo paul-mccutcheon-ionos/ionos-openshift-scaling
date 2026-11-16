@@ -4,6 +4,7 @@ const fetch           = require('node-fetch');
 const https           = require('https');
 const path            = require('path');
 const fs              = require('fs');
+const dnsTls          = require('./dns-tls');
 
 // Load .env, additionally accepting a PEM/OpenSSH private key pasted as a normal
 // multi-line block (KEY=-----BEGIN ... newline ... -----END ...-----), which dotenv
@@ -5345,7 +5346,7 @@ app.post('/api/mhc-delete', async (req, res) => {
 // build does not lose the infrastructure details the later phases need. The browser re-sends the secrets
 // (tokens, passwords, SSH keys, pull secret) with every phase request, so they are never written to disk.
 const INSTALL_STATE_FILE = path.join(__dirname, 'data', 'cluster-install-state.json');
-const INSTALL_STATE_SECRETS = ['ionosToken', 'ionosFtpPass', 'pullSecret', 'mgmtSshPrivKey', 'kubeconfig', 'kubeadminPass'];
+const INSTALL_STATE_SECRETS = ['ionosToken', 'ionosFtpPass', 'pullSecret', 'mgmtSshPrivKey', 'kubeconfig', 'kubeadminPass', 'dnsApiKeySecret'];
 class PersistentInstallState extends Map {
   constructor() {
     super();
@@ -5937,13 +5938,25 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
     } finally { clearInterval(nlbKaTimer); }
     step('Create Network Load Balancer', 'done');
 
+    // DNS records for the cluster, in whichever DNS the user chose at the start of the wizard.
+    let dnsInfo = null;
+    if (req.body.dnsProvider) {
+      step('Create DNS records', 'running');
+      dnsInfo = await dnsTls.ensureClusterDns({
+        provider: req.body.dnsProvider, clusterName, baseDomain: req.body.baseDomain, nlbPubIp,
+        dnsDomain: req.body.dnsDomain, dnsKeyPrefix: req.body.dnsApiKeyPrefix, dnsKeySecret: req.body.dnsApiKeySecret, ionosToken,
+      }, log);
+      step('Create DNS records', 'done');
+    }
+
     const infra = {
       dcId, privLanId, pubLanId,
       mgmtSrvId, mgmtPubIp: mgmtActualPubIp, mgmtPrivIp,
       natGwId, natPubIp,
       nlbId, nlbPubIp,
       cpDetails, gatewayIp, subnetCidr,
-      ipBlockIds: [mgmtIpRes.id, nlbIpRes.id, natIpRes.id]
+      ipBlockIds: [mgmtIpRes.id, nlbIpRes.id, natIpRes.id],
+      dns: dnsInfo
     };
     clusterInstallState.set(clusterName, { ...req.body, infra });
     done('Infrastructure created successfully', infra);
@@ -6443,6 +6456,9 @@ echo "INSTALL_COMPLETE"
     fail(`Install monitoring failed: ${e.message}`);
   }
 });
+
+// Phase H: TLS certificates (cert-manager + DNS-01 webhook + Let's Encrypt) — see dns-tls.js
+dnsTls.register({ app, makeSseHelpers, clusterInstallState, sshConnect, sshRunScript, sshRunScriptStreaming });
 
 // GET /api/new-cluster/state/:clusterName — retrieve saved infra/credentials
 app.get('/api/new-cluster/state/:clusterName', (req, res) => {
