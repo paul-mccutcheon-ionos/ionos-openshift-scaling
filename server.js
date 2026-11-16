@@ -5341,7 +5341,89 @@ app.post('/api/mhc-delete', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Per-installation server-side state (survives phase transitions within a session)
-const clusterInstallState = new Map();
+// Persisted to data/cluster-install-state.json (non-secret fields only) so an app restart in the middle of a
+// build does not lose the infrastructure details the later phases need. The browser re-sends the secrets
+// (tokens, passwords, SSH keys, pull secret) with every phase request, so they are never written to disk.
+const INSTALL_STATE_FILE = path.join(__dirname, 'data', 'cluster-install-state.json');
+const INSTALL_STATE_SECRETS = ['ionosToken', 'ionosFtpPass', 'pullSecret', 'mgmtSshPrivKey', 'kubeconfig', 'kubeadminPass'];
+class PersistentInstallState extends Map {
+  constructor() {
+    super();
+    try {
+      const saved = JSON.parse(fs.readFileSync(INSTALL_STATE_FILE, 'utf8'));
+      for (const [k, v] of Object.entries(saved)) super.set(k, v);
+    } catch (_) { /* no saved state yet */ }
+  }
+  set(key, value) {
+    super.set(key, value);
+    try {
+      const out = {};
+      for (const [k, v] of this.entries()) {
+        const copy = { ...v };
+        for (const s of INSTALL_STATE_SECRETS) delete copy[s];
+        out[k] = copy;
+      }
+      fs.mkdirSync(path.dirname(INSTALL_STATE_FILE), { recursive: true });
+      fs.writeFileSync(INSTALL_STATE_FILE, JSON.stringify(out, null, 2), { mode: 0o600 });
+    } catch (e) { console.error('[install-state] could not persist:', e.message); }
+    return this;
+  }
+}
+const clusterInstallState = new PersistentInstallState();
+
+// While the installer streams its output, take the install ISO off each control VM as soon as that node
+// has written its image (and, as a safety net, when the installer reports a node booted the ISO again).
+// The guide's "ISO attached but not bootable" setup did NOT work on these servers: nodes rebooted into the
+// installer. A detached ISO means the node can only boot the installed disk — also for every later reboot.
+function makeIsoDetacher(cpDetails, dcId, ionosToken, log) {
+  const detached = new Set(), rebooted = new Set();
+  let buf = '';
+  const find = nm => (cpDetails || []).find(c => c.name === nm);
+  async function detach(nm, alsoReboot) {
+    const cp = find(nm); if (!cp) return;
+    try {
+      if (!detached.has(nm)) {
+        detached.add(nm);
+        const cur = await ionosGet(`/datacenters/${dcId}/servers/${cp.id}/cdroms?depth=1`, ionosToken);
+        for (const c of cur.items || []) {
+          await ionosDetach(`/datacenters/${dcId}/servers/${cp.id}/cdroms/${c.id}`, ionosToken);
+          log(`  [wizard] Detached install ISO from ${nm}\n`);
+          await ionosWaitAvailable(`/datacenters/${dcId}`, ionosToken, 300000).catch(() => {});
+        }
+      }
+      if (alsoReboot && !rebooted.has(nm)) {
+        rebooted.add(nm);
+        await ionosAction(`/datacenters/${dcId}/servers/${cp.id}/reboot`, ionosToken);
+        log(`  [wizard] Rebooted ${nm} so it boots the installed disk\n`);
+      }
+    } catch (e) { log(`  [wizard] ISO detach for ${nm} failed: ${e.message}\n`); }
+  }
+  const handler = chunk => {
+    buf += chunk;
+    const lines = buf.split('\n'); buf = lines.pop();
+    for (const line of lines) {
+      let m = line.match(/Host: (control-\d+)\.\S*, reached installation stage Writing image to disk: 100%/);
+      if (m) { detach(m[1], false); continue; }
+      m = line.match(/Host (control-\d+)\.\S* Expected the host to boot from disk, but it booted the installation image/);
+      if (m) detach(m[1], true);
+    }
+  };
+  handler.sweep = async () => { for (const cp of cpDetails || []) await detach(cp.name, false); };
+  return handler;
+}
+
+
+// GET that tolerates IONOS read-after-write lag (a just-created server can briefly 404 or
+// have no NIC IP yet): retries until the resource exists and `ready(result)` is true.
+async function ionosGetRetry(path, token, ready = () => true, tries = 18, delayMs = 5000) {
+  let lastErr;
+  for (let i = 0; i < tries; i++) {
+    try { const r = await ionosGet(path, token); if (ready(r)) return r; lastErr = new Error('resource not ready yet'); }
+    catch (e) { lastErr = e; if (!/404|not ready/i.test(e.message || '')) throw e; }
+    await new Promise(r => setTimeout(r, delayMs));
+  }
+  throw lastErr;
+}
 
 // Public IP blocks are reserved in the shared Frankfurt pool (de/fra) for all three sites;
 // the API rejects de/fra/1 and de/fra/2 ("Please use location de/fra instead").
@@ -5660,7 +5742,7 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
           }}] },
           nics: { items: [
             { properties: { name: 'private', lan: privLanId, dhcp: true } },
-            { properties: { name: 'public',  lan: pubLanId,  dhcp: false, ips: [mgmtPubIp] } },
+            { properties: { name: 'public',  lan: pubLanId,  dhcp: true,  ips: [mgmtPubIp] } },   // dhcp:true or the guest never gets the public IP
           ] }
         }
       });
@@ -5726,7 +5808,8 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
     // 8. Read NIC IPs + MACs
     step('Read control plane IP and MAC addresses', 'running');
     const cpDetails = await Promise.all(cpSrvIds.map(async ({ id }, i) => {
-      const d   = await ionosGet(`/datacenters/${dcId}/servers/${id}?depth=3`, ionosToken);
+      const d   = await ionosGetRetry(`/datacenters/${dcId}/servers/${id}?depth=3`, ionosToken,
+        r => (r.entities?.nics?.items || []).some(n => n.properties.lan === privLanId && n.properties.ips?.[0] && n.properties.mac));
       const nic = (d.entities?.nics?.items || []).find(n => n.properties.lan === privLanId);
       const ip  = nic?.properties?.ips?.[0] || null;
       const mac = nic?.properties?.mac || null;
@@ -5740,12 +5823,16 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
     step('Read control plane IP and MAC addresses', 'done');
 
     const [a, b, c] = cpDetails[0].ip.split('.');
-    const gatewayIp  = `${a}.${b}.${c}.1`;
-    const subnetCidr = `${a}.${b}.${c}.0/24`;
+    // IONOS private LANs are /23 (the DHCP server and NLB private IP report /23; e.g. 10.7.222.0/23 covers
+    // 10.7.222.x and 10.7.223.x). The /23 starts on an even third octet.
+    const cEven      = parseInt(c, 10) & ~1;
+    const gatewayIp  = `${a}.${b}.${cEven}.1`;
+    const subnetCidr = `${a}.${b}.${cEven}.0/23`;
     log(`  Subnet: ${subnetCidr}   Gateway: ${gatewayIp}\n`);
 
     // Read mgmt VM actual IPs from NIC (handles case where IP block was deleted+recreated)
-    const mgmtDet        = await ionosGet(`/datacenters/${dcId}/servers/${mgmtSrvId}?depth=3`, ionosToken);
+    const mgmtDet        = await ionosGetRetry(`/datacenters/${dcId}/servers/${mgmtSrvId}?depth=3`, ionosToken,
+      r => (r.entities?.nics?.items || []).some(n => n.properties.lan === privLanId && n.properties.ips?.[0]));
     const mgmtPrivNic    = (mgmtDet.entities?.nics?.items || []).find(n => n.properties.lan === privLanId);
     const mgmtPubNic     = (mgmtDet.entities?.nics?.items || []).find(n => n.properties.lan === pubLanId);
     const mgmtPrivIp     = mgmtPrivNic?.properties?.ips?.[0] || null;
@@ -5763,7 +5850,24 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
         natGwId = existNat.id;
         logFound(`NAT Gateway ${natGwId}`);
         if ((existNat.metadata?.state || '') !== 'AVAILABLE')
-          await ionosWaitAvailable(`/datacenters/${dcId}/natgateways/${natGwId}`, ionosToken, 180000);
+          await ionosWaitAvailable(`/datacenters/${dcId}/natgateways/${natGwId}`, ionosToken, 600000);
+        // A previous run may have timed out before the SNAT rule was added — make sure it exists.
+        const natRules = (await ionosGet(`/datacenters/${dcId}/natgateways/${natGwId}/rules?depth=1`, ionosToken)).items || [];
+        const snatRule = byName(natRules, 'snat-private');
+        if (snatRule && snatRule.properties?.sourceSubnet !== subnetCidr) {
+          // An earlier run (or an older wizard version) used a /24; the private LAN is a /23.
+          await ionosPatch(`/datacenters/${dcId}/natgateways/${natGwId}/rules/${snatRule.id}`, ionosToken, { sourceSubnet: subnetCidr });
+          await ionosWaitAvailable(`/datacenters/${dcId}/natgateways/${natGwId}`, ionosToken, 600000);
+          logCreated(`NAT rule snat-private source subnet updated to ${subnetCidr}`);
+        }
+        if (!snatRule) {
+          await ionosPost(`/datacenters/${dcId}/natgateways/${natGwId}/rules`, ionosToken, {
+            properties: { name: 'snat-private', type: 'SNAT', protocol: 'ALL',
+              sourceSubnet: subnetCidr, publicIp: natPubIp }
+          });
+          await ionosWaitAvailable(`/datacenters/${dcId}/natgateways/${natGwId}`, ionosToken, 600000);
+          logCreated(`NAT rule snat-private (${natPubIp} → ${subnetCidr})`);
+        }
       } else {
         const natGw = await ionosPost(`/datacenters/${dcId}/natgateways`, ionosToken, {
           properties: { name: `${clusterName}-nat-gw`, publicIps: [natPubIp],
@@ -5771,12 +5875,12 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
         });
         natGwId = natGw.id;
         log(`  NAT Gateway created: ${natGwId} — waiting for AVAILABLE...\n`);
-        await ionosWaitAvailable(`/datacenters/${dcId}/natgateways/${natGwId}`, ionosToken, 180000);
+        await ionosWaitAvailable(`/datacenters/${dcId}/natgateways/${natGwId}`, ionosToken, 600000);
         await ionosPost(`/datacenters/${dcId}/natgateways/${natGwId}/rules`, ionosToken, {
           properties: { name: 'snat-private', type: 'SNAT', protocol: 'ALL',
             sourceSubnet: subnetCidr, publicIp: natPubIp }
         });
-        await ionosWaitAvailable(`/datacenters/${dcId}/natgateways/${natGwId}`, ionosToken, 120000);
+        await ionosWaitAvailable(`/datacenters/${dcId}/natgateways/${natGwId}`, ionosToken, 600000);
         logCreated(`NAT Gateway ${natGwId}  (${natPubIp} → ${subnetCidr})`);
       }
     } finally { clearInterval(natKaTimer); }
@@ -5878,14 +5982,14 @@ app.post('/api/new-cluster/setup-management', async (req, res) => {
     }
     step('Connect to management VM via SSH', 'done');
 
-    step('Install httpd, lftp, curl, tar, jq', 'running');
+    step('Install httpd, lftp, curl, tar, jq, nmstate', 'running');
     await sshRunScriptStreaming(conn, `#!/bin/bash
 set -e
-dnf install -y httpd lftp curl wget tar jq 2>&1
+dnf install -y httpd lftp curl wget tar jq nmstate 2>&1
 systemctl enable --now httpd
 echo "PKG_DONE"
 `, chunk => log(chunk));
-    step('Install httpd, lftp, curl, tar, jq', 'done');
+    step('Install httpd, lftp, curl, tar, jq, nmstate', 'done');
 
     // Resolve exact OCP version
     let exactVer = /^\d+\.\d+\.\d+$/.test(ocpVer) ? ocpVer : null;
@@ -5938,7 +6042,10 @@ app.post('/api/new-cluster/generate-iso', async (req, res) => {
   const cpDetails  = saved.infra?.cpDetails;
   const subnetCidr = saved.infra?.subnetCidr;
   const privKey    = req.body.mgmtSshPrivKey || saved.mgmtSshPrivKey;
-  const pullSecret = req.body.pullSecret     || saved.pullSecret;
+  // Accept raw JSON or the install-config form  pullSecret: '{...}'  (extract the JSON object).
+  const pullSecretRaw = req.body.pullSecret || saved.pullSecret || '';
+  const _pi = pullSecretRaw.indexOf('{'), _pj = pullSecretRaw.lastIndexOf('}');
+  const pullSecret = (_pi >= 0 && _pj > _pi) ? pullSecretRaw.slice(_pi, _pj + 1) : pullSecretRaw;
   const sshPubKey  = req.body.ocpSshPubKey  || saved.ocpSshPubKey;
   const baseDomain = req.body.baseDomain     || saved.baseDomain;
   const exactVer   = saved.exactVer         || req.body.ocpVersion;
@@ -5981,12 +6088,39 @@ pullSecret: '${pullSecret.replace(/'/g, "'\\''")}'
 sshKey: '${(sshPubKey || '').trim()}'
 `;
 
+    // Static network config per host, as in the IONOS OpenShift guide (6.4.x): IONOS DHCP on a private LAN
+    // sets no default gateway and no DNS, and the live installer needs both to pull its images.
+    const prefixLen = parseInt((subnetCidr || '').split('/')[1], 10) || 23;
+    const gatewayIp = saved.infra?.gatewayIp || `${(subnetCidr || '').split('.').slice(0, 3).join('.')}.1`;
+    const dnsServers = (req.body.dnsServers || '212.227.123.16;212.227.123.17').split(/[;,\s]+/).filter(Boolean);
     const hostLines = cpDetails.map(d =>
 `- hostname: ${d.name}.${clusterName}.${baseDomain}
   role: master
   interfaces:
   - name: ens6
-    macAddress: "${d.mac}"`
+    macAddress: "${d.mac}"
+  networkConfig:
+    interfaces:
+    - name: ens6
+      type: ethernet
+      state: up
+      mac-address: "${d.mac}"
+      ipv4:
+        enabled: true
+        dhcp: false
+        address:
+        - ip: ${d.ip}
+          prefix-length: ${prefixLen}
+    dns-resolver:
+      config:
+        server:
+${dnsServers.map(s => `        - ${s}`).join('\n')}
+    routes:
+      config:
+      - destination: 0.0.0.0/0
+        next-hop-address: ${gatewayIp}
+        next-hop-interface: ens6
+        table-id: 254`
     ).join('\n');
 
     const agentCfg = `apiVersion: v1alpha1
@@ -6037,6 +6171,10 @@ echo "ROOTFS_DEPLOYED"
     step('Copy rootfs artifact to Apache (/var/www/html/)', 'done');
 
     conn.end();
+    // Each generated ISO gets its own catalog name: IONOS keeps (and slowly registers) every upload, and a
+    // regenerated ISO (new config/token) must never be mistaken for an older image of the same name.
+    const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
+    clusterInstallState.set(clusterName, { ...(clusterInstallState.get(clusterName) || saved), isoName: `${clusterName}-agent-${stamp}.iso` });
     done('Agent ISO generated and rootfs deployed to Apache');
   } catch (e) {
     fail(`ISO generation failed: ${e.message}`);
@@ -6057,7 +6195,7 @@ app.post('/api/new-cluster/upload-iso', async (req, res) => {
   const ftpPass    = req.body.ionosFtpPass   || saved.ionosFtpPass;
   const ionosToken = req.body.ionosToken     || saved.ionosToken;
   const ftpHost    = ftpHostForLoc(vdcLoc);
-  const isoName    = `${clusterName}-agent.iso`;
+  const isoName    = saved.isoName || `${clusterName}-agent.iso`;
 
   if (!mgmtPubIp || !privKey || !ftpUser || !ftpPass) {
     fail('Missing required fields: infra state, SSH private key, or IONOS FTP credentials.');
@@ -6065,7 +6203,22 @@ app.post('/api/new-cluster/upload-iso', async (req, res) => {
   }
 
   try {
-    const conn = await sshConnect(mgmtPubIp, 'root', privKey);
+    // If the image is already registered (e.g. a previous run uploaded it and only the slow catalog
+    // registration was still pending), do not upload again — a re-upload restarts the ~1 h wait.
+    let preFound = null;
+    try {
+      const pre = await ionosGet('/images?depth=1', ionosToken);
+      preFound = (pre.items || []).find(img => img.properties?.name === isoName &&
+        img.properties?.location === vdcLoc && img.properties?.imageType === 'CDROM') || null;
+    } catch (_) { /* fall through to a normal upload */ }
+
+    let conn = null;
+    let isoImageId = preFound ? preFound.id : null;
+    if (preFound) {
+      step(`Upload ISO via lftp to ${ftpHost}`, 'done');
+      log(`ISO ${isoName} is already registered in the catalog (${preFound.id}) — skipping upload.\n`);
+    } else {
+    conn = await sshConnect(mgmtPubIp, 'root', privKey);
 
     step(`Upload ISO via lftp to ${ftpHost}`, 'running');
     log(`Uploading ${isoName} (~1 GB) — this may take several minutes...\n`);
@@ -6095,12 +6248,13 @@ echo "FTP_UPLOAD_DONE"
     conn.end();
 
     // Poll IONOS catalog until ISO image appears
-    step('Wait for ISO to register in IONOS image catalog (~2 min)', 'running');
+    step('Wait for ISO to register in IONOS image catalog (normally ~1 hour)', 'running');
     log('Polling IONOS API for image registration...\n');
-    let isoImageId = null;
-    const deadline = Date.now() + 360000; // 6 min
+    // Measured on ocp2 (2026-11-16): the image record is created at upload time but only appears in the
+    // catalog listing ~53-58 min later. Wait up to 90 min (1.5x) — never fail early, never re-upload.
+    const deadline = Date.now() + 5400000;
     while (Date.now() < deadline) {
-      await new Promise(r => setTimeout(r, 15000));
+      await new Promise(r => setTimeout(r, 30000));
       const imgs  = await ionosGet('/images?depth=1', ionosToken);
       const found = (imgs.items || []).find(img =>
         img.properties?.name === isoName &&
@@ -6111,11 +6265,27 @@ echo "FTP_UPLOAD_DONE"
       log('  Not yet visible, retrying...\n');
     }
     if (!isoImageId) {
-      fail(`ISO "${isoName}" did not appear in the IONOS image catalog within 6 minutes. ` +
+      fail(`ISO "${isoName}" did not appear in the IONOS image catalog within 90 minutes (normally ~1 hour). ` +
            `Verify the FTP upload succeeded (check iso-images/ on ${ftpHost}).`);
       return;
     }
-    step('Wait for ISO to register in IONOS image catalog (~2 min)', 'done');
+    step('Wait for ISO to register in IONOS image catalog (normally ~1 hour)', 'done');
+    }   // end: upload + wait (skipped when the image was already registered)
+
+    // Per the IONOS OpenShift guide: set hot-plug flags and UEFI compatibility on the agent ISO
+    // (Sierra Forest / Turin hosts boot UEFI only). Same flag set as the known-good ocp1 ISO.
+    step('Set ISO image flags (UEFI compatible, hot plug)', 'running');
+    try {
+      await ionosPatch(`/images/${isoImageId}`, ionosToken, {
+        cpuHotPlug: true, ramHotPlug: true, nicHotPlug: true, nicHotUnplug: true,
+        discVirtioHotPlug: true, discVirtioHotUnplug: true, requireLegacyBios: false,
+      });
+      log('  Image flags set (requireLegacyBios=false, CPU/RAM/NIC/VirtIO hot plug)\n');
+      step('Set ISO image flags (UEFI compatible, hot plug)', 'done');
+    } catch (e) {
+      log(`  WARNING: could not set image flags: ${e.message}\n`);
+      step('Set ISO image flags (UEFI compatible, hot plug)', 'done');
+    }
 
     clusterInstallState.set(clusterName, { ...saved, isoImageId });
     done('ISO uploaded and registered', { isoImageId });
@@ -6143,19 +6313,25 @@ app.post('/api/new-cluster/attach-boot', async (req, res) => {
   try {
     step('Attach agent ISO to control plane VMs (CD-ROM)', 'running');
     for (const cp of cpDetails) {
+      const cur = await ionosGet(`/datacenters/${dcId}/servers/${cp.id}/cdroms?depth=1`, ionosToken);
+      // Remove any other ISO left from an earlier attempt, so the VM cannot boot an outdated image.
+      for (const old of (cur.items || []).filter(c => c.id !== isoImageId)) {
+        await ionosDetach(`/datacenters/${dcId}/servers/${cp.id}/cdroms/${old.id}`, ionosToken);
+        log(`  Detached old ISO ${old.properties?.name || old.id} from ${cp.name}\n`);
+        await ionosWaitAvailable(`/datacenters/${dcId}`, ionosToken, 300000);
+      }
+      if ((cur.items || []).some(c => c.id === isoImageId)) { log(`  ISO already attached to ${cp.name}\n`); continue; }
       await ionosPost(`/datacenters/${dcId}/servers/${cp.id}/cdroms`, ionosToken, { id: isoImageId });
       log(`  Attached ISO to ${cp.name} (${cp.id})\n`);
     }
     step('Attach agent ISO to control plane VMs (CD-ROM)', 'done');
 
-    step('Set boot order: CD-ROM first', 'running');
-    for (const cp of cpDetails) {
-      await ionosPatch(`/datacenters/${dcId}/servers/${cp.id}`, ionosToken, {
-        properties: { bootCdrom: { id: isoImageId } }
-      });
-      log(`  Boot order set for ${cp.name}\n`);
-    }
-    step('Set boot order: CD-ROM first', 'done');
+    // NOTE: the guide (6.4.8) keeps the ISO attached but non-bootable with the SSD as boot device. On these
+    // servers that did NOT work (setting bootVolume has no visible effect and the nodes rebooted back into the
+    // installer after writing their disk). Instead the ISO stays attached only while the node needs it: the
+    // bootstrap/install monitors detach it from each node as soon as its image is written (makeIsoDetacher),
+    // so the next boot — and every later reboot — comes from the installed disk.
+    log('  The ISO is detached from each node automatically once its image has been written.\n');
 
     step('Provision VDC changes', 'running');
     log('Waiting for VDC to finish provisioning boot-order changes...\n');
@@ -6164,8 +6340,16 @@ app.post('/api/new-cluster/attach-boot', async (req, res) => {
 
     step('Start all control plane VMs', 'running');
     for (const cp of cpDetails) {
-      await ionosAction(`/datacenters/${dcId}/servers/${cp.id}/start`, ionosToken);
-      log(`  Started ${cp.name}\n`);
+      // Servers created by the wizard are already RUNNING (empty disk, nothing to boot). "start" is a
+      // no-op on a running server, so reboot it to boot from the newly attached ISO.
+      const srv = await ionosGet(`/datacenters/${dcId}/servers/${cp.id}`, ionosToken);
+      if ((srv.properties?.vmState || '') === 'RUNNING') {
+        await ionosAction(`/datacenters/${dcId}/servers/${cp.id}/reboot`, ionosToken);
+        log(`  Rebooted ${cp.name} (was running with an empty disk)\n`);
+      } else {
+        await ionosAction(`/datacenters/${dcId}/servers/${cp.id}/start`, ionosToken);
+        log(`  Started ${cp.name}\n`);
+      }
     }
     step('Start all control plane VMs', 'done');
 
@@ -6191,11 +6375,13 @@ app.post('/api/new-cluster/monitor-bootstrap', async (req, res) => {
     step('Wait for bootstrap-complete (~25–35 min)', 'running');
     log('Running: openshift-install agent wait-for bootstrap-complete\n');
     log('Streaming installer output — do not close this window.\n\n');
+    const detacher = makeIsoDetacher(saved.infra?.cpDetails, saved.infra?.dcId, req.body.ionosToken || saved.ionosToken, log);
     await sshRunScriptStreaming(conn, `#!/bin/bash
 cd /opt/ocp-install
 openshift-install agent wait-for bootstrap-complete --dir /opt/ocp-install 2>&1
 echo "BOOTSTRAP_COMPLETE"
-`, chunk => log(chunk));
+`, chunk => { log(chunk); detacher(chunk); });
+    await detacher.sweep();   // make sure no control VM keeps the install ISO (later reboots must boot the disk)
     step('Wait for bootstrap-complete (~25–35 min)', 'done');
     conn.end();
     done('Bootstrap complete — control plane is up');
@@ -6224,11 +6410,13 @@ app.post('/api/new-cluster/monitor-install', async (req, res) => {
     log('This is the longest phase — stream output below.\n\n');
 
     let allOut = '';
+    const detacher = makeIsoDetacher(saved.infra?.cpDetails, saved.infra?.dcId, req.body.ionosToken || saved.ionosToken, log);
     await sshRunScriptStreaming(conn, `#!/bin/bash
 cd /opt/ocp-install
 openshift-install agent wait-for install-complete --dir /opt/ocp-install 2>&1
 echo "INSTALL_COMPLETE"
-`, chunk => { log(chunk); allOut += chunk; });
+`, chunk => { log(chunk); allOut += chunk; detacher(chunk); });
+    await detacher.sweep();
 
     step('Wait for install-complete (~45–60 min)', 'done');
 
@@ -6241,7 +6429,13 @@ echo "INSTALL_COMPLETE"
       kubeadminPass: kubeadminPw.trim() || null,
       kubeconfig:    kubeconfig.trim()  || null,
       apiUrl:        `https://api.${cluster}.${domain}:6443`,
-      consoleUrl:    `https://console-openshift-console.apps.${cluster}.${domain}`
+      consoleUrl:    `https://console-openshift-console.apps.${cluster}.${domain}`,
+      // for the env file the wizard saves at the end (see ncwDownloadEnv in the UI)
+      mgmtPubIp:     saved.infra?.mgmtPubIp || null,
+      mgmtPrivIp:    saved.infra?.mgmtPrivIp || null,
+      gatewayIp:     saved.infra?.gatewayIp || null,
+      natPubIp:      saved.infra?.natPubIp || null,
+      nlbPubIp:      saved.infra?.nlbPubIp || null
     };
     clusterInstallState.set(clusterName, { ...saved, installComplete: true, ...creds });
     done('Installation complete!', creds);
