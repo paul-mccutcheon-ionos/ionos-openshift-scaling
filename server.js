@@ -5331,6 +5331,10 @@ app.post('/api/mhc-delete', async (req, res) => {
 // Per-installation server-side state (survives phase transitions within a session)
 const clusterInstallState = new Map();
 
+// Public IP blocks are reserved in the shared Frankfurt pool (de/fra) for all three sites;
+// the API rejects de/fra/1 and de/fra/2 ("Please use location de/fra instead").
+function ipBlockLocation(loc) { return /^de\/fra\/\d+$/.test(loc || '') ? 'de/fra' : loc; }
+
 // IONOS FTP hostname from VDC location: de/fra/2 → ftp-fra-2.ionos.com
 function ftpHostForLoc(loc) {
   const p    = (loc || 'de/fra').split('/');
@@ -5528,7 +5532,7 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
       const ex = byName(allBlocks.items, `${clusterName}-${suffix}`);
       if (ex) { logFound(`${clusterName}-${suffix}: ${ex.properties.ips[0]}`); return { id: ex.id, ip: ex.properties.ips[0] }; }
       const blk = await ionosPost('/ipblocks', ionosToken,
-        { properties: { name: `${clusterName}-${suffix}`, size: 1, location: vdcLocation } });
+        { properties: { name: `${clusterName}-${suffix}`, size: 1, location: ipBlockLocation(vdcLocation) } });
       logCreated(`${clusterName}-${suffix}: ${blk.properties.ips[0]}`);
       return { id: blk.id, ip: blk.properties.ips[0] };
     };

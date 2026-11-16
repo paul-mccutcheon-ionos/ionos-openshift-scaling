@@ -19,3 +19,5 @@ Thumbs.db
 
 # Claude Code session data
 .claude/
+
+dns.conf
