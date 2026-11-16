@@ -32,6 +32,17 @@ function loadEnv(override = false) {
   }
 }
 loadEnv();
+
+// IONOS block-storage performance classes. Current API values are ESSENTIAL / BALANCED /
+// PERFORMANCE (formerly HDD / SSD Standard / SSD Premium; legacy names are deprecated for new
+// volumes). Accepts either naming and returns the current API value.
+function volClass(v, dflt = 'BALANCED') {
+  const k = String(v || '').trim().toUpperCase().replace(/_/g, ' ');
+  if (k === 'PERFORMANCE' || k === 'SSD PREMIUM') return 'PERFORMANCE';
+  if (k === 'BALANCED' || k === 'SSD STANDARD' || k === 'SSD') return 'BALANCED';
+  if (k === 'ESSENTIAL' || k === 'HDD') return 'ESSENTIAL';
+  return dflt;
+}
 const bcrypt          = require('bcryptjs');
 const { Client: Ssh } = require('ssh2');
 const PDFDocument     = require('pdfkit');
@@ -2603,7 +2614,8 @@ echo "ALT_WRITE_OK"
       let   ramMB      = (parseInt(machRamGiB, 10) || 8) * 1024;
       const diskGB     = parseInt(machDiskGB, 10) || 120;
       let   cores      = parseInt(machCores,  10) || 4;
-      const diskType   = (machDiskType === 'SSD Premium') ? 'SSD_PREMIUM' : 'SSD_STANDARD';
+      // The ionos-machine-api-provider still takes its own enum (SSD_PREMIUM / SSD_STANDARD) = Performance / Balanced.
+      const diskType   = (volClass(machDiskType, 'PERFORMANCE') === 'PERFORMANCE') ? 'SSD_PREMIUM' : 'SSD_STANDARD';
       const az         = availabilityZone     || 'AUTO';
       const diskAz     = diskAvailabilityZone || az;
       const cpuFam     = cpuFamily            || 'INTEL_ICELAKE';
@@ -3332,13 +3344,13 @@ app.get('/api/ionos/gpu-templates', async (req, res) => {
         cores:     t.properties.cores,
         ramGiB:    Math.round((t.properties.ram || 0) / 1024),
         storageGB: t.properties.storageSize,
-        // Each size exists once per storage type (e.g. "PERFORMANCE" and "SSD Premium") with a
+        // Each size exists once per storage type (e.g. "PERFORMANCE" and the legacy "SSD Premium") with a
         // different template ID — the type must be visible or the list looks duplicated.
         storageType: t.properties.storageType || '',
         gpus:      t.properties.gpus?.[0]?.count || GPU_TEMPLATE_GPUS[t.properties.name],
       }))
       .sort((a, b) => (order.indexOf(a.name) - order.indexOf(b.name)) ||
-                      ((b.storageType === 'SSD Premium') - (a.storageType === 'SSD Premium')));
+                      ((volClass(b.storageType, '') === 'PERFORMANCE') - (volClass(a.storageType, '') === 'PERFORMANCE')));
     res.json({ templates, locations: GPU_LOCATIONS });
   } catch (err) {
     res.status(err.status || 502).json({ error: err.message });
@@ -3350,7 +3362,7 @@ app.get('/api/ionos/gpu-templates', async (req, res) => {
 app.post('/api/ionos/create-worker', async (req, res) => {
   if (!requireFields(res, req.body, ['ionosToken', 'datacenterId', 'serverName', 'cores', 'ramMB', 'diskGB', 'lanId'])) return;
   const { ionosToken, datacenterId, serverName, cores, ramMB, diskGB, lanId, ssdType, serverAz, storageAz } = req.body;
-  const volumeType = (ssdType === 'SSD Premium') ? 'SSD Premium' : 'SSD Standard';
+  const volumeType = volClass(ssdType, 'BALANCED');
   const dcPath = `/datacenters/${encodeURIComponent(datacenterId)}`;
 
   res.setHeader('Content-Type',  'text/event-stream');
@@ -3891,7 +3903,7 @@ touch ${sentinelPath}
       properties: {
         name:        `${serverName || 'worker'}-iso`,
         size:        4,   // 4 GB — enough for the ~700 MB agent ISO
-        type:        'SSD Standard',
+        type:        'BALANCED',
         licenceType: 'OTHER'
       }
     });
@@ -5643,7 +5655,7 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
         properties: { name: `${clusterName}-mgmt`, cores: 2, ram: 4096, type: 'VCPU' },
         entities: {
           volumes: { items: [{ properties: {
-            name: `${clusterName}-mgmt-root`, size: 50, type: 'SSD Standard', image: resolvedImageId,
+            name: `${clusterName}-mgmt-root`, size: 50, type: 'BALANCED', image: resolvedImageId,
             ...(sshKeys.length ? { sshKeys } : { imagePassword: 'Temp1OcpInstall!' })
           }}] },
           nics: { items: [
@@ -5686,7 +5698,7 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
               volumes: { items: [{ properties: isCubeControlPlane
                 ? { name: `${clusterName}-control-${i}-root`, type: 'DAS', licenceType: 'LINUX' }
                 : { name: `${clusterName}-control-${i}-root`, size: parseInt(controlDiskGB, 10),
-                    type: 'SSD Premium', licenceType: 'LINUX' }
+                    type: 'PERFORMANCE', licenceType: 'LINUX' }
               }] },
               nics: { items: [{ properties: { name: 'private', lan: privLanId, dhcp: true } }] }
             }

@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.11.5</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.11.6</span>
   </div>
 
   <div class="banner-actions">
@@ -1303,9 +1303,9 @@
         <div class="form-group as-ionos-sized">
           <label for="as-ionos-disk-type">Disk Type</label>
           <select id="as-ionos-disk-type">
-            <option value="SSD Premium" selected>SSD Premium</option>
-            <option value="SSD Standard">SSD Standard</option>
-            <option value="HDD">HDD</option>
+            <option value="PERFORMANCE" selected>Performance</option>
+            <option value="BALANCED">Balanced</option>
+            <option value="ESSENTIAL">Essential</option>
           </select>
         </div>
         <div class="form-group">
@@ -1447,12 +1447,12 @@
           <div class="field-note">Min. 120 GB</div>
         </div>
         <div class="form-group">
-          <label for="worker-ssd-type">SSD Type</label>
+          <label for="worker-ssd-type">Storage performance class</label>
           <select id="worker-ssd-type">
-            <option value="SSD Standard">Standard</option>
-            <option value="SSD Premium" selected>Premium</option>
+            <option value="BALANCED">Balanced</option>
+            <option value="PERFORMANCE" selected>Performance</option>
           </select>
-          <div class="field-note">Standard: cost-effective; Premium: lower latency, higher IOPS</div>
+          <div class="field-note">Balanced: general purpose, cost-effective; Performance: lower latency, higher IOPS (both scale with volume size)</div>
         </div>
         <div class="form-group">
           <label for="worker-lan">LAN</label>
@@ -1726,7 +1726,7 @@
         <label for="cp-type">Machine type</label>
         <select id="cp-type" onchange="cpTypeChanged()">
           <option value="cube" selected>Cube (cube-ionos) &mdash; DAS storage</option>
-          <option value="dcore">Dedicated Core (dcore-ionos) &mdash; SSD Premium</option>
+          <option value="dcore">Dedicated Core (dcore-ionos) &mdash; Performance SSD</option>
         </select>
       </div>
       <div class="form-group">
@@ -1750,9 +1750,9 @@
         <input type="number" id="cp-ram" value="16" min="16" style="width:90px" />
       </div>
       <div class="form-group cp-dcore" style="display:none">
-        <label for="cp-disk">Disk (GB, SSD Premium performance)</label>
+        <label for="cp-disk">Disk (GB, Performance class SSD)</label>
         <input type="number" id="cp-disk" value="600" min="120" style="width:100px" />
-        <div class="field-note">Default 600 GB SSD Premium: IONOS block-storage performance depends on volume size, so smaller volumes are throttled and are not suitable for etcd.</div>
+        <div class="field-note">Default 600 GB Performance SSD: IONOS block-storage performance depends on volume size, so smaller volumes are throttled and are not suitable for etcd.</div>
       </div>
       <div class="form-group cp-dcore" style="display:none">
         <label for="cp-cpufamily">CPU family</label>
@@ -3893,7 +3893,7 @@
     document.getElementById('worker-cores').value    = '4';
     document.getElementById('worker-ram').value      = '8';
     document.getElementById('worker-disk').value     = '120';
-    document.getElementById('worker-ssd-type').value = 'SSD Premium';
+    document.getElementById('worker-ssd-type').value = 'PERFORMANCE';
     workerIp = null; workerMac = null; workerServerId = null; workerServerName = null; workerMainVolId = null;
     hideError('create-error');
     const csl = document.getElementById('create-server-log');
@@ -5457,11 +5457,11 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
         `                   ${c.controlTemplateName || c.controlTemplateId || '— template not selected —'}`,
       ] : [
         `Control Plane:     3× Dedicated Core (${c.cpuFamily || 'AMD_EPYC'})`,
-        `                   ${c.controlCores || 8} cores / ${c.controlRamGB || 16} GB RAM / ${c.controlDiskGB || 600} GB SSD Premium`,
+        `                   ${c.controlCores || 8} cores / ${c.controlRamGB || 16} GB RAM / ${c.controlDiskGB || 600} GB Performance SSD`,
       ]),
       ``,
       `Workers (initial): ${c.workerReplicas || 2}× vCPU`,
-      `                   ${c.workerCores || 4} cores / ${c.workerRamGB || 8} GB RAM / ${c.workerDiskGB || 120} GB SSD Standard`,
+      `                   ${c.workerCores || 4} cores / ${c.workerRamGB || 8} GB RAM / ${c.workerDiskGB || 120} GB Balanced SSD`,
       ``,
       `IONOS Token:       ${c.ionosToken ? '✓ provided' : '✗ missing'}`,
       `FTP Credentials:   ${c.ionosFtpUser ? `${c.ionosFtpUser}  /  ****` : '✗ missing'}`,
