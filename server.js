@@ -6593,17 +6593,29 @@ app.get('/api/new-cluster/state/:clusterName', (req, res) => {
 
 const OPCT_STATE_FILE = path.join(__dirname, 'data', 'opct-state.json');
 
-function loadOpctState() {
-  try { return JSON.parse(fs.readFileSync(OPCT_STATE_FILE, 'utf8')); }
-  catch (_) { return {}; }
+// One state record PER management host (= per cluster), so two browser tabs working on different clusters
+// (e.g. ocp1 and ocp2) never see each other's run, status or reports. File: { last: "<host>", hosts: { "<host>": {...} } }.
+// A pre-v1.14.2 file held a single record at the top level; it is migrated on load.
+function loadOpctStates() {
+  let raw = {};
+  try { raw = JSON.parse(fs.readFileSync(OPCT_STATE_FILE, 'utf8')); } catch (_) { return { last: '', hosts: {} }; }
+  if (raw && raw.hosts && typeof raw.hosts === 'object') return { last: raw.last || '', hosts: raw.hosts };
+  if (raw && raw.mgmtHost) return { last: raw.mgmtHost, hosts: { [raw.mgmtHost]: raw } };
+  return { last: '', hosts: {} };
 }
+const opctStates = loadOpctStates();
 function saveOpctState(state) {
   try {
+    if (state && state.mgmtHost) { opctStates.hosts[state.mgmtHost] = state; opctStates.last = state.mgmtHost; }
     fs.mkdirSync(path.dirname(OPCT_STATE_FILE), { recursive: true });
-    fs.writeFileSync(OPCT_STATE_FILE, JSON.stringify(state, null, 2));
+    fs.writeFileSync(OPCT_STATE_FILE, JSON.stringify(opctStates, null, 2));
   } catch (e) { console.error('[opct] Failed to persist state:', e.message); }
 }
-let opctState = loadOpctState();
+// The state of the management host named in the request (?mgmtHost= / body.mgmtHost); with none given, the host used last.
+function opctFor(req) {
+  const h = String((req.query && req.query.mgmtHost) || (req.body && req.body.mgmtHost) || '').trim();
+  return opctStates.hosts[h || opctStates.last] || {};
+}
 
 // Parser for `opct report <tarball>` text output. opct renders one box-drawn,
 // │-delimited "OPCT Summary" table (infra info, cluster version, plugin
@@ -7162,6 +7174,7 @@ oc whoami
 // opct if needed, and launches the conformance run in the background (it can
 // take 2-5+ hours, so this only kicks it off and returns).
 app.post('/api/compliance/start', async (req, res) => {
+  let opctState = opctFor(req);
   const { mgmtHost, sshKey, sshPassphrase, kubeconfigPath } = req.body;
   const { step, log, done, fail } = makeSseHelpers(res);
   const kubeconfig = (kubeconfigPath || '/root/.kube/config').trim();
@@ -7257,6 +7270,7 @@ function parseOpctStatusOutput(text) {
 // hasn't started yet or has already completed — `opct status` doesn't have
 // that ambiguity.
 app.get('/api/compliance/status', async (req, res) => {
+  let opctState = opctFor(req);
   if (!opctState || !opctState.mgmtHost) return res.json({ status: 'idle' });
   const { apiUrl, ocpToken } = req.query;
 
@@ -7346,6 +7360,7 @@ app.get('/api/compliance/status', async (req, res) => {
 // POST /api/compliance/collect — SSE. Retrieves the results archive and runs
 // `opct report -s` on the management host, then parses + stores the output.
 app.post('/api/compliance/collect', async (req, res) => {
+  let opctState = opctFor(req);
   const { step, log, done, fail } = makeSseHelpers(res);
   if (!opctState || !opctState.mgmtHost) { fail('No OPCT run has been started yet.'); return; }
 
@@ -7396,7 +7411,7 @@ opct retrieve .`, chunk => log(chunk));
   }
 });
 
-function opctReportPayload() {
+function opctReportPayload(opctState) {
   return {
     mgmtHost:    opctState.mgmtHost,
     startedAt:   opctState.startedAt,
@@ -7411,8 +7426,9 @@ function opctReportPayload() {
 
 // GET /api/compliance/report — JSON of the currently selected / last collected report
 app.get('/api/compliance/report', (req, res) => {
+  let opctState = opctFor(req);
   if (!opctState || !opctState.reportRaw) return res.status(404).json({ error: 'No report collected yet.' });
-  res.json(opctReportPayload());
+  res.json(opctReportPayload(opctState));
 });
 
 // ── Selectable OPCT reports ──────────────────────────────────────────────────
@@ -7444,6 +7460,7 @@ async function opctListArchives(conn) {
 
 // GET /api/compliance/reports — archives available on the management host
 app.get('/api/compliance/reports', async (req, res) => {
+  let opctState = opctFor(req);
   if (!opctState || !opctState.mgmtHost || !opctState.sshKey) return res.json({ reports: [], selected: null });
   let conn;
   try {
@@ -7461,6 +7478,7 @@ app.get('/api/compliance/reports', async (req, res) => {
 // POST /api/compliance/reports/select { archive } — make an archive the active
 // report. The raw/PDF downloads and the results table then use it.
 app.post('/api/compliance/reports/select', async (req, res) => {
+  let opctState = opctFor(req);
   const archive = String((req.body && req.body.archive) || '');
   if (!OPCT_ARCHIVE_RE.test(archive)) return res.status(400).json({ error: 'Invalid archive name.' });
   if (!opctState || !opctState.mgmtHost || !opctState.sshKey) return res.status(409).json({ error: 'No management host is configured for OPCT yet.' });
@@ -7482,7 +7500,7 @@ app.post('/api/compliance/reports/select', async (req, res) => {
     opctState.grade       = entry.grade;
     opctState.collectedAt = entry.parsedAt;
     saveOpctState(opctState);
-    res.json(opctReportPayload());
+    res.json(opctReportPayload(opctState));
   } catch (e) {
     console.error('[compliance/reports/select] Failed:', e.message);
     res.status(502).json({ error: `Could not load that report: ${e.message}` });
@@ -7494,6 +7512,7 @@ app.post('/api/compliance/reports/select', async (req, res) => {
 // GET /api/compliance/report/raw.txt — untouched `opct report -s` output, suitable
 // for submission to Red Hat for provider certification (unmodified, no branding).
 app.get('/api/compliance/report/raw.txt', (req, res) => {
+  let opctState = opctFor(req);
   if (!opctState || !opctState.reportRaw) return res.status(404).send('No report collected yet.');
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
   res.setHeader('Content-Disposition', 'attachment; filename="opct-report.txt"');
@@ -7502,6 +7521,7 @@ app.get('/api/compliance/report/raw.txt', (req, res) => {
 
 // GET /api/compliance/report.pdf — branded PDF (IONOS banner + Overpass font)
 app.get('/api/compliance/report.pdf', (req, res) => {
+  let opctState = opctFor(req);
   if (!opctState || !opctState.reportRaw) return res.status(404).send('No report collected yet.');
   try {
     const buffers = [];
