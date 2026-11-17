@@ -7209,9 +7209,13 @@ opct version`, chunk => log(chunk));
 
     step('Launch OPCT conformance run (background, 2-5+ hours)', 'running');
     const logFile = `/root/opct-run-${Date.now()}.log`;
+    // OPCT's own default (6 h) aborts the replay + artifacts-collector plugins on slower clusters, which leaves
+    // the report without the etcd log data (OPCT-010A/B show "ERR !logs"), so the app defaults to 12 h.
+    const timeoutSecs = Math.round(Math.min(48, Math.max(6, Number(req.body.timeoutHours) || 12)) * 3600);
+    log(`  Run timeout: ${timeoutSecs / 3600} h\n`);
     const launch = await sshRunScript(conn,
       `export KUBECONFIG="${kubeconfig}"
-nohup opct run > "${logFile}" 2>&1 < /dev/null &
+nohup opct run --timeout ${timeoutSecs} > "${logFile}" 2>&1 < /dev/null &
 echo $!`);
     const pid = launch.stdout.trim().split('\n').pop().trim();
     log(`  Started opct run — PID ${pid}\n  Log file: ${logFile}\n`);
