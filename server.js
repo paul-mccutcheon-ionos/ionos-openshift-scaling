@@ -6060,7 +6060,7 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
       step('Create DNS records', 'running');
       dnsInfo = await dnsTls.ensureClusterDns({
         provider: req.body.dnsProvider, clusterName, baseDomain: req.body.baseDomain, nlbPubIp,
-        dnsDomain: req.body.dnsDomain, dnsKeyPrefix: req.body.dnsApiKeyPrefix, dnsKeySecret: req.body.dnsApiKeySecret, ionosToken,
+        dnsDomain: req.body.dnsDomain, dnsKeyPrefix: req.body.dnsApiKeyPrefix, dnsKeySecret: req.body.dnsApiKeySecret, ionosToken, cloudDnsZone: req.body.cloudDnsZone,
       }, log);
       step('Create DNS records', 'done');
     }

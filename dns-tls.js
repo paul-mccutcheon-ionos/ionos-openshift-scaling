@@ -3,8 +3,9 @@
 //
 // Two DNS options, chosen at the start of the Install New Cluster wizard:
 //   'consumer' - IONOS consumer DNS (api.hosting.ionos.com), the domain's zone lives in the IONOS DNS account.
-//   'cloud'    - IONOS Cloud DNS (dns.de-fra.ionos.com). A zone for <cluster>.<domain> is created there and
-//                that subdomain must be delegated (NS records) from whichever DNS hosts the parent domain.
+//   'cloud'    - IONOS Cloud DNS (dns.de-fra.ionos.com). The wizard lists the contract's Cloud DNS zones (the delegated
+//                domains) in a drop-down; the chosen zone becomes the base domain and the cluster's records
+//                (<cluster>, api.<cluster>, api-int.<cluster>, *.apps.<cluster>) are created inside it.
 //
 // TLS: Red Hat cert-manager Operator + a DNS-01 webhook + a Let's Encrypt ClusterIssuer, then named
 // certificates for the API server and the default ingress controller (what ocp1 uses), so the console and
@@ -65,50 +66,82 @@ async function cloudDnsApi(token, method, p, body) {
   try { return JSON.parse(text); } catch { return text; }
 }
 
-// records use names relative to the zone ('@' for the apex). Creates the zone <cluster>.<domain> if needed.
+// All Cloud DNS zones of the contract the token belongs to (paged). `delegated` says whether the public NS records of
+// the zone already point at the IONOS name servers (true/false), or null when that could not be determined.
+async function listCloudDnsZones(token) {
+  const out = [];
+  for (let offset = 0; offset < 2000; offset += 100) {
+    const page = await cloudDnsApi(token, 'GET', `/zones?limit=100&offset=${offset}`);
+    const items = page.items || [];
+    for (const z of items) {
+      out.push({
+        id: z.id, name: z.properties?.zoneName, enabled: z.properties?.enabled !== false,
+        description: z.properties?.description || '', state: z.metadata?.state || '',
+        nameservers: z.metadata?.nameservers || [],
+      });
+    }
+    if (items.length < 100) break;
+  }
+  await Promise.all(out.map(async z => {
+    z.delegated = null;
+    if (!z.name || !z.nameservers.length) return;
+    try {
+      const have = (await require('dns').promises.resolveNs(z.name)).map(n => n.toLowerCase().replace(/\.$/, ''));
+      const want = z.nameservers.map(n => n.toLowerCase().replace(/\.$/, ''));
+      z.delegated = want.some(n => have.includes(n));
+    } catch (_) { z.delegated = false; }
+  }));
+  out.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  return out;
+}
+
+// Create/refresh the cluster's records inside an EXISTING (delegated) Cloud DNS zone. Record names are relative to the zone.
 async function ensureCloudDnsRecords(cfg, zoneName, records, log) {
   const found = await cloudDnsApi(cfg.token, 'GET', `/zones?filter.zoneName=${encodeURIComponent(zoneName)}`);
-  let zone = (found.items || [])[0];
-  if (zone) log(`  (exists) Cloud DNS zone ${zoneName}\n`);
-  else {
-    zone = await cloudDnsApi(cfg.token, 'POST', '/zones', { properties: { zoneName, description: `OpenShift cluster ${zoneName}`, enabled: true } });
-    log(`  (new)    Cloud DNS zone ${zoneName}\n`);
-  }
+  const zone = (found.items || []).find(z => z.properties?.zoneName === zoneName) || (found.items || [])[0];
+  if (!zone) throw new Error(`Cloud DNS zone "${zoneName}" was not found in this contract. Pick one of the delegated domains from the list.`);
+  log(`  Using Cloud DNS zone ${zoneName} (${zone.metadata?.state || 'state unknown'})
+`);
   const zoneId = zone.id;
-  const recs = await cloudDnsApi(cfg.token, 'GET', `/zones/${zoneId}/records`);
+  const recs = await cloudDnsApi(cfg.token, 'GET', `/zones/${zoneId}/records?limit=1000`);
   const existing = recs.items || [];
   for (const rec of records) {
     const ex = existing.find(e => e.properties?.name === rec.name && e.properties?.type === rec.type);
-    if (ex && ex.properties.content === rec.content) { log(`  (exists) ${rec.type} ${rec.name} -> ${rec.content}\n`); continue; }
+    if (ex && ex.properties.content === rec.content) { log(`  (exists) ${rec.type} ${rec.name} -> ${rec.content}
+`); continue; }
     if (ex) {
       await cloudDnsApi(cfg.token, 'PUT', `/zones/${zoneId}/records/${ex.id}`, { properties: { name: rec.name, type: rec.type, content: rec.content, ttl: rec.ttl || 3600, enabled: true } });
-      log(`  (updated) ${rec.type} ${rec.name} -> ${rec.content}\n`);
+      log(`  (updated) ${rec.type} ${rec.name} -> ${rec.content}
+`);
     } else {
       await cloudDnsApi(cfg.token, 'POST', `/zones/${zoneId}/records`, { properties: { name: rec.name, type: rec.type, content: rec.content, ttl: rec.ttl || 3600, enabled: true } });
-      log(`  (new)    ${rec.type} ${rec.name} -> ${rec.content}\n`);
+      log(`  (new)    ${rec.type} ${rec.name} -> ${rec.content}
+`);
     }
   }
-  const z = await cloudDnsApi(cfg.token, 'GET', `/zones/${zoneId}`).catch(() => zone);
-  return { zoneName, nameservers: z.metadata?.nameservers || zone.metadata?.nameservers || [] };
+  return { zoneName, nameservers: zone.metadata?.nameservers || [] };
 }
 
 // The DNS records a cluster needs. api-int points at the NLB public listener (the wizard's NLB has no
-// private listener; nodes reach it through the NAT gateway).
+// private listener; nodes reach it through the NAT gateway). For Cloud DNS the names are relative to the chosen zone
+// (= the base domain): <cluster>, api.<cluster>, api-int.<cluster>, *.apps.<cluster>.
 function clusterDnsRecords(provider, clusterName, baseDomain, nlbPubIp) {
   const rel = ['@', 'api', 'api-int', '*.apps'];
-  if (provider === 'cloud') return rel.map(n => ({ name: n, type: 'A', content: nlbPubIp, ttl: 3600 }));
+  if (provider === 'cloud') return rel.map(n => ({ name: n === '@' ? clusterName : `${n}.${clusterName}`, type: 'A', content: nlbPubIp, ttl: 3600 }));
   const suffix = `${clusterName}.${baseDomain}`;
   return rel.map(n => ({ name: n === '@' ? suffix : `${n}.${suffix}`, type: 'A', content: nlbPubIp, ttl: 3600 }));
 }
 
 // Create/refresh the cluster's DNS records. opts: { provider, clusterName, baseDomain, nlbPubIp,
-//   dnsDomain, dnsKeyPrefix, dnsKeySecret, ionosToken }
+//   dnsDomain, dnsKeyPrefix, dnsKeySecret, ionosToken, cloudDnsZone }
 async function ensureClusterDns(opts, log) {
   const provider = opts.provider === 'cloud' ? 'cloud' : 'consumer';
   const records = clusterDnsRecords(provider, opts.clusterName, opts.baseDomain, opts.nlbPubIp);
   if (provider === 'cloud') {
     if (!opts.ionosToken) throw new Error('IONOS Cloud DNS needs the IONOS API token.');
-    const zoneName = `${opts.clusterName}.${opts.baseDomain}`;
+    const zoneName = (opts.cloudDnsZone || opts.baseDomain || '').trim();
+    if (!zoneName) throw new Error('IONOS Cloud DNS: choose the delegated domain (zone) first.');
+    if (zoneName !== opts.baseDomain) throw new Error(`The base domain (${opts.baseDomain}) must equal the chosen Cloud DNS zone (${zoneName}): the cluster is <name>.${zoneName}.`);
     const r = await ensureCloudDnsRecords({ token: opts.ionosToken }, zoneName, records, log);
     return { provider, zoneName: r.zoneName, nameservers: r.nameservers, records };
   }
@@ -577,6 +610,14 @@ spec:
 function register(deps) {
   const { app, makeSseHelpers, clusterInstallState, sshConnect, sshRunScript, sshRunScriptStreaming } = deps;
 
+  // POST /api/new-cluster/cloud-dns-zones { ionosToken } — the delegated domains (Cloud DNS zones) of the token's contract.
+  app.post('/api/new-cluster/cloud-dns-zones', async (req, res) => {
+    const token = String((req.body && req.body.ionosToken) || '').trim();
+    if (!token) return res.status(400).json({ error: 'The IONOS API token is required.' });
+    try { res.json({ zones: await listCloudDnsZones(token) }); }
+    catch (e) { res.status(502).json({ error: e.message }); }
+  });
+
   // POST /api/new-cluster/configure-certs  (SSE)
   // Runs on the management VM with the cluster's admin kubeconfig. Idempotent (oc apply + waits).
   app.post('/api/new-cluster/configure-certs', async (req, res) => {
@@ -634,7 +675,7 @@ CL=$(KUBECONFIG=/tmp/kc-skip-verify oc config view -o jsonpath='{.clusters[0].na
 KUBECONFIG=/tmp/kc-skip-verify oc config set-cluster "$CL" --insecure-skip-tls-verify=true >/dev/null`);
       kcCurrent = '/tmp/kc-skip-verify';
       await oc('oc whoami >/dev/null 2>&1 || { echo "oc cannot reach the cluster with ' + kubeconfig + '"; exit 1; }');
-      log(`Cluster ${apex} reachable. DNS option: ${provider === 'cloud' ? 'IONOS Cloud DNS (delegated subdomain)' : 'IONOS consumer DNS'}.\n`);
+      log(`Cluster ${apex} reachable. DNS option: ${provider === 'cloud' ? 'IONOS Cloud DNS (delegated domain)' : 'IONOS consumer DNS'}.\n`);
 
       step('Install cert-manager Operator for Red Hat OpenShift', 'running');
       await apply(operatorYaml());

@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.14.3</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.15.0</span>
   </div>
 
   <div class="banner-actions">
@@ -2091,8 +2091,19 @@
           </label>
           <label style="display:flex;gap:0.6rem;align-items:flex-start;font-size:0.85rem;color:#cbd5e1;cursor:pointer">
             <input type="radio" name="ncw-dns-provider" id="ncw-dns-cloud" value="cloud" style="margin-top:0.2rem">
-            <span><strong>IONOS Cloud DNS</strong> &mdash; a zone for <code>&lt;cluster&gt;.&lt;domain&gt;</code> is created in IONOS Cloud DNS. The customer must <em>delegate</em> that subdomain (NS records) from whichever DNS hosts the parent domain. Uses the IONOS Cloud API token. <span style="color:#fbbf24">(Not yet tested end to end.)</span></span>
+            <span><strong>IONOS Cloud DNS</strong> &mdash; pick one of the <em>delegated domains</em> (Cloud DNS zones) of your IONOS contract. The cluster becomes <code>&lt;cluster&gt;.&lt;zone&gt;</code> and its DNS records are created in that zone. Uses the IONOS Cloud API token. <span style="color:#fbbf24">(Not yet tested end to end.)</span></span>
           </label>
+          <div id="ncw-dns-cloud-fields" style="display:none;gap:0.4rem;margin-top:0.25rem">
+            <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.82rem;color:#94a3b8">Delegated domain (Cloud DNS zone)
+              <div style="display:flex;gap:0.5rem">
+                <select id="ncw-cloud-zone" style="flex:1;background:#070f1e;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.45rem 0.7rem;font-size:0.82rem">
+                  <option value="">Enter the IONOS API token below, then load the zones&hellip;</option>
+                </select>
+                <button type="button" id="ncw-cloud-zone-load" style="background:#0f2035;color:#60a5fa;border:1px solid #1e3a5f;border-radius:6px;padding:0.4rem 0.9rem;font-size:0.8rem;cursor:pointer">Load zones</button>
+              </div>
+            </label>
+            <div id="ncw-cloud-zone-msg" style="font-size:0.76rem;color:#64748b"></div>
+          </div>
           <div id="ncw-dns-consumer-fields" style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;margin-top:0.25rem">
             <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.82rem;color:#94a3b8">DNS API key &mdash; prefix
               <input id="ncw-dns-prefix" type="text" autocomplete="off" placeholder="public prefix of the IONOS DNS API key" style="background:#070f1e;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.45rem 0.7rem;font-size:0.82rem">
@@ -5611,7 +5622,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
       `OCP Version:       ${c.ocpVersion || '—'}`,
       `VDC Name:          ${c.vdcName || '—'}`,
       `VDC Location:      ${c.vdcLocation || '—'}`,
-      `DNS / TLS:         ${c.dnsProvider === 'cloud' ? 'IONOS Cloud DNS (delegated subdomain)' : 'IONOS DNS (consumer)'} · Let's Encrypt ${c.acmeStaging ? 'STAGING' : 'production'}${c.tlsAuto ? ' · TLS set up automatically after install' : ''}`,
+      `DNS / TLS:         ${c.dnsProvider === 'cloud' ? 'IONOS Cloud DNS, zone ' + (c.cloudDnsZone || '?') : 'IONOS DNS (consumer)'} · Let's Encrypt ${c.acmeStaging ? 'STAGING' : 'production'}${c.tlsAuto ? ' · TLS set up automatically after install' : ''}`,
       ``,
       ...(c.controlServerType === 'CUBE' ? [
         `Control Plane:     3× Cube`,
@@ -5639,6 +5650,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     if (!c.pullSecret)    missing.push('Pull Secret');
     if (!c.clusterName)   missing.push('Cluster Name');
     if (!c.baseDomain)    missing.push('Base Domain');
+    if (c.dnsProvider === 'cloud' && !c.cloudDnsZone) missing.push('Cloud DNS zone (delegated domain)');
     if (!c.ocpVersion)    missing.push('OCP Version');
     if (!c.vdcName)       missing.push('VDC Name');
     if (!c.mgmtSshPrivKey) missing.push('Mgmt SSH Private Key');
@@ -5663,6 +5675,8 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
         ncwConfig.dnsApiKeyPrefix = document.getElementById('ncw-dns-prefix').value.trim();
         ncwConfig.dnsApiKeySecret = document.getElementById('ncw-dns-secret').value.trim();
         ncwConfig.dnsDomain     = document.getElementById('ncw-dns-domain').value.trim();
+        ncwConfig.cloudDnsZone  = ncwConfig.dnsProvider === 'cloud' ? document.getElementById('ncw-cloud-zone').value : '';
+        if (ncwConfig.cloudDnsZone) document.getElementById('ncw-base-domain').value = ncwConfig.cloudDnsZone;
         ncwConfig.acmeEmail     = document.getElementById('ncw-acme-email').value.trim();
         ncwConfig.acmeStaging   = document.getElementById('ncw-acme-staging').checked;
         ncwConfig.certWebhookImage = document.getElementById('ncw-cert-image').value.trim();
@@ -5864,8 +5878,17 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
         if (data && data.dns) {
           const d = data.dns;
           const fqdn = r => d.provider === 'cloud' ? (r.name === '@' ? d.zoneName : r.name + '.' + d.zoneName) : r.name;
+          const zoneInfo = (window.ncwCloudZoneList || []).find(z => z.name === d.zoneName);
+          const zoneDelegated = d.provider === 'cloud' ? !(zoneInfo && zoneInfo.delegated === false) : true;
           let txt = (d.records || []).map(r => fqdn(r) + '   IN ' + r.type + '  ' + r.content).join('\n');
-          if (d.provider === 'cloud') {
+          if (d.provider === 'cloud' && zoneDelegated) {
+            txt += '\n\n(created in your IONOS Cloud DNS zone ' + d.zoneName + ' - the zone is delegated, nothing to do)';
+          } else if (d.provider === 'cloud') {
+            txt += '\n\nThe zone ' + d.zoneName + ' does not appear to be delegated to IONOS yet. Set these NS records at the DNS hosting the parent domain:\n' +
+              (d.nameservers && d.nameservers.length
+                ? d.nameservers.map(n => d.zoneName + '.   IN NS  ' + n + '.').join('\n')
+                : '(nameservers not returned by the API - see the zone in the IONOS Cloud DNS console)');
+          } else if (false) {
             txt += '\n\nDelegate the subdomain ' + d.zoneName + ' from the parent domain\'s DNS with these NS records:\n' +
               (d.nameservers && d.nameservers.length
                 ? d.nameservers.map(n => d.zoneName + '.   IN NS  ' + n + '.').join('\n')
@@ -5875,7 +5898,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
           }
           document.getElementById('ncw-dns-records').textContent = txt;
           document.getElementById('ncw-dns-notice').classList.remove('hidden');
-          if (d.provider !== 'cloud') {
+          if (zoneDelegated) {
             ncwEnablePhaseBtn('mgmt');
             document.getElementById('ncw-dns-confirmed').checked = true;
           } else {
@@ -6126,10 +6149,50 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
   function ncwApplyDnsProvider() {
     const cloud = document.getElementById('ncw-dns-cloud').checked;
     document.getElementById('ncw-dns-consumer-fields').style.display = cloud ? 'none' : 'grid';
+    document.getElementById('ncw-dns-cloud-fields').style.display = cloud ? 'grid' : 'none';
+    if (cloud && !ncwCloudZonesLoaded && document.getElementById('ncw-ionos-token').value.trim()) ncwLoadCloudZones();
     const img = document.getElementById('ncw-cert-image');
     if (img) img.disabled = cloud;
   }
   document.querySelectorAll('input[name="ncw-dns-provider"]').forEach(r => r.addEventListener('change', ncwApplyDnsProvider));
+
+  // IONOS Cloud DNS: list the contract's zones (delegated domains) for the drop-down; the chosen zone becomes the base domain.
+  var ncwCloudZonesLoaded = false;
+  async function ncwLoadCloudZones() {
+    const sel = document.getElementById('ncw-cloud-zone'), msg = document.getElementById('ncw-cloud-zone-msg');
+    const token = document.getElementById('ncw-ionos-token').value.trim();
+    if (!token) { msg.textContent = 'Enter the IONOS Cloud API token first.'; return; }
+    msg.textContent = 'Loading Cloud DNS zones...';
+    try {
+      const r = await fetch('/api/new-cluster/cloud-dns-zones', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ionosToken: token }) });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+      ncwCloudZonesLoaded = true;
+      window.ncwCloudZoneList = d.zones;
+      if (!d.zones.length) {
+        sel.innerHTML = '<option value="">No Cloud DNS zones in this contract</option>';
+        msg.textContent = 'This contract has no Cloud DNS zones. Create the zone in the DCD (or delegate a domain to IONOS Cloud DNS) and reload.';
+        return;
+      }
+      const want = document.getElementById('ncw-base-domain').value.trim();
+      sel.innerHTML = '<option value="">Select a delegated domain...</option>' + d.zones.map(z => {
+        const flag = z.delegated === true ? ' - delegated OK' : z.delegated === false ? ' - NS not pointing to IONOS yet' : '';
+        return '<option value="' + escHtml(z.name) + '">' + escHtml(z.name) + ' (' + escHtml(z.state || '?') + flag + ')</option>';
+      }).join('');
+      if (want && d.zones.some(z => z.name === want)) { sel.value = want; ncwCloudZoneChosen(); }
+      msg.textContent = d.zones.length + ' zone' + (d.zones.length === 1 ? '' : 's') + ' found. The cluster will be <name>.<zone>; its DNS records are created in the chosen zone.';
+    } catch (e) { msg.textContent = 'Could not load zones: ' + e.message; }
+  }
+  function ncwCloudZoneChosen() {
+    const z = document.getElementById('ncw-cloud-zone').value;
+    if (z) document.getElementById('ncw-base-domain').value = z;   // the cluster domain lives inside the zone
+  }
+  document.getElementById('ncw-cloud-zone').addEventListener('change', ncwCloudZoneChosen);
+  document.getElementById('ncw-cloud-zone-load').addEventListener('click', ncwLoadCloudZones);
+  document.getElementById('ncw-ionos-token').addEventListener('change', () => {
+    ncwCloudZonesLoaded = false;
+    if (document.getElementById('ncw-dns-cloud').checked) ncwLoadCloudZones();
+  });
 
   // ═══════════════════════════════════════════════════════════════════════
   // Compliance Report (OPCT)
