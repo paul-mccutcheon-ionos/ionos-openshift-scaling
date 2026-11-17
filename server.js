@@ -7357,6 +7357,25 @@ app.get('/api/compliance/status', async (req, res) => {
   });
 });
 
+// POST /api/compliance/attach { mgmtHost, sshKey, sshPassphrase, kubeconfigPath } — register the management host the
+// OPCT card currently shows, so its runs/archives can be listed and collected even when the run was started outside
+// the app (e.g. from the CLI). Updates the credentials of a known host and keeps its run/report data.
+app.post('/api/compliance/attach', (req, res) => {
+  const b = req.body || {};
+  const host = String(b.mgmtHost || '').trim();
+  if (!/^[A-Za-z0-9._:-]+$/.test(host) || !b.sshKey) return res.status(400).json({ error: 'mgmtHost and sshKey are required.' });
+  const existing = opctStates.hosts[host];
+  const rec = {
+    collectedAt: null, tarballPath: null, reportRaw: null, reportTable: null, grade: null, startedAt: null,
+    ...(existing || {}),
+    mgmtHost: host, sshKey: b.sshKey, sshPassphrase: b.sshPassphrase || '',
+    kubeconfigPath: String(b.kubeconfigPath || (existing && existing.kubeconfigPath) || '/root/.kube/config').trim(),
+    status: (existing && existing.status) || 'attached'
+  };
+  saveOpctState(rec);
+  res.json({ ok: true, known: !!existing });
+});
+
 // POST /api/compliance/collect — SSE. Retrieves the results archive and runs
 // `opct report -s` on the management host, then parses + stores the output.
 app.post('/api/compliance/collect', async (req, res) => {

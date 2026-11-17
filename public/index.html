@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.14.2</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.14.3</span>
   </div>
 
   <div class="banner-actions">
@@ -6143,6 +6143,18 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     return ((el && el.value.trim()) || mgmtHost || '').trim();
   }
   const opctQ = () => 'mgmtHost=' + encodeURIComponent(opctHost());
+  // Tell the server which host/key this card shows (needed for hosts whose run was not started from the app).
+  async function opctAttach() {
+    const key = (document.getElementById('opct-ssh-key').value || '').trim();
+    const host = opctHost();
+    if (!host || !key) return;
+    try {
+      await fetch('/api/compliance/attach', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mgmtHost: host, sshKey: key, sshPassphrase: document.getElementById('opct-ssh-passphrase').value,
+                               kubeconfigPath: document.getElementById('opct-kubeconfig-path').value.trim() }) });
+    } catch (_) {}
+  }
+  let opctShownHost = '';
 
   async function opctRunSse(endpoint, body, { stepsEl, logEl, errEl, onDone }) {
     stepsEl.innerHTML = '';
@@ -6532,6 +6544,12 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
   async function opctLoadReportList() {
     const sel = document.getElementById('opct-report-select');
     const msg = document.getElementById('opct-report-select-msg');
+    await opctAttach();
+    if (opctShownHost && opctShownHost !== opctHost()) {   // another cluster's host: drop the previous host's report view
+      document.getElementById('opct-report-card').classList.add('hidden');
+      sel.innerHTML = '<option value="">Loading reports…</option>';
+    }
+    opctShownHost = opctHost();
     try {
       const r = await fetch('/api/compliance/reports?' + opctQ());
       const data = await r.json();
@@ -6606,7 +6624,9 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
   });
 
   // Switching the management host field switches to that host's run and reports
-  document.getElementById('opct-mgmt-host').addEventListener('change', () => {
+  document.getElementById('opct-mgmt-host').addEventListener('change', async () => {
+    await opctAttach();
+    opctLoadReportList();
     fetch('/api/compliance/status?' + opctQ()).then(r => r.json()).then(s => {
       const card = document.getElementById('opct-status-card');
       if (s.status && s.status !== 'idle') { card.classList.remove('hidden'); opctRefreshStatus(); }
@@ -6619,7 +6639,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
   document.querySelector('.nav-item[data-section="compliance"]').addEventListener('click', () => {
     if (opctStatusCheckedOnce) return;
     opctStatusCheckedOnce = true;
-    fetch('/api/compliance/status?' + opctQ()).then(r => r.json()).then(s => {
+    opctAttach().then(() => fetch('/api/compliance/status?' + opctQ())).then(r => r.json()).then(s => {
       if (s.status && s.status !== 'idle') {
         document.getElementById('opct-status-card').classList.remove('hidden');
         opctRefreshStatus();
