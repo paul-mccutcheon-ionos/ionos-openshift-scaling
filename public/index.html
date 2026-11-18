@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.17.0</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.18.0</span>
   </div>
 
   <div class="banner-actions">
@@ -1736,15 +1736,25 @@
       </div>
       <div class="form-group">
         <label for="cp-count">How many</label>
-        <input type="number" id="cp-count" value="1" min="1" max="2" style="width:90px" />
+        <input type="number" id="cp-count" value="1" min="1" max="3" style="width:90px" oninput="cpZoneUi()" />
       </div>
       <div class="form-group">
         <label for="cp-zone-mode">Availability zone</label>
-        <select id="cp-zone-mode">
+        <select id="cp-zone-mode" onchange="cpZoneUi()">
           <option value="auto" selected>Auto (IONOS chooses)</option>
           <option value="spread">Spread across zones 1 and 2</option>
+          <option value="custom">Choose per node (server zone + storage zone)</option>
         </select>
-        <div class="field-note">Spread places new nodes one at a time on Zone 1 / Zone 2, always choosing the zone with fewer control-plane servers.</div>
+        <div class="field-note">Spread places new nodes one at a time on Zone 1 / Zone 2, always choosing the zone with fewer control-plane servers. &ldquo;Choose per node&rdquo; lets you set the server zone and each node&rsquo;s storage zone (1, 2 or 3).</div>
+      </div>
+      <div class="form-group" id="cp-zone-custom" style="display:none;grid-column:1/-1">
+        <label>Placement per new node</label>
+        <div style="display:flex;flex-wrap:wrap;gap:0.8rem;align-items:flex-end">
+          <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.8rem;color:#94a3b8">Server zone (all new VMs)
+            <select id="cp-server-zone"><option value="AUTO">Auto (IONOS chooses)</option><option value="ZONE_1">Zone 1</option><option value="ZONE_2">Zone 2</option></select></label>
+          <span id="cp-disk-zones" style="display:contents"></span>
+        </div>
+        <div class="field-note">Each distinct server/storage zone pair becomes its own MachineSet (<code>&lt;name&gt;-s1-d1</code>, <code>-s1-d2</code>, &hellip;), because a MachineSet has a single placement. Cube storage (DAS) has no separate storage zone.</div>
       </div>
       <div class="form-group cp-dcore" style="display:none">
         <label for="cp-cores">Cores</label>
@@ -2268,6 +2278,32 @@
                 </button>
               </div>
               <div class="field-note" style="margin-top:0.4rem">Cores/RAM/disk are fixed by the template — defaults to Basic Cube L (8 vCPU / 16 GB / 480 GB).</div>
+            </div>
+
+            <div style="margin-top:1rem;padding-top:0.8rem;border-top:1px solid #1e3a5f">
+              <div style="font-size:0.82rem;color:#94a3b8;margin-bottom:0.5rem"><strong style="color:#cbd5e1">Placement (availability zones)</strong> &mdash; a site normally has three storage zones. Servers can only be in Zone 1 or Zone 2; storage volumes can also use Zone 3.</div>
+              <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:0.75rem">
+                <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+                  Server zone (all 3 VMs)
+                  <select id="ncw-cp-server-zone" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem"><option value="AUTO">Auto (IONOS chooses)</option><option value="ZONE_1">Zone 1</option><option value="ZONE_2">Zone 2</option></select>
+                </label>
+                <label class="ncw-cp-dz" style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+                  control-0 storage zone
+                  <select id="ncw-cp-dz-0" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem"><option value="AUTO">Auto</option><option value="ZONE_1">Zone 1</option><option value="ZONE_2">Zone 2</option><option value="ZONE_3">Zone 3</option></select>
+                </label>
+                <label class="ncw-cp-dz" style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+                  control-1 storage zone
+                  <select id="ncw-cp-dz-1" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem"><option value="AUTO">Auto</option><option value="ZONE_1">Zone 1</option><option value="ZONE_2">Zone 2</option><option value="ZONE_3">Zone 3</option></select>
+                </label>
+                <label class="ncw-cp-dz" style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+                  control-2 storage zone
+                  <select id="ncw-cp-dz-2" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem"><option value="AUTO">Auto</option><option value="ZONE_1">Zone 1</option><option value="ZONE_2">Zone 2</option><option value="ZONE_3">Zone 3</option></select>
+                </label>
+              </div>
+              <div style="display:flex;align-items:center;gap:0.6rem;margin-top:0.5rem">
+                <button type="button" id="ncw-cp-zones-spread" class="ncw-cp-dz" style="background:#1e3a5f;border:1px solid #2d5a8e;color:#e2e8f0;border-radius:6px;padding:0.35rem 0.8rem;font-size:0.8rem;cursor:pointer">Servers in Zone 1, storage in Zones 1 / 2 / 3</button>
+                <div class="field-note">Storage zone of a volume is independent of its server&rsquo;s zone. Cube storage (DAS) is part of the server, so only the server zone applies.</div>
+              </div>
             </div>
           </div>
           <div>
@@ -2939,7 +2975,7 @@
       <td style="padding:0.2rem 0.6rem;color:${m.ready ? '#6ee7b7' : '#f87171'}">${m.ready ? 'Ready' : 'NotReady'}</td>
       <td style="padding:0.2rem 0.6rem;color:${m.managed ? '#6ee7b7' : '#94a3b8'}">${m.managed ? 'Machine-managed (' + escHtml(m.machineSet || m.machine) + ')' : 'fixed (hand-built)'}</td>
       <td style="padding:0.2rem 0.6rem;color:${m.etcdPod?.ready ? '#6ee7b7' : '#f87171'}">${m.etcdPod ? (m.etcdPod.ready ? 'etcd Ready' : 'etcd starting') : 'no etcd pod'}</td>
-      <td style="padding:0.2rem 0.6rem;color:${/DAS/.test((d.storage?.[m.name]?.volumes || []).join()) ? '#c4b5fd' : '#94a3b8'}">${escHtml(d.storage?.[m.name] ? d.storage[m.name].type + ' · ' + d.storage[m.name].volumes.join(', ') : '')}</td></tr>`).join('');
+      <td style="padding:0.2rem 0.6rem;color:${/DAS/.test((d.storage?.[m.name]?.volumes || []).join()) ? '#c4b5fd' : '#94a3b8'}">${escHtml(d.storage?.[m.name] ? d.storage[m.name].type + (d.storage[m.name].zone ? ' ' + d.storage[m.name].zone : '') + ' · ' + d.storage[m.name].volumes.join(', ') : '')}</td></tr>`).join('');
     const das = d.masters.filter(m => /DAS/.test((d.storage?.[m.name]?.volumes || []).join())).length;
     const nlb = Array.isArray(d.nlb)
       ? d.nlb.map(r => `<div style="color:#94a3b8">port ${r.port} &rarr; ${r.targets.map(escHtml).join(', ')}</div>`).join('')
@@ -2988,7 +3024,25 @@
     finally { btn.disabled = false; }
   }
 
+  // "Choose per node" placement panel: a storage-zone drop-down per node being added (defaults 1, 2, 3).
+  function cpZoneUi() {
+    const custom = document.getElementById('cp-zone-mode').value === 'custom';
+    document.getElementById('cp-zone-custom').style.display = custom ? '' : 'none';
+    if (!custom) return;
+    const cube = document.getElementById('cp-type').value === 'cube';
+    const n = Math.max(1, Math.min(3, parseInt(document.getElementById('cp-count').value, 10) || 1));
+    const host = document.getElementById('cp-disk-zones');
+    const old = [...host.querySelectorAll('select')].map(s => s.value);
+    const srv = document.getElementById('cp-server-zone');
+    if (!srv.dataset.touched) { srv.value = 'ZONE_1'; srv.dataset.touched = '1'; }
+    host.innerHTML = cube ? '' : Array.from({ length: n }, (_, i) =>
+      `<label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.8rem;color:#94a3b8">Node ${i + 1} storage zone
+        <select id="cp-dz-${i}">${['AUTO', 'ZONE_1', 'ZONE_2', 'ZONE_3'].map(z => `<option value="${z}">${z === 'AUTO' ? 'Auto' : z.replace('ZONE_', 'Zone ')}</option>`).join('')}</select></label>`).join('');
+    host.querySelectorAll('select').forEach((s, i) => { s.value = old[i] || ['ZONE_1', 'ZONE_2', 'ZONE_3'][i]; });
+  }
+
   function cpTypeChanged() {
+    cpZoneUi();
     const cube = document.getElementById('cp-type').value === 'cube';
     document.querySelectorAll('.cp-dcore').forEach(el => { el.style.display = cube ? 'none' : ''; });
     document.querySelectorAll('.cp-cube').forEach(el => { el.style.display = cube ? '' : 'none'; });
@@ -3076,10 +3130,16 @@
     if (!lanId) { err.textContent = 'The private cluster LAN could not be detected — enter it in the LAN ID field on the Autoscaling tab.'; err.style.display = 'block'; return; }
     const count = parseInt(document.getElementById('cp-count').value, 10) || 1;
     const what = type === 'cube' ? 'Cube (' + (document.getElementById('cp-cube-template').selectedOptions[0]?.text || '') + ')' : `Dedicated Core ${document.getElementById('cp-cores').value} vCPU / ${document.getElementById('cp-ram').value} GiB`;
-    if (!confirm(`Add ${count} control-plane node(s): ${what}\n\nZone placement: ${document.getElementById('cp-zone-mode').value === 'spread' ? 'spread across zones 1 and 2' : 'Auto'}.\n\nThey join NEXT TO the existing control-plane nodes and become etcd members. Nothing is removed. Continue?`)) return;
+    const zoneMode = document.getElementById('cp-zone-mode').value;
+    const serverZone = document.getElementById('cp-server-zone').value;
+    const diskZones = [...document.querySelectorAll('#cp-disk-zones select')].map(s => s.value);
+    const placement = zoneMode === 'custom'
+      ? `custom: servers in ${serverZone}` + (type === 'cube' ? '' : ', storage ' + diskZones.slice(0, count).map((z, i) => `node ${i + 1} → ${z}`).join(', '))
+      : zoneMode === 'spread' ? 'spread across zones 1 and 2' : 'Auto';
+    if (!confirm(`Add ${count} control-plane node(s): ${what}\n\nZone placement: ${placement}.\n\nThey join NEXT TO the existing control-plane nodes and become etcd members. Nothing is removed. Continue?`)) return;
     const btn = document.getElementById('cp-add-btn'); btn.disabled = true; btn.style.opacity = '0.5';
     await cpStream('/api/control-plane/add', cpBody({
-      machineType: type, count, lanId, zoneMode: document.getElementById('cp-zone-mode').value, imageId: document.getElementById('cp-image').value, backupConfirmed: document.getElementById('cp-backup-ok').checked,
+      machineType: type, count, lanId, zoneMode, serverZone, diskZones, imageId: document.getElementById('cp-image').value, backupConfirmed: document.getElementById('cp-backup-ok').checked,
       cores: document.getElementById('cp-cores').value, ramGiB: document.getElementById('cp-ram').value, diskGB: document.getElementById('cp-disk').value,
       cpuFamily: document.getElementById('cp-cpufamily').value.trim(), cubeTemplateId: document.getElementById('cp-cube-template').value }), log,
       (msg) => { done.innerHTML = '<strong>&#10003; Done.</strong> ' + escHtml(msg); done.classList.remove('hidden'); cpStatus(); },
@@ -5635,6 +5695,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
         `Control Plane:     3× Dedicated Core (${c.cpuFamily || 'AMD_EPYC'})`,
         `                   ${c.controlCores || 8} cores / ${c.controlRamGB || 16} GB RAM / ${c.controlDiskGB || 600} GB Performance SSD`,
       ]),
+      `Placement:         servers ${c.controlServerZone || 'AUTO'}` + (c.controlServerType === 'CUBE' ? '' : `; storage control-0/1/2 → ${(c.controlDiskZones || ['AUTO', 'AUTO', 'AUTO']).join(' / ')}`),
       ``,
       ncwEnvPending.workerType === 'CUBE'
         ? `Workers (planned, added after install): ${c.workerReplicas || 2}× Cube ${ncwEnvPending.workerTemplate || ''}`
@@ -5705,6 +5766,8 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
         ncwConfig.controlCores  = document.getElementById('ncw-cp-cores').value;
         ncwConfig.controlRamGB  = document.getElementById('ncw-cp-ram').value;
         ncwConfig.controlDiskGB = document.getElementById('ncw-cp-disk').value;
+        ncwConfig.controlServerZone = document.getElementById('ncw-cp-server-zone').value;
+        ncwConfig.controlDiskZones  = [0, 1, 2].map(i => document.getElementById('ncw-cp-dz-' + i).value);
         ncwConfig.workerReplicas= document.getElementById('ncw-w-replicas').value;
         ncwConfig.workerCores   = document.getElementById('ncw-w-cores').value;
         ncwConfig.workerRamGB   = document.getElementById('ncw-w-ram').value;
@@ -6141,6 +6204,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     const isCube = document.getElementById('ncw-cp-server-type').value === 'CUBE';
     document.getElementById('ncw-cp-dedicated-fields').style.display = isCube ? 'none' : '';
     document.getElementById('ncw-cp-cube-fields').style.display       = isCube ? '' : 'none';
+    document.querySelectorAll('.ncw-cp-dz').forEach(el => { el.style.display = isCube ? 'none' : ''; });
     if (isCube) {
       const token = document.getElementById('ncw-ionos-token').value.trim() || ncwConfig.ionosToken || '';
       const sel   = document.getElementById('ncw-cp-template');
@@ -6148,6 +6212,10 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     }
   }
   document.getElementById('ncw-cp-server-type').addEventListener('change', ncwApplyCpServerType);
+  document.getElementById('ncw-cp-zones-spread').addEventListener('click', () => {
+    document.getElementById('ncw-cp-server-zone').value = 'ZONE_1';
+    ['ZONE_1', 'ZONE_2', 'ZONE_3'].forEach((z, i) => { document.getElementById('ncw-cp-dz-' + i).value = z; });
+  });
 
   // DNS option: the consumer-DNS key fields only apply to the consumer option
   function ncwApplyDnsProvider() {

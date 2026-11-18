@@ -1085,7 +1085,8 @@ app.post('/api/control-plane/status', async (req, res) => {
           const hit = (sv.items || []).find(x => (x.entities?.nics?.items || []).some(n => (n.properties?.ips || []).includes(m.ip)));
           if (hit) storage[m.name] = { server: hit.properties?.name, type: hit.properties?.type,
             cores: hit.properties?.cores, ramGiB: Math.round((hit.properties?.ram || 0) / 1024), cpuFamily: hit.properties?.cpuFamily || '',
-            volumes: (hit.entities?.volumes?.items || []).map(v => `${v.properties?.size}GB ${v.properties?.type}`) };
+            zone: hit.properties?.availabilityZone || '',
+            volumes: (hit.entities?.volumes?.items || []).map(v => `${v.properties?.size}GB ${v.properties?.type}` + (v.properties?.availabilityZone ? ` ${v.properties.availabilityZone}` : '')) };
         }
       } catch (_) { storage = null; }
     }
@@ -1139,6 +1140,10 @@ app.post('/api/control-plane/backup', async (req, res) => {
   } catch (e) { res.status(e.skip ? 400 : 502).json({ error: e.message }); }
 });
 
+// Per-node placement for the managed control plane. A MachineSet has ONE providerSpec, so every distinct
+// (server zone, storage zone) pair gets its own MachineSet: <name>-s<server zone>-d<storage zone>, digits or "a" for AUTO.
+const zoneDigit = z => (/^ZONE_(\d)$/.exec(z || '') || [])[1] || 'a';
+
 function cpBuildMachineSet(p) {
   const key = 'machine.openshift.io/cluster-api-machineset';
   const providerSpec = {
@@ -1147,7 +1152,7 @@ function cpBuildMachineSet(p) {
     ...(p.templateUuid ? { templateUuid: p.templateUuid } : {}),
     ...(p.serverType === 'ENTERPRISE' ? { cpuFamily: p.cpuFamily } : {}),
     region: p.region, availabilityZone: p.az, image: p.imageId,
-    disk: { name: `${p.name}-boot`, size: p.diskGB, type: p.diskType, availabilityZone: p.az },
+    disk: { name: `${p.name}-boot`, size: p.diskGB, type: p.diskType, availabilityZone: p.diskAz || p.az },
     nics: [{ lan: p.lan, dhcp: true, firewallActive: false, name: `${p.name}-nic0` }],
     credentialsSecret: { name: 'ionoscloud-credentials', namespace: MAPI_NS },
     userDataSecret:    { name: 'master-user-data-managed', namespace: MAPI_NS },
@@ -1173,7 +1178,7 @@ app.post('/api/control-plane/add', async (req, res) => {
   if (!b.clusterApiUrl || !b.ocpToken) return res.status(400).json({ error: 'clusterApiUrl and ocpToken are required.' });
   if (!['dcore', 'cube'].includes(b.machineType)) return res.status(400).json({ error: "machineType must be 'dcore' or 'cube'." });
   if (b.backupConfirmed !== true) return res.status(400).json({ error: 'Confirm that a recent etcd snapshot exists (backupConfirmed).' });
-  const count = Math.max(1, Math.min(2, parseInt(b.count, 10) || 1));
+  const count = Math.max(1, Math.min(3, parseInt(b.count, 10) || 1));
   const { step, log, done, fail } = makeSseHelpers(res);
   const ctx = postUpgradeCtx(b);
   const A = ctx.apiUrl, T = ctx.token;
@@ -1213,7 +1218,17 @@ app.post('/api/control-plane/add', async (req, res) => {
     // on ZONE_1 / ZONE_2, always choosing the zone holding fewer control-plane servers (ties → ZONE_1);
     // a MachineSet has a single zone, so each zone gets its own "<name>-z1" / "<name>-z2" MachineSet.
     const plan = [];
-    if (b.zoneMode === 'spread') {
+    if (b.zoneMode === 'custom') {
+      // explicit placement chosen by the operator: one server zone for all new VMs, a storage zone per VM
+      const sz = b.serverZone || 'AUTO';
+      if (!SERVER_ZONES.includes(sz)) throw new Error(`Invalid server zone "${sz}" (use ${SERVER_ZONES.join(', ')}).`);
+      for (let i = 0; i < count; i++) {
+        const dz = spec.serverType === 'CUBE' ? sz : ((Array.isArray(b.diskZones) && b.diskZones[i]) || 'AUTO');
+        if (!DISK_ZONES.includes(dz)) throw new Error(`Invalid storage zone "${dz}" for node ${i + 1} (use ${DISK_ZONES.join(', ')}).`);
+        plan.push({ setName: spec.serverType === 'CUBE' ? `${name}-s${zoneDigit(sz)}` : `${name}-s${zoneDigit(sz)}-d${zoneDigit(dz)}`, az: sz, diskAz: dz });
+      }
+      log(`Placement (custom): ${plan.map((p, i) => `node ${i + 1}: server ${p.az}` + (spec.serverType === 'CUBE' ? '' : `, storage ${p.diskAz}`)).join(' | ')}\n`);
+    } else if (b.zoneMode === 'spread') {
       const srvs = await ionosGet(`/datacenters/${encodeURIComponent(ctx.ionos.dc)}/servers?depth=1`, ctx.ionos.token);
       const zoneOf = new Map((srvs.items || []).map(s => [s.properties.name, s.properties.availabilityZone]));
       const used = { ZONE_1: 0, ZONE_2: 0 };
@@ -1229,7 +1244,7 @@ app.post('/api/control-plane/add', async (req, res) => {
       for (let i = 0; i < count; i++) plan.push({ setName: name, az: spec.az });
     }
     const groups = new Map();
-    plan.forEach(p => { const x = groups.get(p.setName) || { setName: p.setName, az: p.az, n: 0 }; x.n++; groups.set(p.setName, x); });
+    plan.forEach(p => { const x = groups.get(p.setName) || { setName: p.setName, az: p.az, diskAz: p.diskAz, n: 0 }; x.n++; groups.set(p.setName, x); });
     const setNames = new Set(groups.keys());
 
     step(`Creating control-plane MachineSet(s) ${[...setNames].map(s => `"${s}"`).join(', ')} (+${count})…`, 'working');
@@ -1239,8 +1254,8 @@ app.post('/api/control-plane/add', async (req, res) => {
       let existing = null;
       try { existing = await ocpGet(A, `${msPath}/${grp.setName}`, T); } catch (e) { if (e.status !== 404) throw e; }
       const replicas = (existing?.spec?.replicas || 0) + grp.n;
-      await ocpApplyObj(A, T, msPath, grp.setName, cpBuildMachineSet({ ...spec, name: grp.setName, az: grp.az, replicas }));
-      step(`MachineSet "${grp.setName}" (${grp.az}) at ${replicas} replica(s)`, 'ok');
+      await ocpApplyObj(A, T, msPath, grp.setName, cpBuildMachineSet({ ...spec, name: grp.setName, az: grp.az, diskAz: grp.diskAz, replicas }));
+      step(`MachineSet "${grp.setName}" (server ${grp.az}${grp.diskAz && grp.diskAz !== grp.az ? ', storage ' + grp.diskAz : ''}) at ${replicas} replica(s)`, 'ok');
     }
 
     // 4. Watch the machine(s) become nodes and etcd members. Poll; never roll anything back automatically.
@@ -5673,10 +5688,15 @@ app.get('/api/new-cluster/ocp-versions', async (_req, res) => {
 });
 
 // ── Phase A: Create Infrastructure ────────────────────────────────────────
+// IONOS placement zones: servers can be in ZONE_1 or ZONE_2; volumes (block storage) additionally in ZONE_3.
+const SERVER_ZONES = ['AUTO', 'ZONE_1', 'ZONE_2'];
+const DISK_ZONES   = ['AUTO', 'ZONE_1', 'ZONE_2', 'ZONE_3'];
+
 app.post('/api/new-cluster/create-infra', async (req, res) => {
   const { ionosToken, clusterName, vdcName, vdcLocation,
           controlServerType, controlTemplateId,
           controlCores, controlRamGB, controlDiskGB,
+          controlServerZone, controlDiskZones,
           cpuFamily,
           ocpSshPubKey, mgmtSshPubKey,
           mgmtImageId, mgmtImageName } = req.body;
@@ -5686,6 +5706,13 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
     fail('A Cube template must be selected for the control plane.');
     return;
   }
+  // Placement: one server zone for all three VMs (ZONE_1 / ZONE_2 / AUTO) and a storage zone per control node's
+  // volume (ZONE_1 / ZONE_2 / ZONE_3 / AUTO). Cube storage is DAS, part of the server, so it has no zone of its own.
+  const cpServerZone = controlServerZone || 'AUTO';
+  const cpDiskZones  = [0, 1, 2].map(i => (Array.isArray(controlDiskZones) && controlDiskZones[i]) || 'AUTO');
+  if (!SERVER_ZONES.includes(cpServerZone)) { fail(`Invalid control-plane server zone "${cpServerZone}" (use ${SERVER_ZONES.join(', ')}).`); return; }
+  const badDz = cpDiskZones.find(z => !DISK_ZONES.includes(z));
+  if (badDz) { fail(`Invalid control-plane storage zone "${badDz}" (use ${DISK_ZONES.join(', ')}).`); return; }
 
   // NOT stripped to a "/N"-less base — de/fra, de/fra/1, and de/fra/2 are
   // physically distinct sites with their own separate image catalogs and CPU
@@ -5848,31 +5875,34 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
       : `Create 3 control plane VMs (${controlCores}C / ${controlRamGB} GB / ${controlDiskGB} GB)`;
     step(cpStepLabel, 'running');
     log(isCubeControlPlane ? `Cube template: ${controlTemplateId}\n` : `CPU family: ${resolvedCpuFamily}\n`);
+    log(`Placement: servers in ${cpServerZone}` + (isCubeControlPlane ? ' (Cube storage is DAS, no separate storage zone)\n'
+      : `; volumes control-0/1/2 in ${cpDiskZones.join(' / ')}\n`));
     const cpKaTimer = setInterval(() => log('  Still waiting on IONOS Cloud API...\n'), 15000);
     let cpSrvIds;
     try {
       cpSrvIds = await Promise.all([0, 1, 2].map(async i => {
         const ex = byName(allSrvs.items, `${clusterName}-control-${i}`);
-        if (ex) { logFound(`control-${i}: ${ex.id}`); return { id: ex.id }; }
+        if (ex) { logFound(`control-${i}: ${ex.id} (zones are not changed on an existing server)`); return { id: ex.id }; }
         try {
           // Cube servers are sized entirely by their template — no cores/ram/
           // cpuFamily on the server, and the boot volume must be type "DAS"
           // with no explicit size (the template fixes it).
           const srv = await ionosPost(`/datacenters/${dcId}/servers`, ionosToken, {
             properties: isCubeControlPlane
-              ? { name: `${clusterName}-control-${i}`, type: 'CUBE', templateUuid: controlTemplateId }
+              ? { name: `${clusterName}-control-${i}`, type: 'CUBE', templateUuid: controlTemplateId, availabilityZone: cpServerZone }
               : {
                   name: `${clusterName}-control-${i}`,
                   cores:     parseInt(controlCores, 10),
                   ram:       parseInt(controlRamGB, 10) * 1024,
                   cpuFamily: resolvedCpuFamily,
-                  type:      'ENTERPRISE'
+                  type:      'ENTERPRISE',
+                  availabilityZone: cpServerZone
                 },
             entities: {
               volumes: { items: [{ properties: isCubeControlPlane
                 ? { name: `${clusterName}-control-${i}-root`, type: 'DAS', licenceType: 'LINUX' }
                 : { name: `${clusterName}-control-${i}-root`, size: parseInt(controlDiskGB, 10),
-                    type: 'PERFORMANCE', licenceType: 'LINUX' }
+                    type: 'PERFORMANCE', licenceType: 'LINUX', availabilityZone: cpDiskZones[i] }
               }] },
               nics: { items: [{ properties: { name: 'private', lan: privLanId, dhcp: true } }] }
             }
