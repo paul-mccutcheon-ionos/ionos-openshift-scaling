@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.16.0</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.17.0</span>
   </div>
 
   <div class="banner-actions">
@@ -960,7 +960,7 @@
           </div>
           <div class="form-group" style="grid-column:span 2">
             <label for="as-registry-image">Image</label>
-            <input type="text" id="as-registry-image" placeholder="e.g. paulmcc50/myrepo:ionos-machine-api-provider" style="width:100%" />
+            <input type="text" id="as-registry-image" placeholder="e.g. ghcr.io/paul-mccutcheon-ionos/ionos-machine-api-provider:ionos-machine-api-provider" style="width:100%" />
             <div class="field-note" id="as-registry-image-hint">Docker Hub: <code>username/repo:tag</code></div>
           </div>
           <div class="form-group">
@@ -2124,7 +2124,7 @@
               <input id="ncw-acme-email" type="text" placeholder="admin@your-domain" style="background:#070f1e;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.45rem 0.7rem;font-size:0.82rem">
             </label>
             <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.82rem;color:#94a3b8">DNS-01 webhook image (consumer DNS)
-              <input id="ncw-cert-image" type="text" value="docker.io/paulmcc50/myrepo:cert-manager-webhook-ionos-1.2.2-custom" style="background:#070f1e;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.45rem 0.7rem;font-size:0.78rem">
+              <input id="ncw-cert-image" type="text" value="ghcr.io/paul-mccutcheon-ionos/cert-manager-webhook-ionos:1.2.2-custom" style="background:#070f1e;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.45rem 0.7rem;font-size:0.78rem">
             </label>
           </div>
           <label style="display:flex;gap:0.5rem;align-items:center;font-size:0.82rem;color:#94a3b8;cursor:pointer"><input type="checkbox" id="ncw-tls-auto" checked> Configure TLS automatically when the install finishes</label>
@@ -2786,7 +2786,7 @@
       const body = {
         clusterApiUrl:    clusterApiUrl,
         ocpToken:         ocpToken,
-        registryType:     document.getElementById('as-registry-type')?.value || 'dockerhub',
+        registryType:     document.getElementById('as-registry-type')?.value || 'ghcr',
         registryImage:    document.getElementById('as-registry-image')?.value?.trim() || '',
         registryUsername: document.getElementById('as-registry-user')?.value?.trim() || '',
         registryPassword: document.getElementById('as-registry-pass')?.value?.trim() || ''
@@ -4977,7 +4977,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     const ionosAz           = document.getElementById('as-ionos-az').value;
     const ionosDiskAz       = document.getElementById('as-ionos-disk-az').value;
     const deployProvider    = document.getElementById('as-deploy-provider')?.checked || false;
-    const registryType     = document.getElementById('as-registry-type')?.value || 'dockerhub';
+    const registryType     = document.getElementById('as-registry-type')?.value || 'ghcr';
     const registryImage    = document.getElementById('as-registry-image')?.value.trim() || '';
     const registryUsername = document.getElementById('as-registry-username')?.value.trim() || '';
     const registryPassword = document.getElementById('as-registry-password')?.value || '';

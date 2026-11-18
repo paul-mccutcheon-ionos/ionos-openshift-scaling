@@ -15,7 +15,7 @@
 
 const fetch = require('node-fetch');
 
-const CERT_WEBHOOK_IMAGE_DEFAULT = 'docker.io/paulmcc50/myrepo:cert-manager-webhook-ionos-1.2.2-custom';
+const CERT_WEBHOOK_IMAGE_DEFAULT = 'ghcr.io/paul-mccutcheon-ionos/cert-manager-webhook-ionos:1.2.2-custom';
 const CONSUMER_DNS_API = 'https://api.hosting.ionos.com/dns/v1';
 const CLOUD_DNS_API    = 'https://dns.de-fra.ionos.com';
 const KUBECONFIG_ON_MGMT = '/opt/ocp-install/auth/kubeconfig';

@@ -412,7 +412,7 @@ const MAPI_NS = 'openshift-machine-api';
 // syncer, Cube support, control-plane support). Publish a new build by moving this tag — do not create a new versioned
 // tag per feature, that made it easy to deploy an older build by mistake (ocp2: -nlbsync-1 sent a broken Cube request).
 // ':ionos-machine-api-provider-v2' is the old July build, kept only for rollback.
-const PROVIDER_DEFAULT_IMAGE = 'paulmcc50/myrepo:ionos-machine-api-provider';
+const PROVIDER_DEFAULT_IMAGE = 'ghcr.io/paul-mccutcheon-ionos/ionos-machine-api-provider:ionos-machine-api-provider';
 
 const PROVIDER_CLUSTERROLE_RULES = [
   { apiGroups: ['machine.openshift.io'], resources: ['machines'],               verbs: ['get','list','watch','create','update','patch','delete'] },
