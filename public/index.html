@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.19.1</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.20.0</span>
   </div>
 
   <div class="banner-actions">
@@ -1030,7 +1030,7 @@
         <div class="form-group">
           <label for="as-ionos-ms-name">MachineSet Name</label>
           <input type="text" id="as-ionos-ms-name" placeholder="e.g. dcore-ionos" style="width:100%" oninput="this.value=this.value.toLowerCase()" />
-          <div class="field-note">Naming convention: <code>dcore-ionos</code> (Dedicated Core), <code>vcpu-ionos</code>, <code>gpu-ionos</code>. The MachineAutoscaler uses the same name.</div>
+          <div class="field-note">Naming convention (same as Red Hat&rsquo;s installer): <code>&lt;infra ID&gt;-worker-&lt;type&gt;-&lt;zone&gt;</code>, e.g. <code>ocp1-d4lt9-worker-cube-1</code>. The MachineAutoscaler uses the same name.</div>
           <div class="field-note">Name for the new MachineSet (must be unique in openshift-machine-api) — lowercase only</div>
         </div>
         <div class="form-group">
@@ -1722,16 +1722,14 @@
   <div class="card" id="cp-add-card" style="display:none">
     <h2>&#10133; Add a control-plane node</h2>
     <p style="font-size:0.82rem;color:#64748b;margin:0 0 0.9rem">
-      Creates (or scales) the MachineSet <code style="color:#38bdf8">control-dcore-ionos</code> or <code style="color:#38bdf8">control-cube-ionos</code>.
-      One node at a time is recommended. The step checks cluster health again on the server and refuses to run if anything is off;
-      nothing is rolled back or removed automatically.
+      Creates Machines named <code style="color:#38bdf8">&lt;infra ID&gt;-master-&lt;index&gt;</code> (Red Hat&rsquo;s control-plane naming), one at a time, each with the placement policy below. The three of them are then handed to a real <strong>ControlPlaneMachineSet</strong> (next card). The step checks cluster health and the contract&rsquo;s storage limit on the server and refuses to run if anything is off; nothing is rolled back or removed automatically.
     </p>
     <div class="form-grid" style="grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:0.8rem">
       <div class="form-group">
         <label for="cp-type">Machine type</label>
         <select id="cp-type" onchange="cpTypeChanged()">
-          <option value="cube" selected>Cube (cube-ionos) &mdash; DAS storage</option>
-          <option value="dcore">Dedicated Core (dcore-ionos) &mdash; Performance SSD</option>
+          <option value="cube" selected>Cube &mdash; DAS storage</option>
+          <option value="dcore">Dedicated Core &mdash; Performance SSD</option>
         </select>
       </div>
       <div class="form-group">
@@ -1739,22 +1737,22 @@
         <input type="number" id="cp-count" value="1" min="1" max="3" style="width:90px" oninput="cpZoneUi()" />
       </div>
       <div class="form-group">
-        <label for="cp-zone-mode">Availability zone</label>
+        <label for="cp-zone-mode">Placement</label>
         <select id="cp-zone-mode" onchange="cpZoneUi()">
-          <option value="auto" selected>Auto (IONOS chooses)</option>
-          <option value="spread">Spread across zones 1 and 2</option>
-          <option value="custom">Choose per node (server zone + storage zone)</option>
+          <option value="auto">Auto (IONOS chooses)</option>
+          <option value="spread">Spread automatically (storage zones 1/2/3 by index, servers alternate 1/2)</option>
+          <option value="custom" selected>Choose per index (server zone + storage zone)</option>
         </select>
-        <div class="field-note">Spread places new nodes one at a time on Zone 1 / Zone 2, always choosing the zone with fewer control-plane servers. &ldquo;Choose per node&rdquo; lets you set the server zone and each node&rsquo;s storage zone (1, 2 or 3).</div>
+        <div class="field-note">The policy is the same for every control-plane Machine; the provider picks each machine&rsquo;s zones from its index (0, 1, 2), so a later replacement of index 1 lands on index 1&rsquo;s zones again.</div>
       </div>
-      <div class="form-group" id="cp-zone-custom" style="display:none;grid-column:1/-1">
-        <label>Placement per new node</label>
+      <div class="form-group" id="cp-zone-custom" style="grid-column:1/-1">
+        <label>Placement policy</label>
         <div style="display:flex;flex-wrap:wrap;gap:0.8rem;align-items:flex-end">
-          <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.8rem;color:#94a3b8">Server zone (all new VMs)
-            <select id="cp-server-zone"><option value="AUTO">Auto (IONOS chooses)</option><option value="ZONE_1">Zone 1</option><option value="ZONE_2">Zone 2</option></select></label>
+          <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.8rem;color:#94a3b8">Server zone (all control-plane VMs)
+            <select id="cp-server-zone"><option value="AUTO">Auto (IONOS chooses)</option><option value="ZONE_1" selected>Zone 1</option><option value="ZONE_2">Zone 2</option></select></label>
           <span id="cp-disk-zones" style="display:contents"></span>
         </div>
-        <div class="field-note">Each distinct server/storage zone pair becomes its own MachineSet (<code>&lt;name&gt;-s1-d1</code>, <code>-s1-d2</code>, &hellip;), because a MachineSet has a single placement. Cube storage (DAS) has no separate storage zone.</div>
+        <div class="field-note">Servers can only be in Zone 1 or Zone 2; volumes can also use Zone 3. Cube storage (DAS) is part of the server, so only the server zone applies to Cubes.</div>
       </div>
       <div class="form-group cp-dcore" style="display:none">
         <label for="cp-cores">Cores</label>
@@ -1798,6 +1796,28 @@
     <pre id="cp-add-log" class="hidden" style="max-height:260px;overflow-y:auto;background:#0a0d14;padding:0.6rem 0.8rem;border-radius:6px;font-size:0.75rem;color:#94a3b8;white-space:pre-wrap;margin-top:0.85rem"></pre>
     <div id="cp-add-done" class="hidden" style="background:#052e16;border:1px solid #166534;border-radius:8px;padding:0.8rem 1rem;font-size:0.85rem;color:#6ee7b7;margin-top:0.75rem"></div>
     <div class="error-box" id="cp-add-error"></div>
+  </div>
+
+  <!-- ── Control Plane: the ControlPlaneMachineSet ─────────────────────────── -->
+  <div class="card" id="cp-cpms-card" style="display:none">
+    <h2>&#128274; ControlPlaneMachineSet</h2>
+    <p style="font-size:0.82rem;color:#64748b;margin:0 0 0.9rem">
+      Red Hat&rsquo;s own operator keeps exactly three control-plane Machines and replaces them safely (it creates the replacement, waits for it to be Ready, then deletes the old one;
+      the etcd operator&rsquo;s hook keeps quorum). Activate it once the control plane is exactly <code style="color:#38bdf8">&lt;infra ID&gt;-master-0/1/2</code>, all Ready, with no hand-built node left.
+    </p>
+    <div id="cp-cpms-state" style="font-size:0.85rem;margin-bottom:0.8rem;color:#94a3b8">Run &ldquo;Check readiness&rdquo; to see its state.</div>
+    <div style="display:flex;gap:0.8rem;align-items:center;flex-wrap:wrap">
+      <label style="font-size:0.82rem;color:#94a3b8">Strategy
+        <select id="cp-cpms-strategy" style="margin-left:0.4rem">
+          <option value="OnDelete" selected>OnDelete &mdash; replaces a machine only when you delete it</option>
+          <option value="RollingUpdate">RollingUpdate &mdash; replaces machines automatically when the template changes</option>
+        </select></label>
+      <button id="cp-cpms-btn" onclick="cpActivateCpms()"
+        style="background:#14532d;color:#86efac;border:1px solid #166534;border-radius:6px;padding:0.4rem 1.1rem;font-size:0.85rem;font-weight:600;cursor:pointer">
+        Activate ControlPlaneMachineSet
+      </button>
+    </div>
+    <div id="cp-cpms-result" style="font-size:0.85rem;margin-top:0.8rem"></div>
   </div>
 
   <!-- ── Control Plane: retire (dry run) ───────────────────────────────────── -->
@@ -2615,7 +2635,7 @@
     connection:  ['connect-card', 'overview-card', 'machinesets-card', 'nodes-card'],
     manual:      ['manual-connect-hint', 'scaling-action-card', 'scale-in-card', 'add-node-card', 'csrs-card'],
     autoscaling:  ['autoscaling-connect-hint', 'post-upgrade-card', 'machine-api-status-card', 'autoscale-card'],
-    controlplane:    ['cp-status-card', 'cp-add-card', 'cp-retire-card'],
+    controlplane:    ['cp-status-card', 'cp-add-card', 'cp-cpms-card', 'cp-retire-card'],
     healthchecks:    ['healthchecks-connect-hint', 'mhc-list-card', 'mhc-create-card'],
     'install-cluster': ['new-cluster-card'],
     compliance:      ['opct-preflight-card', 'opct-start-card', 'opct-status-card', 'opct-report-card'],
@@ -2967,13 +2987,14 @@
   }
 
   function cpRender(d) {
+    cpRenderCpms(d);
     const out = document.getElementById('cp-status-result');
     const icon = { ok: ['&#10003;', '#6ee7b7'], warn: ['&#9888;', '#fbbf24'], block: ['&#10007;', '#f87171'] };
     const rows = d.masters.map(m => `<tr>
       <td style="padding:0.2rem 0.6rem 0.2rem 0"><code style="color:#38bdf8">${escHtml(m.name)}</code></td>
       <td style="padding:0.2rem 0.6rem">${escHtml(m.ip || '')}</td>
       <td style="padding:0.2rem 0.6rem;color:${m.ready ? '#6ee7b7' : '#f87171'}">${m.ready ? 'Ready' : 'NotReady'}</td>
-      <td style="padding:0.2rem 0.6rem;color:${m.managed ? '#6ee7b7' : '#94a3b8'}">${m.managed ? 'Machine-managed (' + escHtml(m.machineSet || m.machine) + ')' : 'fixed (hand-built)'}</td>
+      <td style="padding:0.2rem 0.6rem;color:${m.managed ? '#6ee7b7' : '#94a3b8'}">${m.managed ? (m.owner === 'ControlPlaneMachineSet' ? 'ControlPlaneMachineSet' : m.machineSet ? 'MachineSet ' + escHtml(m.machineSet) : 'Machine ' + escHtml(m.machine)) : 'fixed (hand-built)'}</td>
       <td style="padding:0.2rem 0.6rem;color:${m.etcdPod?.ready ? '#6ee7b7' : '#f87171'}">${m.etcdPod ? (m.etcdPod.ready ? 'etcd Ready' : 'etcd starting') : 'no etcd pod'}</td>
       <td style="padding:0.2rem 0.6rem;color:${/DAS/.test((d.storage?.[m.name]?.volumes || []).join()) ? '#c4b5fd' : '#94a3b8'}">${escHtml(d.storage?.[m.name] ? d.storage[m.name].type + (d.storage[m.name].zone ? ' ' + d.storage[m.name].zone : '') + ' · ' + d.storage[m.name].volumes.join(', ') : '')}</td></tr>`).join('');
     const das = d.masters.filter(m => /DAS/.test((d.storage?.[m.name]?.volumes || []).join())).length;
@@ -3030,15 +3051,12 @@
     document.getElementById('cp-zone-custom').style.display = custom ? '' : 'none';
     if (!custom) return;
     const cube = document.getElementById('cp-type').value === 'cube';
-    const n = Math.max(1, Math.min(3, parseInt(document.getElementById('cp-count').value, 10) || 1));
     const host = document.getElementById('cp-disk-zones');
     const old = [...host.querySelectorAll('select')].map(s => s.value);
-    const srv = document.getElementById('cp-server-zone');
-    if (!srv.dataset.touched) { srv.value = 'ZONE_1'; srv.dataset.touched = '1'; }
-    host.innerHTML = cube ? '' : Array.from({ length: n }, (_, i) =>
-      `<label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.8rem;color:#94a3b8">Node ${i + 1} storage zone
+    host.innerHTML = cube ? '' : [0, 1, 2].map(i =>
+      `<label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.8rem;color:#94a3b8">Index ${i} (${'<infra>'}-master-${i}) storage zone
         <select id="cp-dz-${i}">${['AUTO', 'ZONE_1', 'ZONE_2', 'ZONE_3'].map(z => `<option value="${z}">${z === 'AUTO' ? 'Auto' : z.replace('ZONE_', 'Zone ')}</option>`).join('')}</select></label>`).join('');
-    host.querySelectorAll('select').forEach((s, i) => { s.value = old[i] || ['ZONE_1', 'ZONE_2', 'ZONE_3'][i]; });
+    host.querySelectorAll('select').forEach((sel, i) => { sel.value = old[i] || ['ZONE_1', 'ZONE_2', 'ZONE_3'][i]; });
   }
 
   function cpTypeChanged() {
@@ -3131,19 +3149,42 @@
     const count = parseInt(document.getElementById('cp-count').value, 10) || 1;
     const what = type === 'cube' ? 'Cube (' + (document.getElementById('cp-cube-template').selectedOptions[0]?.text || '') + ')' : `Dedicated Core ${document.getElementById('cp-cores').value} vCPU / ${document.getElementById('cp-ram').value} GiB`;
     const zoneMode = document.getElementById('cp-zone-mode').value;
-    const serverZone = document.getElementById('cp-server-zone').value;
-    const diskZones = [...document.querySelectorAll('#cp-disk-zones select')].map(s => s.value);
+    const serverZone = zoneMode === 'custom' ? document.getElementById('cp-server-zone').value : 'AUTO';
+    const diskZones = zoneMode === 'custom' && type !== 'cube' ? [0, 1, 2].map(i => document.getElementById('cp-dz-' + i)?.value || 'AUTO') : ['AUTO', 'AUTO', 'AUTO'];
+    const autoSpread = zoneMode === 'spread';
     const placement = zoneMode === 'custom'
-      ? `custom: servers in ${serverZone}` + (type === 'cube' ? '' : ', storage ' + diskZones.slice(0, count).map((z, i) => `node ${i + 1} → ${z}`).join(', '))
-      : zoneMode === 'spread' ? 'spread across zones 1 and 2' : 'Auto';
+      ? `servers in ${serverZone}` + (type === 'cube' ? '' : ', storage by index ' + diskZones.map((z, i) => `${i}→${z}`).join(' '))
+      : zoneMode === 'spread' ? 'automatic spread (storage zones 1/2/3 by index, servers alternate zones 1 and 2)' : 'Auto (IONOS chooses)';
     if (!confirm(`Add ${count} control-plane node(s): ${what}\n\nZone placement: ${placement}.\n\nThey are created ONE AT A TIME (each must be a healthy etcd member before the next starts), next to the existing control-plane nodes. Nothing is removed. Continue?`)) return;
     const btn = document.getElementById('cp-add-btn'); btn.disabled = true; btn.style.opacity = '0.5';
-    await cpStream('/api/control-plane/add', cpBody({
-      machineType: type, count, lanId, zoneMode, serverZone, diskZones, imageId: document.getElementById('cp-image').value, backupConfirmed: document.getElementById('cp-backup-ok').checked,
+    await cpStream('/api/control-plane/add-indexed', cpBody({
+      machineType: type, count, lanId, zoneMode, serverZone, diskZones, autoSpread, imageId: document.getElementById('cp-image').value, backupConfirmed: document.getElementById('cp-backup-ok').checked,
       cores: document.getElementById('cp-cores').value, ramGiB: document.getElementById('cp-ram').value, diskGB: document.getElementById('cp-disk').value,
       cpuFamily: document.getElementById('cp-cpufamily').value.trim(), cubeTemplateId: document.getElementById('cp-cube-template').value }), log,
       (msg) => { done.innerHTML = '<strong>&#10003; Done.</strong> ' + escHtml(msg); done.classList.remove('hidden'); cpStatus(); },
       (m) => { err.textContent = m; err.style.display = 'block'; cpUpdateAddButton(); });
+  }
+
+  function cpRenderCpms(d) {
+    const el = document.getElementById('cp-cpms-state');
+    if (!el) return;
+    const c = d.cpms || {};
+    if (!c.exists) { el.innerHTML = 'No ControlPlaneMachineSet yet' + (d.infraId ? ` (cluster <code>${escHtml(d.infraId)}</code>)` : '') + (c.error ? ' &mdash; ' + escHtml(c.error) : '') + '.'; return; }
+    el.innerHTML = `<strong style="color:#6ee7b7">${escHtml(c.state || '')}</strong> &middot; strategy ${escHtml(c.strategy || '')} &middot; replicas ${c.replicas ?? '-'} / ready ${c.ready ?? '-'} / updated ${c.updated ?? '-'}` +
+      (c.conditions || []).map(x => `<div style="font-size:0.78rem;color:${x.type === 'Degraded' && x.status === 'True' ? '#f87171' : '#64748b'}">${escHtml(x.type)}=${escHtml(x.status)} ${escHtml(x.reason || '')} ${escHtml(x.message || '')}</div>`).join('');
+  }
+
+  async function cpActivateCpms() {
+    const out = document.getElementById('cp-cpms-result');
+    if (cpNeedConnection(out)) return;
+    const strategy = document.getElementById('cp-cpms-strategy').value;
+    if (!confirm(`Activate the ControlPlaneMachineSet with strategy ${strategy}?\n\nIt takes over management of the three control-plane Machines. Strategy OnDelete changes nothing until you delete a machine; RollingUpdate replaces machines on its own whenever the template differs.`)) return;
+    out.innerHTML = '<div style="color:#64748b">Activating&hellip; (about a minute)</div>';
+    try {
+      const d = await apiPost('/api/control-plane/activate-cpms', cpBody({ strategy }));
+      out.innerHTML = '<div style="color:#6ee7b7">&#10003; Activated.</div>';
+      cpStatus();
+    } catch (e) { out.innerHTML = '<div style="color:#f87171">' + escHtml(e.message) + '</div>'; }
   }
 
   async function cpRetirePlan() {
@@ -4782,13 +4823,37 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     if (isCube) loadIonosCubeTemplates();
     detectPrivateLan();
 
-    // Naming convention: <type>-ionos, used for both the MachineSet and its MachineAutoscaler.
-    const nameEl   = document.getElementById('as-ionos-ms-name');
-    const suggest  = isGpu ? 'gpu-ionos' : isCube ? 'cube-ionos' : isDedicatedCore ? 'dcore-ionos' : 'vcpu-ionos';
-    const known    = ['dcore-ionos', 'vcpu-ionos', 'gpu-ionos', 'cube-ionos'];
-    nameEl.placeholder = `e.g. ${suggest}`;
-    if (!nameEl.value.trim() || known.includes(nameEl.value.trim())) nameEl.value = suggest;
+    suggestWorkerSetName();
   }
+
+  // Naming follows Red Hat's installer convention <infra ID>-<pool>-<zone>, with the machine type in the pool:
+  //   ocp1-d4lt9-worker-cube-1, ocp1-d4lt9-worker-dcore-auto, ... The same name is used for the MachineAutoscaler.
+  // The infra ID comes from the cluster itself; until it is known the old <type>-ionos form is suggested.
+  let infraIdCache = { url: '', id: '' };
+  async function fetchInfraId() {
+    if (!clusterApiUrl || !ocpToken) return '';
+    if (infraIdCache.url === clusterApiUrl && infraIdCache.id) return infraIdCache.id;
+    try {
+      const d = await apiPost('/api/cluster/infra-id', { clusterApiUrl, ocpToken });
+      infraIdCache = { url: clusterApiUrl, id: d.infraId || '' };
+    } catch (_) { return ''; }
+    return infraIdCache.id;
+  }
+  async function suggestWorkerSetName() {
+    const nameEl = document.getElementById('as-ionos-ms-name');
+    const type   = document.getElementById('as-ionos-server-type').value;
+    const slug   = type === 'GPU' ? 'gpu' : type === 'CUBE' ? 'cube' : type === 'ENTERPRISE' ? 'dcore' : 'vcpu';
+    const az     = document.getElementById('as-ionos-az').value;
+    const zone   = /^ZONE_(\d)$/.test(az) ? az.slice(-1) : 'auto';
+    const infra  = await fetchInfraId();
+    const suggest = infra ? `${infra}-worker-${slug}-${zone}` : `${slug}-ionos`;
+    const legacy = ['dcore-ionos', 'vcpu-ionos', 'gpu-ionos', 'cube-ionos'];
+    nameEl.placeholder = `e.g. ${suggest}`;
+    // replace an empty field, an old-style name, or the previous automatic suggestion - never something the user typed
+    if (!nameEl.value.trim() || legacy.includes(nameEl.value.trim()) || nameEl.value === nameEl.dataset.auto) nameEl.value = suggest;
+    nameEl.dataset.auto = suggest;
+  }
+  document.getElementById('as-ionos-az').addEventListener('change', suggestWorkerSetName);
 
   // The worker NIC must be on the cluster's PRIVATE LAN. A hardcoded default of 1 put a GPU worker on the
   // public LAN, where it cannot reach the cluster. Detect it from the cluster itself instead.

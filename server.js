@@ -1006,6 +1006,20 @@ function ionosInstanceType(serverType, cores, ramMB, templateName) {
   }
 }
 
+// The cluster's infrastructure name ("infra ID", e.g. ocp1-d4lt9): the prefix of every Machine and MachineSet name the
+// OpenShift installer generates, and the value of the machine.openshift.io/cluster-api-cluster label.
+async function clusterInfraId(apiUrl, token) {
+  const inf = await ocpGet(apiUrl, '/apis/config.openshift.io/v1/infrastructures/cluster', token);
+  return inf.status?.infrastructureName || '';
+}
+
+app.post('/api/cluster/infra-id', async (req, res) => {
+  const { clusterApiUrl, ocpToken } = req.body || {};
+  if (!clusterApiUrl || !ocpToken) return res.status(400).json({ error: 'clusterApiUrl and ocpToken are required.' });
+  try { res.json({ infraId: await clusterInfraId(clusterApiUrl, ocpToken) }); }
+  catch (e) { res.status(502).json({ error: e.message }); }
+});
+
 // ══ Managed control plane ═══════════════════════════════════════════════════
 // The fixed control-plane nodes (control-0/1/2) were built by hand and are invisible to the Machine API. New
 // control-plane nodes are added ALONGSIDE them as Machine-API-managed machines (a MachineSet per machine type,
@@ -1045,7 +1059,7 @@ async function cpGather(ctx) {
     return {
       name: n.metadata.name, ip: nodeIpOf(n), ready: isNodeReady(n), kubelet: n.status?.nodeInfo?.kubeletVersion,
       providerID: n.spec?.providerID || '', schedulable: !n.spec?.unschedulable,
-      managed: !!m, machine: m?.metadata.name || null, machineSet: (m?.metadata.ownerReferences || []).find(r => r.kind === 'MachineSet')?.name || null,
+      managed: !!m, machine: m?.metadata.name || null, machineSet: (m?.metadata.ownerReferences || []).find(r => r.kind === 'MachineSet')?.name || null, owner: (m?.metadata.ownerReferences || [])[0]?.kind || null,
       etcdPod: ep ? { name: ep.metadata.name, ready: podReady(ep) } : null,
       created: n.metadata.creationTimestamp,
     };
@@ -1236,7 +1250,9 @@ app.post('/api/control-plane/status', async (req, res) => {
         }
       } catch (_) { storage = null; }
     }
-    res.json({ ...g, checks: checks.items, canAdd: checks.canAdd, masterImages: checks.images.images, nlb, storage, sets: CP_SETS, maxMembers: CP_MAX_MEMBERS });
+    const cpms = await cpCpmsState(ctx);
+    let infraId = ''; try { infraId = await clusterInfraId(ctx.apiUrl, ctx.token); } catch (_) {}
+    res.json({ ...g, checks: checks.items, canAdd: checks.canAdd, masterImages: checks.images.images, nlb, storage, sets: CP_SETS, maxMembers: CP_MAX_MEMBERS, cpms, infraId });
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
@@ -1467,6 +1483,233 @@ app.post('/api/control-plane/add', async (req, res) => {
     }
     return done(`Added ${added.join(', ')} one at a time. etcd now has ${lastEtcd?.podsReady} healthy members. Next: check the console, then retire an old node when you are ready (dry-run plan available).`, { nodes: added });
   } catch (e) { fail(e.message); } finally { clearInterval(keepAlive); }
+});
+
+// ══ Indexed control-plane Machines + ControlPlaneMachineSet ═══════════════════════════════════════════
+// Red Hat's layout for a control plane: Machines named <infra ID>-master-<index> (0, 1, 2) with no MachineSet of their own,
+// all managed by ONE ControlPlaneMachineSet named "cluster". The operator reads each machine's index from the number after the
+// last "-" in its name. Every machine (and the CPMS template) carries the SAME providerSpec; the zone of each machine is
+// resolved by the provider from its index using the "placement" block, so the operator never sees a difference between machines.
+const CP_MACHINES = `/apis/machine.openshift.io/v1beta1/namespaces/${MAPI_NS}/machines`;
+const CP_CPMS     = `/apis/machine.openshift.io/v1/namespaces/${MAPI_NS}/controlplanemachinesets`;
+const cpIndexRe   = infra => new RegExp('^' + infra.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '-master-(\\d+)$');
+
+// The one providerSpec shared by every control-plane machine (and the CPMS template).
+function cpIndexedProviderSpec(p, policy) {
+  const placement = {};
+  if (policy.serverZone && policy.serverZone !== 'AUTO') placement.serverZone = policy.serverZone;
+  if (policy.autoSpread) placement.autoSpread = true;
+  if (p.serverType !== 'CUBE' && policy.diskZones && policy.diskZones.some(z => z && z !== 'AUTO')) placement.diskZonesByIndex = policy.diskZones;
+  return {
+    apiVersion: 'ionoscloudproviderconfig.openshift.io/v1alpha1', kind: 'IONOSCloudMachineProviderSpec',
+    datacenterID: p.dc, cores: p.cores, ram: p.ramMB, serverType: p.serverType,
+    instanceType: ionosInstanceType(p.serverType, p.cores, p.ramMB, p.templateName),
+    ...(p.templateUuid ? { templateUuid: p.templateUuid } : {}),
+    ...(p.serverType === 'ENTERPRISE' ? { cpuFamily: p.cpuFamily } : {}),
+    region: p.region, availabilityZone: 'AUTO', image: p.imageId,
+    ...(Object.keys(placement).length ? { placement } : {}),
+    disk: { name: 'master-boot', size: p.diskGB, type: p.diskType, availabilityZone: 'AUTO' },
+    nics: [{ lan: p.lan, dhcp: true, firewallActive: false, name: 'master-nic0' }],
+    credentialsSecret: { name: 'ionoscloud-credentials', namespace: MAPI_NS },
+    userDataSecret:    { name: 'master-user-data-managed', namespace: MAPI_NS },
+  };
+}
+const cpMasterLabels = (infra, regionLabel) => ({
+  'machine.openshift.io/cluster-api-cluster': infra,
+  'machine.openshift.io/cluster-api-machine-role': 'master',
+  'machine.openshift.io/cluster-api-machine-type': 'master',
+  ...(regionLabel ? { 'machine.openshift.io/region': regionLabel } : {}),
+});
+function cpBuildIndexedMachine(infra, index, providerSpec, regionLabel) {
+  return {
+    apiVersion: 'machine.openshift.io/v1beta1', kind: 'Machine',
+    metadata: { name: `${infra}-master-${index}`, namespace: MAPI_NS, labels: cpMasterLabels(infra, regionLabel) },
+    // The control-plane taint and node-role labels come from the master kubelet config the node pulls from the MCS.
+    spec: { metadata: { labels: regionLabel ? { [OPCT_ZONE_LABEL]: regionLabel } : {} }, providerSpec: { value: providerSpec } },
+  };
+}
+
+// Remove a Machine IONOS never built and restart the provider (it would otherwise keep waiting on a server that does not exist).
+async function cpAbortFailedMachine(ctx, name) {
+  const A = ctx.apiUrl, T = ctx.token;
+  try { await ocpDelete(A, `${CP_MACHINES}/${name}`, T); } catch (_) {}
+  try {
+    await ocpPatch(A, `/apis/apps/v1/namespaces/${MAPI_NS}/deployments/ionos-machine-api-provider`, T,
+      { spec: { template: { metadata: { annotations: { 'kubectl.kubernetes.io/restartedAt': new Date().toISOString() } } } } });
+  } catch (_) {}
+}
+
+// Add control-plane Machines <infra>-master-<next free index>, ONE AT A TIME — streams progress.
+app.post('/api/control-plane/add-indexed', async (req, res) => {
+  const b = req.body;
+  if (!b.clusterApiUrl || !b.ocpToken) return res.status(400).json({ error: 'clusterApiUrl and ocpToken are required.' });
+  if (!['dcore', 'cube'].includes(b.machineType)) return res.status(400).json({ error: "machineType must be 'dcore' or 'cube'." });
+  if (b.backupConfirmed !== true) return res.status(400).json({ error: 'Confirm that a recent etcd snapshot exists (backupConfirmed).' });
+  const { step, log, done, fail } = makeSseHelpers(res);
+  const ctx = postUpgradeCtx(b);
+  const A = ctx.apiUrl, T = ctx.token;
+  const keepAlive = setInterval(() => { try { res.write(': keepalive\n\n'); } catch (_) {} }, 15000);
+  res.on('close', () => clearInterval(keepAlive));
+  try {
+    step('Checking the cluster is ready…', 'working');
+    const g = await cpGather(ctx);
+    const checks = await cpChecks(ctx, g);
+    const blockers = checks.items.filter(i => i.status === 'block');
+    if (blockers.length) throw new Error('Not ready: ' + blockers.map(i => `${i.title} — ${i.detail}`).join(' | '));
+    const infra = await clusterInfraId(A, T);
+    if (!infra) throw new Error('Could not read the cluster infrastructure name (infrastructure/cluster status.infrastructureName).');
+    const re = cpIndexRe(infra);
+    const usedIdx = new Set(g.masterMachines.map(m => (re.exec(m.name) || [])[1]).filter(x => x !== undefined).map(Number));
+    const free = [0, 1, 2].filter(i => !usedIdx.has(i));
+    const count = Math.max(1, Math.min(free.length, parseInt(b.count, 10) || 1));
+    if (!free.length) throw new Error(`All three indexed control-plane Machines (${infra}-master-0/1/2) already exist.`);
+    if (g.masters.length + count > CP_MAX_MEMBERS) throw new Error(`Would exceed ${CP_MAX_MEMBERS} control-plane nodes (${g.masters.length} now + ${count}).`);
+    step(`Cluster ready - infrastructure name ${infra}, free indexes ${free.join(', ')}`, 'ok');
+
+    // placement policy: identical on every machine, resolved per index by the provider
+    const serverZone = b.serverZone || 'AUTO';
+    if (!SERVER_ZONES.includes(serverZone)) throw new Error(`Invalid server zone "${serverZone}" (use ${SERVER_ZONES.join(', ')}).`);
+    const diskZones = [0, 1, 2].map(i => (Array.isArray(b.diskZones) && b.diskZones[i]) || 'AUTO');
+    const badDz = diskZones.find(z => !DISK_ZONES.includes(z));
+    if (badDz) throw new Error(`Invalid storage zone "${badDz}" (use ${DISK_ZONES.join(', ')}).`);
+    const policy = { serverZone, diskZones, autoSpread: b.autoSpread === true };
+
+    const dcInfo = await ionosGet(`/datacenters/${encodeURIComponent(ctx.ionos.dc)}`, ctx.ionos.token);
+    const region = dcInfo.properties?.location || '';
+    const img = (checks.images.images || []).find(i => i.state === 'AVAILABLE' && (!b.imageId || i.id === b.imageId));
+    if (!img) throw new Error('No AVAILABLE master image selected.');
+    const lan = parseInt(b.lanId, 10);
+    if (!lan) throw new Error('lanId (the private cluster LAN) is required.');
+    const spec = { dc: ctx.ionos.dc, region, regionLabel: ionosZoneFromLocation(region), imageId: img.id, lan };
+    if (b.machineType === 'cube') {
+      if (!b.cubeTemplateId) throw new Error('Select a Cube template.');
+      const tpl = await ionosGet(`/templates/${encodeURIComponent(b.cubeTemplateId)}`, ctx.ionos.token);
+      if (!isCubeTemplate(tpl)) throw new Error('The selected template is not a Cube template.');
+      Object.assign(spec, { serverType: 'CUBE', templateUuid: b.cubeTemplateId, templateName: tpl.properties.name, cores: tpl.properties.cores, ramMB: tpl.properties.ram, diskGB: tpl.properties.storageSize, diskType: 'DAS' });
+    } else {
+      Object.assign(spec, { serverType: 'ENTERPRISE', cores: parseInt(b.cores, 10) || 8, ramMB: (parseInt(b.ramGiB, 10) || 16) * 1024, diskGB: parseInt(b.diskGB, 10) || 600,
+                            diskType: 'SSD_PREMIUM', cpuFamily: b.cpuFamily || 'INTEL_SIERRAFOREST' });
+    }
+    if (spec.cores < 4 || spec.ramMB < 16 * 1024) throw new Error('A control-plane node needs at least 4 vCPU and 16 GiB RAM.');
+    const providerSpec = cpIndexedProviderSpec(spec, policy);
+    log(`Type ${spec.serverType}: ${spec.cores} vCPU / ${Math.round(spec.ramMB / 1024)} GiB / ${spec.diskGB} GB ${spec.diskType} · image ${img.name} · LAN ${lan} · ${region}\n`);
+    log(`Placement policy: server zone ${serverZone}${policy.autoSpread ? ' (auto-spread on)' : ''}` + (spec.serverType === 'CUBE' ? ' (Cube: no separate storage zone)' : `; storage zone by index ${diskZones.map((z, i) => `${i}:${z}`).join(' ')}`) + '\n');
+
+    const perNodeGiB = Number(spec.diskGB) || 0;
+    try {
+      const h = await ionosStorageHeadroom(ctx.ionos.token);
+      if (h && perNodeGiB) {
+        log(`Contract storage (SSD + DAS together): ${h.freeGiB} GiB free of ${h.limitGiB} GiB; ${count} node(s) x ${perNodeGiB} GiB = ${count * perNodeGiB} GiB needed\n`);
+        if (count * perNodeGiB > h.freeGiB) {
+          const fits = Math.floor(h.freeGiB / perNodeGiB);
+          throw new Error(`Not enough contract storage: ${count} node(s) need ${count * perNodeGiB} GiB but only ${h.freeGiB} GiB of the ${h.limitGiB} GiB SSD+DAS limit is free. ` +
+            (fits >= 1 ? `At most ${fits} node(s) fit now. ` : 'Not even one fits. ') + 'Free storage or ask IONOS support to raise the limit. Nothing was created.');
+        }
+      }
+    } catch (e) { if (/Not enough contract storage/.test(e.message)) throw e; log(`  (could not check the contract storage limit: ${e.message})\n`); }
+
+    // one node at a time: create, then wait until it is a Ready etcd member and everything is healthy
+    const before = new Set(g.masters.map(m => m.name));
+    const added = [];
+    const seen = new Set();
+    const say = (key, text) => { if (!seen.has(key)) { seen.add(key); log(text + '\n'); } };
+    let lastEtcd = null;
+    for (let n = 0; n < count; n++) {
+      const index = free[n];
+      const name = `${infra}-master-${index}`;
+      const label = `Node ${n + 1} of ${count} (${name})`;
+      step(`${label}: creating…`, 'working');
+      let exists = false;
+      try { await ocpGet(A, `${CP_MACHINES}/${name}`, T); exists = true; } catch (e) { if (e.status !== 404) throw e; }
+      if (exists) throw new Error(`Machine ${name} already exists.`);
+      const startMs = Date.now();
+      await ocpApplyObj(A, T, CP_MACHINES, name, cpBuildIndexedMachine(infra, index, providerSpec, spec.regionLabel));
+      step(`${label}: Machine created`, 'ok');
+      step(`${label}: waiting for the VM, node and etcd member…`, 'working');
+      const deadline = Date.now() + 40 * 60000;
+      let stage = 'machine', polls = 0, joined = null;
+      while (Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 20000));
+        polls++;
+        const cur = await cpGather(ctx);
+        lastEtcd = cur.etcd;
+        const fresh = cur.masters.filter(m => !before.has(m.name));
+        const mine = cur.masterMachines.find(m => m.name === name);
+        if (mine) say('m:' + name + mine.phase, `machine ${name}: ${mine.phase || 'pending'}`);
+        if (mine?.phase === 'Failed') throw new Error(`${label}: the machine failed: ${mine.error || 'see its status'}. Nothing further was created.`);
+        if (!fresh.length && polls % 3 === 0) {
+          const why = await ionosFailedServerCreate(ctx.ionos.token, ctx.ionos.dc, startMs).catch(() => null);
+          if (why) {
+            await cpAbortFailedMachine(ctx, name);
+            throw new Error(`${label}: IONOS rejected the VM create - ${why} I removed the failed Machine and restarted the provider so it is not left waiting on a server that does not exist. Nodes added before this one (${added.join(', ') || 'none'}) are unaffected.`);
+          }
+        }
+        fresh.forEach(m => {
+          say('n:' + m.name, `node ${m.name} registered (${m.ip})`);
+          if (m.ready) say('r:' + m.name, `node ${m.name} Ready`);
+          if (m.etcdPod) say('e:' + m.name + m.etcdPod.ready, `etcd pod on ${m.name}: ${m.etcdPod.ready ? 'Ready' : 'starting'}`);
+        });
+        if (fresh.length >= 1 && fresh.every(m => m.ready && m.etcdPod?.ready) && cur.etcd.membersAvailable && cur.etcd.podsReady === cur.etcd.pods && cur.operatorIssues.length === 0) { joined = fresh; break; }
+        stage = fresh.length ? 'join' : stage;
+      }
+      if (!joined) throw new Error(`${label}: timed out after 40 minutes (stage: ${stage}). Nodes added before this one: ${added.join(', ') || 'none'}. Nothing was rolled back - inspect the machine and node.`);
+      joined.forEach(m => { before.add(m.name); added.push(m.name); });
+      step(`${label}: joined, etcd healthy (${lastEtcd.podsReady} members)`, 'ok');
+    }
+    return done(`Added ${added.join(', ')} one at a time. etcd now has ${lastEtcd?.podsReady} healthy members. When all three indexed machines exist and the old nodes are retired, activate the ControlPlaneMachineSet.`, { nodes: added });
+  } catch (e) { fail(e.message); } finally { clearInterval(keepAlive); }
+});
+
+// State of the ControlPlaneMachineSet (if any) for the status view.
+async function cpCpmsState(ctx) {
+  try {
+    const c = await ocpGet(ctx.apiUrl, `${CP_CPMS}/cluster`, ctx.token);
+    return { exists: true, state: c.spec?.state, strategy: c.spec?.strategy?.type, replicas: c.status?.replicas, ready: c.status?.readyReplicas,
+             updated: c.status?.updatedReplicas, conditions: (c.status?.conditions || []).map(x => ({ type: x.type, status: x.status, reason: x.reason, message: (x.message || '').slice(0, 200) })) };
+  } catch (e) { return e.status === 404 ? { exists: false } : { exists: false, error: e.message }; }
+}
+
+// Create the ControlPlaneMachineSet "cluster" (Active) from the three indexed machines. Refuses unless it is safe:
+// exactly the three indexed machines, all Running with Ready nodes, no control-plane node without a Machine.
+app.post('/api/control-plane/activate-cpms', async (req, res) => {
+  const b = req.body || {};
+  if (!b.clusterApiUrl || !b.ocpToken) return res.status(400).json({ error: 'clusterApiUrl and ocpToken are required.' });
+  const strategy = b.strategy === 'RollingUpdate' ? 'RollingUpdate' : 'OnDelete';
+  const ctx = postUpgradeCtx(b);
+  try {
+    const existing = await cpCpmsState(ctx);
+    if (existing.exists) return res.status(409).json({ error: `A ControlPlaneMachineSet already exists (state ${existing.state}, strategy ${existing.strategy}).` });
+    const infra = await clusterInfraId(ctx.apiUrl, ctx.token);
+    const g = await cpGather(ctx);
+    const re = cpIndexRe(infra);
+    const problems = [];
+    const mm = g.masterMachines;
+    const idx = mm.map(m => (re.exec(m.name) || [])[1]).filter(x => x !== undefined).map(Number).sort();
+    if (mm.length !== 3 || idx.join() !== '0,1,2') problems.push(`the control plane must be exactly ${infra}-master-0, -1 and -2 (found: ${mm.map(m => m.name).join(', ') || 'none'})`);
+    if (mm.some(m => m.phase !== 'Running')) problems.push('every control-plane Machine must be Running');
+    const unmanaged = g.masters.filter(m => !m.managed);
+    if (unmanaged.length) problems.push(`control-plane node(s) without a Machine: ${unmanaged.map(m => m.name).join(', ')} - retire them first`);
+    if (g.masters.length !== 3 || g.masters.some(m => !m.ready)) problems.push('there must be exactly 3 Ready control-plane nodes');
+    if (problems.length) return res.status(409).json({ error: 'Not ready to activate: ' + problems.join('; ') + '.', problems });
+    const m0 = await ocpGet(ctx.apiUrl, `${CP_MACHINES}/${infra}-master-0`, ctx.token);
+    const ps = m0.spec?.providerSpec?.value;
+    for (const i of [1, 2]) {   // all three must carry the identical providerSpec, or the operator would plan replacements
+      const mi = await ocpGet(ctx.apiUrl, `${CP_MACHINES}/${infra}-master-${i}`, ctx.token);
+      if (JSON.stringify(mi.spec?.providerSpec?.value) !== JSON.stringify(ps)) return res.status(409).json({ error: `${infra}-master-${i} has a different providerSpec from ${infra}-master-0, so the operator would immediately plan replacements. Nothing was created.` });
+    }
+    const regionLabel = m0.metadata?.labels?.['machine.openshift.io/region'];
+    const cpms = {
+      apiVersion: 'machine.openshift.io/v1', kind: 'ControlPlaneMachineSet', metadata: { name: 'cluster', namespace: MAPI_NS },
+      spec: { state: 'Active', replicas: 3, strategy: { type: strategy },
+        selector: { matchLabels: { 'machine.openshift.io/cluster-api-machine-role': 'master', 'machine.openshift.io/cluster-api-machine-type': 'master' } },
+        template: { machineType: 'machines_v1beta1_machine_openshift_io', machines_v1beta1_machine_openshift_io: {
+          metadata: { labels: cpMasterLabels(infra, regionLabel) },
+          spec: { metadata: m0.spec?.metadata || {}, providerSpec: { value: ps } } } } },
+    };
+    await ocpApplyObj(ctx.apiUrl, ctx.token, CP_CPMS, 'cluster', cpms);
+    await new Promise(r => setTimeout(r, 45000));
+    res.json({ ok: true, strategy, cpms: await cpCpmsState(ctx) });
+  } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
 // Dry-run plan for retiring one fixed control-plane node. Reads only — it never changes anything.
@@ -2953,21 +3196,27 @@ echo "ALT_WRITE_OK"
         'machine.openshift.io/GPU':      String(gpuCount),
         'machine.openshift.io/maxPods':  '250',
       } : {};
+      // Red Hat's installer puts machine.openshift.io/cluster-api-cluster=<infra ID> on every MachineSet, its selector and
+      // its machine template, and Red Hat tooling and support scripts rely on it.
+      let infraLabel = {};
+      try { const id = await clusterInfraId(clusterApiUrl, ocpToken); if (id) infraLabel = { 'machine.openshift.io/cluster-api-cluster': id }; }
+      catch (e) { log(`  (could not read the cluster infrastructure name: ${e.message} - the cluster-api-cluster label is left out)\n`); }
       const ionosMs = {
         apiVersion: 'machine.openshift.io/v1beta1',
         kind:       'MachineSet',
         metadata: {
           name:        targetMsName,
           namespace:   'openshift-machine-api',
-          labels:      { [msLabelKey]: targetMsName },
+          labels:      { ...infraLabel, [msLabelKey]: targetMsName },
           annotations: fraAnnotations
         },
         spec: {
           replicas: parseInt(msInitReplicas, 10) || 1,
-          selector: { matchLabels: { [msLabelKey]: targetMsName } },
+          selector: { matchLabels: { ...infraLabel, [msLabelKey]: targetMsName } },
           template: {
             metadata: {
               labels: {
+                ...infraLabel,
                 [msLabelKey]: targetMsName,
                 'machine.openshift.io/cluster-api-machine-role': 'worker',
                 'machine.openshift.io/cluster-api-machine-type': 'worker',
