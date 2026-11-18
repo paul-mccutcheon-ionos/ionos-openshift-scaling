@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.18.3</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.19.0</span>
   </div>
 
   <div class="banner-actions">
@@ -3136,7 +3136,7 @@
     const placement = zoneMode === 'custom'
       ? `custom: servers in ${serverZone}` + (type === 'cube' ? '' : ', storage ' + diskZones.slice(0, count).map((z, i) => `node ${i + 1} → ${z}`).join(', '))
       : zoneMode === 'spread' ? 'spread across zones 1 and 2' : 'Auto';
-    if (!confirm(`Add ${count} control-plane node(s): ${what}\n\nZone placement: ${placement}.\n\nThey join NEXT TO the existing control-plane nodes and become etcd members. Nothing is removed. Continue?`)) return;
+    if (!confirm(`Add ${count} control-plane node(s): ${what}\n\nZone placement: ${placement}.\n\nThey are created ONE AT A TIME (each must be a healthy etcd member before the next starts), next to the existing control-plane nodes. Nothing is removed. Continue?`)) return;
     const btn = document.getElementById('cp-add-btn'); btn.disabled = true; btn.style.opacity = '0.5';
     await cpStream('/api/control-plane/add', cpBody({
       machineType: type, count, lanId, zoneMode, serverZone, diskZones, imageId: document.getElementById('cp-image').value, backupConfirmed: document.getElementById('cp-backup-ok').checked,

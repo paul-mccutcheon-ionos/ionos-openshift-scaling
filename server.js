@@ -1044,7 +1044,7 @@ async function cpGather(ctx) {
   const etcdMembersMsg = (etcd?.status?.conditions || []).find(c => c.type === 'EtcdMembersAvailable');
 
   return {
-    masters, masterMachines: masterMachines.map(m => ({ name: m.metadata.name, phase: m.status?.phase, machineSet: (m.metadata.ownerReferences || []).find(r => r.kind === 'MachineSet')?.name })),
+    masters, masterMachines: masterMachines.map(m => ({ name: m.metadata.name, phase: m.status?.phase, error: m.status?.errorMessage, machineSet: (m.metadata.ownerReferences || []).find(r => r.kind === 'MachineSet')?.name })),
     operatorIssues, watched,
     upgrading: condOf(cv, 'Progressing')?.status === 'True', version: cv.status?.desired?.version,
     mcp: mcp ? { updated: condOf(mcp, 'Updated')?.status === 'True', updating: condOf(mcp, 'Updating')?.status === 'True', degraded: condOf(mcp, 'Degraded')?.status === 'True', ready: mcp.status?.readyMachineCount, total: mcp.status?.machineCount } : null,
@@ -1065,6 +1065,38 @@ async function cpFindMasterImages(ctx) {
     .filter(i => /rhcos/i.test(i.properties?.name || '') && /master/i.test(i.properties?.name || '') && i.properties?.location === location)
     .map(i => ({ id: i.id, name: i.properties.name, state: i.metadata?.state }));
   return { location, images };
+}
+
+// IONOS counts all SSD-class volumes and DAS (Cube) storage together against one contract limit (ssdLimitPerContract),
+// across EVERY datacenter in the contract. The DCD shows them as separate bars, which hides how close the sum is.
+async function ionosStorageHeadroom(token) {
+  const c = await ionosGet('/contracts', token);
+  const rl = c.items?.[0]?.properties?.resourceLimits;
+  if (!rl || !rl.ssdLimitPerContract) return null;
+  const usedMiB = (rl.ssdVolumeProvisioned || 0) + (rl.dasVolumeProvisioned || 0);
+  return { limitGiB: Math.round(rl.ssdLimitPerContract / 1024), usedGiB: Math.round(usedMiB / 1024), freeGiB: Math.round((rl.ssdLimitPerContract - usedMiB) / 1024) };
+}
+
+// A server-create request that IONOS accepted (202) but then FAILED asynchronously leaves no server behind, yet the
+// provider keeps polling the id it was given. Look the failure up so the wait can stop with the real reason.
+async function ionosFailedServerCreate(token, dc, sinceMs) {
+  const d = await ionosGet('/requests?depth=2&limit=100&filter.method=POST', token);   // newest first; filter by time here (IONOS's createdAfter filter format is picky)
+  const hit = (d.items || [])
+    .filter(q => (q.properties?.url || '').includes(`/datacenters/${dc}/servers?`) && Date.parse(q.metadata?.createdDate) >= sinceMs - 60000 &&
+                 q.metadata?.requestStatus?.metadata?.status === 'FAILED')
+    .sort((a, b) => b.metadata.createdDate.localeCompare(a.metadata.createdDate))[0];
+  return hit ? (hit.metadata.requestStatus.metadata.message || 'the request FAILED').replace(/^\[[^\]]+\]\s*/, '') : null;
+}
+
+// Clean up after IONOS rejected a create: drop the MachineSet we created (when it had no machines before) and restart
+// the provider, which otherwise stays stuck on a server that never existed and blocks all other machine work.
+async function cpAbortFailedCreate(ctx, setName, previousReplicas) {
+  const A = ctx.apiUrl, T = ctx.token;
+  if (!previousReplicas) { try { await ocpDelete(A, `/apis/machine.openshift.io/v1beta1/namespaces/${MAPI_NS}/machinesets/${setName}`, T); } catch (_) {} }
+  try {
+    await ocpPatch(A, `/apis/apps/v1/namespaces/${MAPI_NS}/deployments/ionos-machine-api-provider`, T,
+      { spec: { template: { metadata: { annotations: { 'kubectl.kubernetes.io/restartedAt': new Date().toISOString() } } } } });
+  } catch (_) {}
 }
 
 // Readiness checks: 'block' stops the Add button, 'warn' is shown but does not stop it.
@@ -1092,6 +1124,16 @@ async function cpChecks(ctx, g) {
   const cpSync = /-cp-/.test(g.providerImage) || /ionos-machine-api-provider:ionos-machine-api-provider$/.test(g.providerImage);
   add('provider-nlb', 'Provider keeps the API load-balancer rules in step with the control plane', cpSync ? 'ok' : 'warn',
     cpSync ? 'The running provider image includes control-plane NLB sync.' : 'This provider image has no control-plane NLB sync: new masters would not be added to the API rules automatically (needed before retiring any old node).');
+
+  // contract storage headroom (SSD + DAS are one pool)
+  if (ctx.ionos) {
+    try {
+      const h = await ionosStorageHeadroom(ctx.ionos.token);
+      if (h) add('storage-quota', 'Contract has storage headroom for new control-plane nodes', h.freeGiB >= 600 ? 'ok' : 'warn',
+        `${h.freeGiB} GiB free of the ${h.limitGiB} GiB SSD+DAS contract limit (${h.usedGiB} GiB used; the DCD shows SSD and DAS as separate bars but IONOS adds them together). ` +
+        `A Dedicated Core node needs its disk size (600 GiB by default); the nodes are added one at a time, so ${h.freeGiB >= 600 ? 'at least one fits.' : 'NONE fits - free storage or ask IONOS to raise the limit.'}`);
+    } catch (e) { add('storage-quota', 'Contract has storage headroom for new control-plane nodes', 'warn', 'Could not read the contract limits: ' + e.message); }
+  }
 
   // management host: master stub
   try {
@@ -1273,6 +1315,10 @@ app.post('/api/control-plane/add', async (req, res) => {
   const { step, log, done, fail } = makeSseHelpers(res);
   const ctx = postUpgradeCtx(b);
   const A = ctx.apiUrl, T = ctx.token;
+  // The wait can go quiet for many minutes; an SSE comment every 15 s stops browsers/proxies dropping the stream
+  // ("network error" while the build was still running fine).
+  const keepAlive = setInterval(() => { try { res.write(': keepalive\n\n'); } catch (_) {} }, 15000);
+  res.on('close', () => clearInterval(keepAlive));
   try {
     // 1. Re-check everything server-side: the browser's view may be stale.
     step('Checking the cluster is ready…', 'working');
@@ -1304,7 +1350,22 @@ app.post('/api/control-plane/add', async (req, res) => {
     if (spec.cores < 4 || spec.ramMB < 16 * 1024) throw new Error('A control-plane node needs at least 4 vCPU and 16 GiB RAM.');
     log(`Type ${spec.serverType}: ${spec.cores} vCPU / ${Math.round(spec.ramMB / 1024)} GiB / ${spec.diskGB} GB ${spec.diskType} · image ${img.name} · LAN ${lan} · ${region}\n`);
 
-    // 3. Create or scale the MachineSet (never an autoscaler: the control plane is scaled deliberately)
+    // Contract storage: refuse up front instead of letting IONOS reject the create half way through.
+    const perNodeGiB = Number(spec.diskGB) || 0;
+    try {
+      const h = await ionosStorageHeadroom(ctx.ionos.token);
+      if (h && perNodeGiB) {
+        log(`Contract storage (SSD + DAS together): ${h.freeGiB} GiB free of ${h.limitGiB} GiB; ${count} node(s) x ${perNodeGiB} GiB = ${count * perNodeGiB} GiB needed\n`);
+        if (count * perNodeGiB > h.freeGiB) {
+          const fits = Math.floor(h.freeGiB / perNodeGiB);
+          throw new Error(`Not enough contract storage: ${count} node(s) need ${count * perNodeGiB} GiB but only ${h.freeGiB} GiB of the ${h.limitGiB} GiB SSD+DAS limit is free (IONOS adds SSD and DAS together; the DCD shows them as separate bars). ` +
+            (fits >= 1 ? `At most ${fits} node(s) fit now - add fewer, or free storage first. ` : 'Not even one fits. ') +
+            'Free storage (delete unused VMs/volumes in any datacenter of the contract) or ask IONOS support to raise the limit. Nothing was created.');
+        }
+      }
+    } catch (e) { if (/Not enough contract storage/.test(e.message)) throw e; log(`  (could not check the contract storage limit: ${e.message})\n`); }
+
+    // 3. Create the nodes ONE AT A TIME (never an autoscaler: the control plane is scaled deliberately)
     // Placement. 'auto' lets IONOS pick (one MachineSet). 'spread' places the new nodes one at a time
     // on ZONE_1 / ZONE_2, always choosing the zone holding fewer control-plane servers (ties → ZONE_1);
     // a MachineSet has a single zone, so each zone gets its own "<name>-z1" / "<name>-z2" MachineSet.
@@ -1334,48 +1395,62 @@ app.post('/api/control-plane/add', async (req, res) => {
     } else {
       for (let i = 0; i < count; i++) plan.push({ setName: name, az: spec.az });
     }
-    const groups = new Map();
-    plan.forEach(p => { const x = groups.get(p.setName) || { setName: p.setName, az: p.az, diskAz: p.diskAz, n: 0 }; x.n++; groups.set(p.setName, x); });
-    const setNames = new Set(groups.keys());
-
-    step(`Creating control-plane MachineSet(s) ${[...setNames].map(s => `"${s}"`).join(', ')} (+${count})…`, 'working');
+    // Each node is created, then waited for until it is a Ready etcd member with everything healthy, before the next one
+    // starts. A MachineSet has one placement, so every node gets its own MachineSet entry (replicas +1 on its set).
+    // This keeps etcd membership changes strictly one at a time and stops at the first problem instead of leaving
+    // several half-built nodes behind.
     const msPath = `/apis/machine.openshift.io/v1beta1/namespaces/${MAPI_NS}/machinesets`;
     const before = new Set(g.masters.map(m => m.name));
-    for (const grp of groups.values()) {
-      let existing = null;
-      try { existing = await ocpGet(A, `${msPath}/${grp.setName}`, T); } catch (e) { if (e.status !== 404) throw e; }
-      const replicas = (existing?.spec?.replicas || 0) + grp.n;
-      await ocpApplyObj(A, T, msPath, grp.setName, cpBuildMachineSet({ ...spec, name: grp.setName, az: grp.az, diskAz: grp.diskAz, replicas }));
-      step(`MachineSet "${grp.setName}" (server ${grp.az}${grp.diskAz && grp.diskAz !== grp.az ? ', storage ' + grp.diskAz : ''}) at ${replicas} replica(s)`, 'ok');
-    }
-
-    // 4. Watch the machine(s) become nodes and etcd members. Poll; never roll anything back automatically.
-    const deadline = Date.now() + 40 * 60000;
+    const added = [];
     const seen = new Set();
     const say = (key, text) => { if (!seen.has(key)) { seen.add(key); log(text + '\n'); } };
-    let stage = 'machine';
-    step('Waiting for the VM(s), nodes and etcd members…', 'working');
-    while (Date.now() < deadline) {
-      await new Promise(r => setTimeout(r, 20000));
-      const cur = await cpGather(ctx);
-      const fresh = cur.masters.filter(m => !before.has(m.name));
-      const ms = cur.masterMachines.filter(m => setNames.has(m.machineSet));
-      ms.forEach(m => say('m:' + m.name + m.phase, `machine ${m.name}: ${m.phase || 'pending'}`));
-      fresh.forEach(m => {
-        say('n:' + m.name, `node ${m.name} registered (${m.ip})`);
-        if (m.ready) say('r:' + m.name, `node ${m.name} Ready`);
-        if (m.etcdPod) say('e:' + m.name + m.etcdPod.ready, `etcd pod on ${m.name}: ${m.etcdPod.ready ? 'Ready' : 'starting'}`);
-      });
-      const allUp = fresh.length >= count && fresh.every(m => m.ready && m.etcdPod?.ready);
-      if (allUp && cur.etcd.membersAvailable && cur.etcd.podsReady === cur.etcd.pods && cur.operatorIssues.length === 0) {
-        step('New control-plane node(s) joined and etcd is healthy', 'ok');
-        const names = fresh.map(m => m.name).join(', ');
-        return done(`Added ${names}. etcd now has ${cur.etcd.podsReady} healthy members. Next: check the console, then retire an old node when you are ready (dry-run plan available).`, { nodes: fresh.map(m => m.name) });
+    let lastEtcd = null;
+    for (let i = 0; i < plan.length; i++) {
+      const item = plan[i];
+      const label = `Node ${i + 1} of ${plan.length}`;
+      const placement = `server ${item.az}${item.diskAz && item.diskAz !== item.az ? ', storage ' + item.diskAz : ''}`;
+      step(`${label}: creating (${placement})…`, 'working');
+      let existing = null;
+      try { existing = await ocpGet(A, `${msPath}/${item.setName}`, T); } catch (e) { if (e.status !== 404) throw e; }
+      const prevReplicas = existing?.spec?.replicas || 0;
+      const startMs = Date.now();
+      await ocpApplyObj(A, T, msPath, item.setName, cpBuildMachineSet({ ...spec, name: item.setName, az: item.az, diskAz: item.diskAz, replicas: prevReplicas + 1 }));
+      step(`${label}: MachineSet "${item.setName}" (${placement}) at ${prevReplicas + 1} replica(s)`, 'ok');
+
+      step(`${label}: waiting for the VM, node and etcd member…`, 'working');
+      const deadline = Date.now() + 40 * 60000;
+      let stage = 'machine', polls = 0, joined = null;
+      while (Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 20000));
+        polls++;
+        const cur = await cpGather(ctx);
+        lastEtcd = cur.etcd;
+        const fresh = cur.masters.filter(m => !before.has(m.name));
+        const ms = cur.masterMachines.filter(m => m.machineSet === item.setName);
+        ms.forEach(m => say('m:' + m.name + m.phase, `machine ${m.name}: ${m.phase || 'pending'}`));
+        const failedMachine = ms.find(m => m.phase === 'Failed');
+        if (failedMachine) throw new Error(`${label}: machine ${failedMachine.name} failed: ${failedMachine.error || 'see its status'}. Nothing further was created.`);
+        if (!fresh.length && polls % 3 === 0) {          // no node yet: did IONOS reject the create?
+          const why = await ionosFailedServerCreate(ctx.ionos.token, ctx.ionos.dc, startMs).catch(() => null);
+          if (why) {
+            await cpAbortFailedCreate(ctx, item.setName, prevReplicas);
+            throw new Error(`${label}: IONOS rejected the VM create - ${why} I removed the failed MachineSet entry and restarted the provider so it is not left waiting on a server that does not exist. Nodes added before this one (${added.join(', ') || 'none'}) are unaffected.`);
+          }
+        }
+        fresh.forEach(m => {
+          say('n:' + m.name, `node ${m.name} registered (${m.ip})`);
+          if (m.ready) say('r:' + m.name, `node ${m.name} Ready`);
+          if (m.etcdPod) say('e:' + m.name + m.etcdPod.ready, `etcd pod on ${m.name}: ${m.etcdPod.ready ? 'Ready' : 'starting'}`);
+        });
+        if (fresh.length >= 1 && fresh.every(m => m.ready && m.etcdPod?.ready) && cur.etcd.membersAvailable && cur.etcd.podsReady === cur.etcd.pods && cur.operatorIssues.length === 0) { joined = fresh; break; }
+        stage = fresh.length ? 'join' : stage;
       }
-      stage = fresh.length ? 'join' : stage;
+      if (!joined) throw new Error(`${label}: timed out after 40 minutes (stage: ${stage}). Nodes added before this one: ${added.join(', ') || 'none'}. Nothing was rolled back - inspect the machine and node, then scale MachineSet ${item.setName} back down if needed.`);
+      joined.forEach(m => { before.add(m.name); added.push(m.name); });
+      step(`${label}: ${joined.map(m => m.name).join(', ')} joined, etcd healthy (${lastEtcd.podsReady} members)`, 'ok');
     }
-    throw new Error(`Timed out after 40 minutes (stage: ${stage}). Nothing was rolled back — inspect the machine and node, then scale MachineSet ${name} back down if needed.`);
-  } catch (e) { fail(e.message); }
+    return done(`Added ${added.join(', ')} one at a time. etcd now has ${lastEtcd?.podsReady} healthy members. Next: check the console, then retire an old node when you are ready (dry-run plan available).`, { nodes: added });
+  } catch (e) { fail(e.message); } finally { clearInterval(keepAlive); }
 });
 
 // Dry-run plan for retiring one fixed control-plane node. Reads only — it never changes anything.
