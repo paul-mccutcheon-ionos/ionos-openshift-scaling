@@ -426,6 +426,9 @@ const PROVIDER_CLUSTERROLE_RULES = [
   { apiGroups: [''],                     resources: ['nodes'],                  verbs: ['get','list','watch','patch','update','delete'] },
   { apiGroups: ['coordination.k8s.io'],  resources: ['leases'],                 verbs: ['get','list','watch','create','update','patch','delete'] },
   { apiGroups: [''],                     resources: ['events'],                 verbs: ['create','patch'] },
+  // draining a node before its instance is removed (honours PodDisruptionBudgets): list the node's pods, then evict them
+  { apiGroups: [''],                     resources: ['pods'],                   verbs: ['get','list'] },
+  { apiGroups: [''],                     resources: ['pods/eviction'],          verbs: ['create'] },
   // cluster ingress domain: lets the provider's NLB syncer recognise this cluster's load balancer
   { apiGroups: ['config.openshift.io'],  resources: ['ingresses'],              verbs: ['get'] }
 ];
@@ -3797,10 +3800,9 @@ app.post('/api/ionos/location-cpu-families', async (req, res) => {
   // location is like "de/fra" — passed directly as a path segment (already slash-delimited)
   try {
     const data = await ionosGet(`/locations/${location}?depth=1`, ionosToken);
-    const families = (data?.properties?.cpuArchitecture || [])
-      .map(arch => arch.cpuFamily)
-      .filter(Boolean);
-    res.json({ cpuFamilies: families });
+    const names = (data?.properties?.cpuArchitecture || []).map(arch => arch.cpuFamily).filter(Boolean);
+    const { order, legacy } = rankCpuFamilies(names);
+    res.json({ cpuFamilies: order, legacy: [...legacy] });
   } catch (err) {
     res.status(err.status || 502).json({ error: err.message });
   }
@@ -6088,18 +6090,34 @@ const CPU_FAMILY_DEFAULTS = {
 // IONOS's Locations API takes the location's exact id as-is, e.g.
 // /locations/de/fra/1 — do NOT strip any "/N" suffix before calling it, that
 // silently queries a *different*, unrelated site (see comment above).
+// The location API lists every CPU family the site ever supported, including legacy ones the DCD no longer offers (de/fra/2
+// still lists AMD_EPYC and INTEL_ICELAKE next to Sierra Forest and Turin; ordering EPYC there fails with VDC-5-601 "not enough
+// physical resources"). There is no orderability flag in the API, so: where a modern family exists at the location, mark the
+// legacy ones and sort them last, so callers default to a family that can really be ordered.
+const LEGACY_CPU_FAMILIES = ['AMD_EPYC', 'AMD_OPTERON', 'INTEL_XEON', 'INTEL_SKYLAKE', 'INTEL_ICELAKE'];
+const MODERN_CPU_FAMILIES = ['INTEL_SIERRAFOREST', 'AMD_TURIN'];
+function rankCpuFamilies(names) {
+  const hasModern = names.some(n => MODERN_CPU_FAMILIES.includes(n));
+  const legacy = new Set(hasModern ? names.filter(n => LEGACY_CPU_FAMILIES.includes(n)) : []);
+  const order = [...names].sort((a, b) => (legacy.has(a) - legacy.has(b)) || (names.indexOf(a) - names.indexOf(b)));
+  return { order, legacy };
+}
+
 async function resolveCpuFamiliesForLocation(location, token) {
   try {
     const data  = await ionosGet(`/locations/${location}`, token);
     const archs = data?.properties?.cpuArchitecture || [];
     if (archs.length > 0) {
+      const { order, legacy } = rankCpuFamilies(archs.map(a => a.cpuFamily));
       return {
-        families: archs.map(a => ({
-          family:    a.cpuFamily,
-          maxCores:  a.maxCores,
-          maxRamGB:  Math.round((a.maxRam || 0) / 1024),
-          vendor:    a.vendor || '',
-        }))
+        families: order.map(name => { const a = archs.find(x => x.cpuFamily === name);
+          return {
+            family:    a.cpuFamily,
+            maxCores:  a.maxCores,
+            maxRamGB:  Math.round((a.maxRam || 0) / 1024),
+            vendor:    a.vendor || '',
+            legacy:    legacy.has(a.cpuFamily),
+          }; })
       };
     }
   } catch (_) { /* fall through to defaults */ }

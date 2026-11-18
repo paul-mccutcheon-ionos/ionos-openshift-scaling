@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.20.0</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.20.1</span>
   </div>
 
   <div class="banner-actions">
@@ -3694,17 +3694,19 @@
       const data = await apiPost('/api/ionos/location-cpu-families',
         { ionosToken, location: datacenterLocation });
       const families = data.cpuFamilies || [];
+      const legacy = new Set(data.legacy || []);
       if (families.length === 0) {
         sel.innerHTML = '<option value="">No CPU families found</option>';
         return;
       }
       const prev = sel.value;
       sel.innerHTML = families.map(f => {
-        const label = CPU_FAMILY_LABELS[f] || f;
+        const label = (CPU_FAMILY_LABELS[f] || f) + (legacy.has(f) ? ' - legacy, may not be orderable' : '');
         return `<option value="${escHtml(f)}"${f === prev ? ' selected' : ''}>${escHtml(label)}</option>`;
       }).join('');
-      // Default to Icelake if available and nothing was pre-selected
-      if (!sel.value && families.includes('INTEL_ICELAKE')) sel.value = 'INTEL_ICELAKE';
+      // The list is sorted modern-first, so with nothing pre-selected the first entry is the right default
+      // (this used to pick Icelake whenever it was offered, which is the legacy family at de/fra/2).
+      if (!sel.value) sel.value = families[0];
     } catch (_) {
       sel.innerHTML = '<option value="INTEL_ICELAKE">Intel Icelake (default)</option>';
     }
@@ -6218,10 +6220,11 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
       if (families && families.length > 0) {
         const prev = sel.value;
         sel.innerHTML = families.map(f => {
-          const label = f.maxCores ? `${f.family}  (max ${f.maxCores}C / ${f.maxRamGB} GB)` : f.family;
+          const label = (f.maxCores ? `${f.family}  (max ${f.maxCores}C / ${f.maxRamGB} GB)` : f.family) + (f.legacy ? '  - legacy, may not be orderable' : '');
           return `<option value="${escHtml(f.family)}">${escHtml(label)}</option>`;
         }).join('');
-        if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+        // the list is sorted modern-first; keep the user's choice if it is still offered, otherwise the first (modern) one
+        sel.value = [...sel.options].some(o => o.value === prev) ? prev : sel.options[0].value;
         ncwApplyEnvPending();
       }
     } catch (_) { /* keep current options */ }
