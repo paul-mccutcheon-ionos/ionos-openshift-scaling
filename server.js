@@ -528,7 +528,18 @@ async function ocpApplyObj(apiUrl, token, base, name, body) {
 // ══ Post-upgrade check / repair ═════════════════════════════════════════════
 // Replays, as idempotent checks with optional fixes, everything that had to be done by hand to get
 // autoscaling working again after the 4.18 → 4.19 upgrade.
-const IGN_DIR = '/root/ignition-serve';
+// Where the management host serves its Ignition stubs. ocp1's host runs a small server on :8080 from
+// /root/ignition-serve; hosts built by the wizard (ocp2) serve worker.ign from Apache's docroot on :80.
+const IGN_LOCATIONS = [{ dir: '/root/ignition-serve', port: 8080 }, { dir: '/var/www/html', port: 80 }];
+const IGN_DIR = IGN_LOCATIONS[0].dir;                // default / message text only; use ignLocation(conn) for the real one
+async function ignLocation(conn) {
+  if (conn._ignLoc) return conn._ignLoc;
+  for (const loc of IGN_LOCATIONS) {
+    const r = await sshRunScript(conn, `[ -f '${loc.dir}/worker.ign' ] && echo yes || true`);
+    if (/yes/.test(r.stdout)) return (conn._ignLoc = loc);
+  }
+  return (conn._ignLoc = IGN_LOCATIONS[0]);
+}
 const IGN_BACKUP_DIR = '/root/ign-backups';          // outside the HTTP docroot on purpose
 const MIN_PROVISION_MINUTES = 30;                    // IONOS VM + volume + image boot can take 15–20 min
 
@@ -576,8 +587,9 @@ async function withMgmtSsh(ctx, fn) {
 }
 
 async function readIgnStubs(conn) {
+  const loc = await ignLocation(conn);
   const out = (await sshRunScript(conn,
-    `for f in ${IGN_DIR}/*.ign; do [ -f "$f" ] && { echo "@@FILE $f"; cat "$f"; echo; }; done; true`)).stdout;
+    `for f in ${loc.dir}/*.ign; do [ -f "$f" ] && { echo "@@FILE $f"; cat "$f"; echo; }; done; true`)).stdout;
   return out.split('@@FILE ').slice(1).map(chunk => {
     const nl = chunk.indexOf('\n');
     const file = chunk.slice(0, nl).trim();
@@ -617,7 +629,7 @@ const POST_UPGRADE_STEPS = [
       const states = stubs.map(s => stubCaState(s, ref));
       const stale = states.filter(s => s.state === 'stale'), bad = states.filter(s => s.state === 'unparseable');
       const base = f => f.split('/').pop();
-      if (!states.length) return { status: 'warn', detail: `No *.ign files in ${IGN_DIR} on the management host.` };
+      if (!states.length) return { status: 'warn', detail: `No *.ign files in ${IGN_LOCATIONS.map(l => l.dir).join(' or ')} on the management host.` };
       if (stale.length || bad.length) {
         return { status: 'drift', detail: `Cluster CA ${shortHash(ref)}. Stale: ${stale.map(s => `${base(s.file)} (${s.hash})`).join(', ') || 'none'}.` +
           (bad.length ? ` Unparseable: ${bad.map(s => base(s.file)).join(', ')}.` : '') +
@@ -1075,7 +1087,9 @@ async function cpChecks(ctx, g) {
   add('master-secret', 'Master user-data secret exists', g.masterSecret ? 'ok' : 'block', g.masterSecret ? 'master-user-data-managed found.' : 'Secret master-user-data-managed is missing in openshift-machine-api.');
   add('approver', 'CSR auto-approver is running', g.approverReady ? 'ok' : 'block', g.approverReady ? 'ionos-machine-auto-approver is ready.' : 'Without it the new node cannot join (its CSRs would wait for manual approval).');
   add('provider', 'Machine API provider is running', g.providerReady ? 'ok' : 'block', g.providerImage);
-  const cpSync = /-cp-/.test(g.providerImage);
+  // The canonical image tag (ionos-machine-api-provider:ionos-machine-api-provider, on GHCR or Docker Hub) is the
+  // latest build, which includes control-plane NLB sync; older builds carried "-cp-" in their tag.
+  const cpSync = /-cp-/.test(g.providerImage) || /ionos-machine-api-provider:ionos-machine-api-provider$/.test(g.providerImage);
   add('provider-nlb', 'Provider keeps the API load-balancer rules in step with the control plane', cpSync ? 'ok' : 'warn',
     cpSync ? 'The running provider image includes control-plane NLB sync.' : 'This provider image has no control-plane NLB sync: new masters would not be added to the API rules automatically (needed before retiring any old node).');
 
@@ -1083,16 +1097,18 @@ async function cpChecks(ctx, g) {
   try {
     const ref = await referenceMcsCa(ctx);
     const stub = await withMgmtSsh(ctx, async conn => (await readIgnStubs(conn)).find(s => s.file.endsWith('/master.ign')));
-    if (!stub) add('stub', 'master.ign Ignition stub on the management host', 'block', `No ${IGN_DIR}/master.ign — use "Prepare".`);
+    if (!stub) add('stub', 'master.ign Ignition stub on the management host', 'block', `No master.ign next to worker.ign on the management host (${IGN_LOCATIONS.map(l => l.dir).join(' or ')}) — use "Prepare".`);
     else {
       const st = stubCaState(stub, ref);
       const src = stub.json?.ignition?.config?.merge?.[0]?.source || '';
       const roleOk = /[/]config[/]master$/.test(src);
-      const routeOk = (stub.json?.storage?.files || []).some(f => f.path === CP_ROUTE_SCRIPT_PATH);
+      const gw = await cpGatewayFor(ctx).catch(() => null);
+      const routeFile = (stub.json?.storage?.files || []).find(f => f.path === CP_ROUTE_SCRIPT_PATH);
+      const routeOk = !!routeFile && (!gw || (decodeDataUrl(routeFile.contents?.source) || '').includes(`via ${gw} `));
       const ok = st.state === 'ok' && roleOk && routeOk;
       add('stub', 'master.ign Ignition stub on the management host', ok ? 'ok' : 'block',
         ok ? `Present, merges ${src}, CA matches the cluster, installs the IONOS default-route script.`
-          : `Present but ${st.state !== 'ok' ? 'its CA is ' + st.state : !roleOk ? 'it does not merge /config/master (' + src + ')' : 'it lacks the IONOS default-route script (new control-plane nodes would have no gateway and never join)'} — use "Prepare".`);
+          : `Present but ${st.state !== 'ok' ? 'its CA is ' + st.state : !roleOk ? 'it does not merge /config/master (' + src + ')' : 'its IONOS default-route script is missing or uses the wrong gateway (new control-plane nodes would have no route and never join)'} — use "Prepare".`);
     }
   } catch (e) {
     add('stub', 'master.ign Ignition stub on the management host', e.skip ? 'warn' : 'block', e.skip ? 'Management host SSH details not supplied — cannot verify.' : e.message);
@@ -1111,13 +1127,29 @@ async function cpChecks(ctx, g) {
 }
 
 const CP_ROUTE_SCRIPT_PATH = '/etc/NetworkManager/dispatcher.d/20-ionos-default-route';
-const CP_ROUTE_SCRIPT = `#!/bin/bash
+const cpRouteScript = gw => `#!/bin/bash
 # Add IONOS private LAN default route when the OVN-K bridge comes up.
 # OVN-K creates ovs-if-br-ex with DHCP but IONOS DHCP does not supply a gateway.
 [ "$1" = "br-ex" ] || exit 0
 [ "$2" = "up" ]    || exit 0
-ip route show default | grep -q default || ip route add default via 10.7.224.1 metric 48
+ip route show default | grep -q default || ip route add default via ${gw} metric 48
 `;
+
+// The LAN gateway differs per cluster (ocp1 10.7.224.1, ocp2 10.7.222.1). The workers already carry it in the
+// MachineConfig 99-worker-ionos-default-route, so read it from there; then an explicit value; then .env.
+async function cpGatewayFor(ctx, explicit) {
+  const ok = v => /^\d{1,3}(\.\d{1,3}){3}$/.test(String(v || '').trim()) ? String(v).trim() : '';
+  try {
+    const mc = await ocpGet(ctx.apiUrl, '/apis/machineconfiguration.openshift.io/v1/machineconfigs/99-worker-ionos-default-route', ctx.token);
+    for (const f of mc.spec?.config?.storage?.files || []) {
+      const m = /via\s+(\d{1,3}(?:\.\d{1,3}){3})/.exec(decodeDataUrl(f.contents?.source) || '');
+      if (m) return m[1];
+    }
+  } catch (_) {}
+  const g = ok(explicit) || ok(process.env.OCP_BOOTSTRAP_GATEWAY);
+  if (g) return g;
+  throw new Error('Cannot determine the private LAN gateway: this cluster has no MachineConfig 99-worker-ionos-default-route and no gateway was supplied (set OCP_BOOTSTRAP_GATEWAY in .env).');
+}
 
 app.post('/api/control-plane/status', async (req, res) => {
   if (!req.body.clusterApiUrl || !req.body.ocpToken) return res.status(400).json({ error: 'clusterApiUrl and ocpToken are required.' });
@@ -1157,6 +1189,7 @@ app.post('/api/control-plane/prepare', async (req, res) => {
   const ctx = postUpgradeCtx(req.body);
   try {
     const ref = await referenceMcsCa(ctx);
+    const gateway = await cpGatewayFor(ctx, req.body.gateway);
     const msg = await withMgmtSsh(ctx, async conn => {
       const stubs = await readIgnStubs(conn);
       const worker = stubs.find(s => s.file.endsWith('/worker.ign'));
@@ -1172,11 +1205,12 @@ app.post('/api/control-plane/prepare', async (req, res) => {
       master.storage = master.storage || {};
       master.storage.files = (master.storage.files || []).filter(f => f.path !== CP_ROUTE_SCRIPT_PATH);
       master.storage.files.push({ path: CP_ROUTE_SCRIPT_PATH, mode: 0o755, overwrite: true,
-        contents: { source: 'data:text/plain;charset=utf-8;base64,' + Buffer.from(CP_ROUTE_SCRIPT).toString('base64') } });
+        contents: { source: 'data:text/plain;charset=utf-8;base64,' + Buffer.from(cpRouteScript(gateway)).toString('base64') } });
       const b64 = Buffer.from(JSON.stringify(master)).toString('base64');
-      await sshRunScript(conn, ['set -e', `echo '${b64}' | base64 -d > '${IGN_DIR}/master.ign.tmp'`, `chmod --reference='${IGN_DIR}/worker.ign' '${IGN_DIR}/master.ign.tmp'`, `mv '${IGN_DIR}/master.ign.tmp' '${IGN_DIR}/master.ign'`].join('\n'));
-      const check = await sshRunScript(conn, "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/master.ign || true");
-      return `Wrote ${IGN_DIR}/master.ign (merges ${master.ignition.config.merge[0].source}); served on :8080 → HTTP ${check.stdout.trim()}.`;
+      const loc = await ignLocation(conn), D = loc.dir;
+      await sshRunScript(conn, ['set -e', `echo '${b64}' | base64 -d > '${D}/master.ign.tmp'`, `chmod --reference='${D}/worker.ign' '${D}/master.ign.tmp'`, `mv '${D}/master.ign.tmp' '${D}/master.ign'`].join('\n'));
+      const check = await sshRunScript(conn, `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:${loc.port}/master.ign || true`);
+      return `Wrote ${D}/master.ign (merges ${master.ignition.config.merge[0].source}; default route via ${gateway}); served on :${loc.port} → HTTP ${check.stdout.trim()}.`;
     });
     res.json({ ok: true, message: msg });
   } catch (e) { res.status(e.skip ? 400 : 502).json({ error: e.message }); }
@@ -5045,9 +5079,9 @@ app.post('/api/upload-rhcos-image', async (req, res) => {
   // Sanitise inputs
   const safeVersion = ocpVersion.replace(/[^0-9.]/g, '');
   const isMasterImage = role === 'master';
-  const finalName   = (reqImageName || (isMasterImage ? `rhcos-${safeVersion}-qemu-v2-master` : `rhcos-${safeVersion}-qemu`)).replace(/[^a-zA-Z0-9._-]/g, '-');
+  let finalName     = (reqImageName || (isMasterImage ? `rhcos-${safeVersion}-qemu-v2-master` : `rhcos-${safeVersion}-qemu`)).replace(/[^a-zA-Z0-9._-]/g, '-');
   const localDir    = '/tmp/rhcos-upload';
-  const localRaw    = `${localDir}/${finalName}.raw`;
+  let localRaw      = `${localDir}/${finalName}.raw`;
   const localQcow2  = `${localDir}/rhcos-qemu-temp.qcow2`;
   const localQcow2Gz = `${localQcow2}.gz`;
 
@@ -5094,18 +5128,33 @@ app.post('/api/upload-rhcos-image', async (req, res) => {
       // ── Master image: derive from the proven worker image ────────────────────────
       step('Preparing the master image from the worker image…', 'working');
       const mountDirM = '/mnt/rhcos-master-fix';
-      log(`Base: ${baseRawGz}  →  ${localRaw}  (only the Ignition URL changes: worker.ign → master.ign)\n`);
+      // The worker image is either the compressed one an older host keeps (baseRawGz, ocp1) or the already-patched
+      // raw image the wizard left in the upload dir (ocp2: rhcos-*.raw). Prefer the compressed one, else the newest raw.
+      const found = (await sshRunScript(conn, `if [ -f '${baseRawGz}' ]; then echo GZ; else ls -t ${localDir}/rhcos-*.raw 2>/dev/null | grep -v -- '-master' | head -1; fi`)).stdout.trim();
+      const rawSrc = found && found !== 'GZ' && /^[A-Za-z0-9._\/-]+$/.test(found) ? found : '';
+      if (!found) throw new Error(`No worker image to derive the master image from: neither ${baseRawGz} nor a ${localDir}/rhcos-*.raw exists on the management host.`);
+      if (rawSrc && !reqImageName) {   // name the master image after the worker image it comes from
+        finalName = rawSrc.split('/').pop().replace(/\.raw$/, '') + '-master';
+        localRaw  = `${localDir}/${finalName}.raw`;
+      }
+      log(`Base: ${rawSrc || baseRawGz}  →  ${localRaw}  (only the Ignition URL changes: worker.ign → master.ign)\n`);
       const prep = await sshRunScriptStreaming(conn, `
 set -e
 export PATH=$PATH:/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin
 BASE="${baseRawGz}"
-if [ ! -f "$BASE" ]; then echo "BASE_MISSING: $BASE"; exit 1; fi
+RAWSRC="${rawSrc}"
+if [ -z "$RAWSRC" ] && [ ! -f "$BASE" ]; then echo "BASE_MISSING: $BASE"; exit 1; fi
 mkdir -p ${localDir}
 FREE_GB=$(df -BG --output=avail ${localDir} | tail -1 | tr -dc 0-9)
 if [ "$FREE_GB" -lt 25 ]; then echo "NOT_ENOUGH_SPACE: only $FREE_GB GB free in ${localDir}, need 25"; exit 1; fi
 rm -f "${localRaw}"
-echo "Decompressing (about 17 GB)…"
-gunzip -c "$BASE" > "${localRaw}"
+if [ -n "$RAWSRC" ]; then
+  echo "Copying the worker image $RAWSRC (sparse)…"
+  cp --sparse=always "$RAWSRC" "${localRaw}"
+else
+  echo "Decompressing (about 17 GB)…"
+  gunzip -c "$BASE" > "${localRaw}"
+fi
 echo "RAW_OK:$(stat -c%s "${localRaw}")"
 LOOP=$(losetup -f --show -P "${localRaw}")
 cleanup() { umount "${mountDirM}" 2>/dev/null || true; losetup -d "$LOOP" 2>/dev/null || true; }
