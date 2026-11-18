@@ -782,6 +782,21 @@ const POST_UPGRADE_STEPS = [
     }
   },
   {
+    id: 'ingress-routers', title: 'Ingress routers can schedule on the workers (no leftover taints)', fixable: true,
+    async run(ctx) {
+      const st = await routerTaintState(ctx);
+      if (!st.pending.length) return { status: 'ok', detail: `${st.routers} router pod(s), none Pending.` };
+      if (!st.stale.length) return { status: 'warn', detail: `${st.pending.length} router pod(s) Pending but no leftover OPCT/autoscaler taint explains it — check the workers' capacity and taints.` };
+      return { status: 'drift', detail: `${st.pending.length} router pod(s) Pending. Leftover taints on the workers: ${st.stale.map(t => `${t.node} (${t.key}${t.why ? ', ' + t.why : ''})`).join('; ')}. ` +
+        'With no router running the console, OAuth login (so "Get Token") and the registry become unreachable.' };
+    },
+    async fix(ctx) {
+      const st = await routerTaintState(ctx);
+      for (const t of st.stale) await removeNodeTaints(ctx.apiUrl, ctx.token, t.node, [t.key]);
+      return st.stale.length ? `Removed ${st.stale.map(t => `${t.key} from ${t.node}`).join(', ')}; the router pods can schedule again.` : 'Nothing to remove.';
+    }
+  },
+  {
     id: 'stuck-machines', title: 'Machines stuck outside Running', fixable: false,
     async run(ctx) {
       const ms = await ocpGet(ctx.apiUrl, `/apis/machine.openshift.io/v1beta1/namespaces/${MAPI_NS}/machines`, ctx.token);
@@ -874,6 +889,48 @@ async function nlbIngressState(ctx, ports = [80, 443]) {
     }
   }
   return { want, rules };
+}
+
+// Taints that are left behind and can leave the ingress routers with no node to run on:
+//  - node-role.kubernetes.io/tests: OPCT's dedicated-node taint, never removed when a run finishes
+//  - ToBeDeletedByClusterAutoscaler: the autoscaler's marker; it stays on a node when a scale-down is abandoned
+//    (e.g. the node group is already at its minimum)
+const OPCT_TESTS_TAINT = 'node-role.kubernetes.io/tests';
+const AUTOSCALER_TAINT = 'ToBeDeletedByClusterAutoscaler';
+
+async function removeNodeTaints(apiUrl, token, nodeName, keys) {
+  const node = await ocpGet(apiUrl, `/api/v1/nodes/${encodeURIComponent(nodeName)}`, token);
+  const have = node.spec?.taints || [];
+  const keep = have.filter(t => !keys.includes(t.key));
+  if (keep.length === have.length) return false;
+  await ocpPatch(apiUrl, `/api/v1/nodes/${encodeURIComponent(nodeName)}`, token, { spec: { taints: keep.length ? keep : null } });
+  return true;
+}
+
+async function routerTaintState(ctx) {
+  const A = ctx.apiUrl, T = ctx.token;
+  const [pods, nodes, machines] = await Promise.all([
+    ocpGet(A, '/api/v1/namespaces/openshift-ingress/pods?labelSelector=ingresscontroller.operator.openshift.io%2Fdeployment-ingresscontroller%3Ddefault', T),
+    ocpGet(A, '/api/v1/nodes?labelSelector=node-role.kubernetes.io%2Fworker', T),
+    ocpGet(A, `/apis/machine.openshift.io/v1beta1/namespaces/${MAPI_NS}/machines`, T).catch(() => ({ items: [] })),
+  ]);
+  const routers = pods.items || [];
+  const pending = routers.filter(p => p.status?.phase === 'Pending');
+  const deleting = new Set((machines.items || []).filter(m => m.metadata.deletionTimestamp).map(m => m.metadata.name));
+  const stale = [];
+  if (pending.length) {
+    for (const n of nodes.items || []) {
+      for (const t of n.spec?.taints || []) {
+        if (t.key === OPCT_TESTS_TAINT) stale.push({ node: n.metadata.name, key: t.key, why: 'OPCT dedicated-node taint' });
+        if (t.key === AUTOSCALER_TAINT) {
+          const ageMin = (Date.now() / 1000 - Number(t.value || 0)) / 60;
+          const machine = (n.metadata.annotations?.['machine.openshift.io/machine'] || '').split('/').pop();
+          if (ageMin > 10 && !deleting.has(machine)) stale.push({ node: n.metadata.name, key: t.key, why: `${Math.round(ageMin)} min old, node is not being deleted` });
+        }
+      }
+    }
+  }
+  return { routers: routers.length, pending, stale };
 }
 
 function postUpgradeCtx(body) {
@@ -7372,6 +7429,19 @@ app.get('/api/compliance/status', async (req, res) => {
     status = 'collected';
   } else {
     status = 'unknown'; // couldn't reach the mgmt host or cluster API to check status
+  }
+  // OPCT taints a worker "node-role.kubernetes.io/tests" for its test pods and never removes it. Left in place it
+  // keeps the ingress routers off that node (seen on ocp2: routers Pending, OAuth down, no token). Once the run has
+  // completed the taint has no more use, so drop it - once per run.
+  if (parsed.globalStatus === 'complete' && apiUrl && ocpToken && opctState.taintClearedFor !== opctState.startedAt) {
+    try {
+      const nl = await ocpGet(apiUrl, '/api/v1/nodes', ocpToken);
+      for (const n of nl.items || []) {
+        if ((n.spec?.taints || []).some(t => t.key === OPCT_TESTS_TAINT) && await removeNodeTaints(apiUrl, ocpToken, n.metadata.name, [OPCT_TESTS_TAINT]))
+          console.log(`[compliance/status] OPCT run complete - removed taint ${OPCT_TESTS_TAINT} from ${n.metadata.name}`);
+      }
+      opctState.taintClearedFor = opctState.startedAt;
+    } catch (e) { console.error('[compliance/status] could not clear the OPCT node taint:', e.message); }
   }
   opctState.status = status;
   saveOpctState(opctState);
