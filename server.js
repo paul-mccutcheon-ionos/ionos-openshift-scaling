@@ -991,6 +991,21 @@ app.post('/api/post-upgrade/repair', async (req, res) => {
   } catch (e) { res.status(502).json({ error: e.message, results }); }
 });
 
+// Instance type text for a MachineSet's providerSpec (the console's MachineSets "Instance type" column reads
+// providerSpec.value.instanceType). Same naming as the provider's machine.openshift.io/instance-type label, so the
+// MachineSets and Machines pages agree: dcore-8c-16g, vcpu-4c-8g, cube-basic-m, gpu-h200-s.
+function ionosInstanceType(serverType, cores, ramMB, templateName) {
+  const slug = t => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  const size = `${cores}c-${Math.floor((Number(ramMB) + 512) / 1024)}g`;
+  let tpl = slug(templateName);
+  switch (String(serverType).toUpperCase()) {
+    case 'CUBE': tpl = tpl.replace(/-cube/g, '').replace(/cube-/g, ''); return 'cube-' + (tpl || size);
+    case 'GPU':  return 'gpu-' + (tpl || size);
+    case 'VCPU': return 'vcpu-' + size;
+    default:     return 'dcore-' + size;
+  }
+}
+
 // ══ Managed control plane ═══════════════════════════════════════════════════
 // The fixed control-plane nodes (control-0/1/2) were built by hand and are invisible to the Machine API. New
 // control-plane nodes are added ALONGSIDE them as Machine-API-managed machines (a MachineSet per machine type,
@@ -1282,6 +1297,7 @@ function cpBuildMachineSet(p) {
   const providerSpec = {
     apiVersion: 'ionoscloudproviderconfig.openshift.io/v1alpha1', kind: 'IONOSCloudMachineProviderSpec',
     datacenterID: p.dc, cores: p.cores, ram: p.ramMB, serverType: p.serverType,
+    instanceType: ionosInstanceType(p.serverType, p.cores, p.ramMB, p.templateName),
     ...(p.templateUuid ? { templateUuid: p.templateUuid } : {}),
     ...(p.serverType === 'ENTERPRISE' ? { cpuFamily: p.cpuFamily } : {}),
     region: p.region, availabilityZone: p.az, image: p.imageId,
@@ -1342,7 +1358,7 @@ app.post('/api/control-plane/add', async (req, res) => {
       if (!b.cubeTemplateId) throw new Error('Select a Cube template.');
       const tpl = await ionosGet(`/templates/${encodeURIComponent(b.cubeTemplateId)}`, ctx.ionos.token);
       if (!isCubeTemplate(tpl)) throw new Error('The selected template is not a Cube template.');
-      Object.assign(spec, { serverType: 'CUBE', templateUuid: b.cubeTemplateId, cores: tpl.properties.cores, ramMB: tpl.properties.ram, diskGB: tpl.properties.storageSize, diskType: 'DAS' });
+      Object.assign(spec, { serverType: 'CUBE', templateUuid: b.cubeTemplateId, templateName: tpl.properties.name, cores: tpl.properties.cores, ramMB: tpl.properties.ram, diskGB: tpl.properties.storageSize, diskType: 'DAS' });
     } else {
       Object.assign(spec, { serverType: 'ENTERPRISE', cores: parseInt(b.cores, 10) || 8, ramMB: (parseInt(b.ramGiB, 10) || 16) * 1024, diskGB: parseInt(b.diskGB, 10) || 600,
                             diskType: 'SSD_PREMIUM', cpuFamily: b.cpuFamily || 'INTEL_SIERRAFOREST' });
@@ -2871,12 +2887,14 @@ echo "ALT_WRITE_OK"
       // GPU VMs are sized entirely by their template — read cores/RAM from it so
       // the providerSpec and autoscaler annotations match what IONOS provisions.
       let gpuCount = 0;
+      let templateNameForType = '';
       if (isGpu) {
         if (!gpuTemplateId) throw new Error('A GPU template (H200-S/M/L/XL) must be selected.');
         if (!GPU_LOCATIONS.includes(effectiveRegion))
           throw new Error(`GPU VMs are only available in ${GPU_LOCATIONS.join(' and ')} (selected: ${effectiveRegion || 'unknown'}).`);
         const tpl = await ionosGet(`/templates/${encodeURIComponent(gpuTemplateId)}`, ionosToken);
         gpuCount = GPU_TEMPLATE_GPUS[tpl.properties?.name] || 0;
+        templateNameForType = tpl.properties?.name;
         if (!gpuCount) throw new Error(`Template ${gpuTemplateId} (${tpl.properties?.name}) is not an H200 GPU template.`);
         cores = tpl.properties.cores;
         ramMB = tpl.properties.ram;
@@ -2893,6 +2911,7 @@ echo "ALT_WRITE_OK"
         cores         = tpl.properties.cores;
         ramMB         = tpl.properties.ram;
         cubeStorageGB = tpl.properties.storageSize;
+        templateNameForType = tpl.properties?.name;
       }
 
       // providerSpec raw value — serialised into the MachineSet spec.
@@ -2906,6 +2925,7 @@ echo "ALT_WRITE_OK"
         ram:               ramMB,
         ...(isVcpu || isGpu || isCube ? {} : { cpuFamily: cpuFam }),
         serverType:        srvType,
+        instanceType:      ionosInstanceType(srvType, cores, ramMB, templateNameForType),
         ...(isGpu ? { templateUuid: gpuTemplateId } : isCube ? { templateUuid: cubeTemplateId } : {}),
         ...(effectiveRegion ? { region: effectiveRegion } : {}),
         availabilityZone:  az,
