@@ -1271,8 +1271,9 @@ app.post('/api/control-plane/status', async (req, res) => {
       } catch (_) { storage = null; }
     }
     const cpms = await cpCpmsState(ctx);
+    const mhc  = await cpMhcState(ctx);
     let infraId = ''; try { infraId = await clusterInfraId(ctx.apiUrl, ctx.token); } catch (_) {}
-    res.json({ ...g, checks: checks.items, canAdd: checks.canAdd, masterImages: checks.images.images, nlb, storage, sets: CP_SETS, maxMembers: CP_MAX_MEMBERS, cpms, infraId });
+    res.json({ ...g, checks: checks.items, canAdd: checks.canAdd, masterImages: checks.images.images, nlb, storage, sets: CP_SETS, maxMembers: CP_MAX_MEMBERS, cpms, mhc, infraId });
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
@@ -1689,6 +1690,44 @@ async function cpCpmsState(ctx) {
   } catch (e) { return e.status === 404 ? { exists: false } : { exists: false, error: e.message }; }
 }
 
+// ── Control-plane MachineHealthCheck ─────────────────────────────────────────────────────────────────────────────────
+// Red Hat's recommended check for control-plane Machines (the console warns "Health checks are not configured" without it):
+// a master whose node is NotReady/Unknown for 5 minutes is deleted so the ControlPlaneMachineSet replaces it (the etcd hook
+// keeps quorum), and at most ONE machine is remediated at a time (maxUnhealthy 1 - with 3 members, a second failure is left alone).
+const CP_MHC_NAME = 'control-plane-health-check';
+const CP_MHC      = `/apis/machine.openshift.io/v1beta1/namespaces/${MAPI_NS}/machinehealthchecks`;
+async function cpMhcState(ctx) {
+  try {
+    const m = await ocpGet(ctx.apiUrl, `${CP_MHC}/${CP_MHC_NAME}`, ctx.token);
+    return { exists: true, name: CP_MHC_NAME, expected: m.status?.expectedMachines, healthy: m.status?.currentHealthy, maxUnhealthy: m.spec?.maxUnhealthy };
+  } catch (e) { return e.status === 404 ? { exists: false } : { exists: false, error: e.message }; }
+}
+async function cpEnsureMhc(ctx) {
+  const body = {
+    apiVersion: 'machine.openshift.io/v1beta1', kind: 'MachineHealthCheck',
+    metadata: { name: CP_MHC_NAME, namespace: MAPI_NS },
+    spec: {
+      selector: { matchLabels: { 'machine.openshift.io/cluster-api-machine-role': 'master' } },
+      unhealthyConditions: [ { type: 'Ready', status: 'Unknown', timeout: '300s' }, { type: 'Ready', status: 'False', timeout: '300s' } ],
+      maxUnhealthy: 1,
+      nodeStartupTimeout: '20m',
+    },
+  };
+  await ocpApplyObj(ctx.apiUrl, ctx.token, CP_MHC, CP_MHC_NAME, body);
+  return cpMhcState(ctx);
+}
+// Create / refresh the control-plane health check (idempotent).
+app.post('/api/control-plane/health-check', async (req, res) => {
+  const b = req.body || {};
+  if (!b.clusterApiUrl || !b.ocpToken) return res.status(400).json({ error: 'clusterApiUrl and ocpToken are required.' });
+  try {
+    const ctx = postUpgradeCtx(b);
+    const g = await cpGather(ctx);
+    if (!g.masterMachines.length) return res.status(409).json({ error: 'The control-plane nodes have no Machine objects yet, so there is nothing for a health check to watch. Build the indexed control plane and activate the ControlPlaneMachineSet first.' });
+    res.json({ ok: true, mhc: await cpEnsureMhc(ctx) });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
 // Create the ControlPlaneMachineSet "cluster" (Active) from the three indexed machines. Refuses unless it is safe:
 // exactly the three indexed machines, all Running with Ready nodes, no control-plane node without a Machine.
 app.post('/api/control-plane/activate-cpms', async (req, res) => {
@@ -1727,8 +1766,11 @@ app.post('/api/control-plane/activate-cpms', async (req, res) => {
           spec: { metadata: m0.spec?.metadata || {}, providerSpec: { value: ps } } } } },
     };
     await ocpApplyObj(ctx.apiUrl, ctx.token, CP_CPMS, 'cluster', cpms);
+    // a ControlPlaneMachineSet without a health check never replaces a node that has died: create it with the CPMS
+    let mhc = null, mhcError = null;
+    try { mhc = await cpEnsureMhc(ctx); } catch (e) { mhcError = e.message; }
     await new Promise(r => setTimeout(r, 45000));
-    res.json({ ok: true, strategy, cpms: await cpCpmsState(ctx) });
+    res.json({ ok: true, strategy, cpms: await cpCpmsState(ctx), mhc, mhcError });
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
 

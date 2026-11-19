@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.22.0</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.22.1</span>
   </div>
 
   <div class="banner-actions">
@@ -1818,6 +1818,16 @@
       </button>
     </div>
     <div id="cp-cpms-result" style="font-size:0.85rem;margin-top:0.8rem"></div>
+    <div style="border-top:1px solid #1e3a5f;margin-top:1rem;padding-top:0.9rem">
+      <div style="font-weight:600;font-size:0.88rem;margin-bottom:0.3rem">Control-plane health check</div>
+      <p style="font-size:0.8rem;color:#64748b;margin:0 0 0.6rem">A MachineHealthCheck on the control-plane Machines (Red Hat&rsquo;s recommended settings: node NotReady or Unknown for 5 minutes, at most 1 machine remediated at a time). Without it the console reports &ldquo;Health checks are not configured&rdquo; and a dead master is never replaced. It is created automatically when the ControlPlaneMachineSet is activated.</p>
+      <div id="cp-mhc-state" style="font-size:0.85rem;color:#94a3b8;margin-bottom:0.6rem">Run &ldquo;Check readiness&rdquo; to see its state.</div>
+      <button id="cp-mhc-btn" onclick="cpEnsureMhc()"
+        style="background:#14532d;color:#86efac;border:1px solid #166534;border-radius:6px;padding:0.4rem 1.1rem;font-size:0.85rem;font-weight:600;cursor:pointer">
+        Create / refresh health check
+      </button>
+      <div id="cp-mhc-result" style="font-size:0.85rem;margin-top:0.6rem"></div>
+    </div>
   </div>
 
   <!-- ── Control Plane: retire (dry run) ───────────────────────────────────── -->
@@ -2990,7 +3000,7 @@
   }
 
   function cpRender(d) {
-    cpRenderCpms(d);
+    cpRenderCpms(d); cpRenderMhc(d);
     const out = document.getElementById('cp-status-result');
     const icon = { ok: ['&#10003;', '#6ee7b7'], warn: ['&#9888;', '#fbbf24'], block: ['&#10007;', '#f87171'] };
     const rows = d.masters.map(m => `<tr>
@@ -3177,6 +3187,26 @@
       (c.conditions || []).map(x => `<div style="font-size:0.78rem;color:${x.type === 'Degraded' && x.status === 'True' ? '#f87171' : '#64748b'}">${escHtml(x.type)}=${escHtml(x.status)} ${escHtml(x.reason || '')} ${escHtml(x.message || '')}</div>`).join('');
   }
 
+  function cpRenderMhc(d) {
+    const el = document.getElementById('cp-mhc-state');
+    if (!el) return;
+    const m = d.mhc || {};
+    el.innerHTML = m.exists
+      ? `<strong style="color:#6ee7b7">control-plane-health-check</strong> &middot; healthy ${m.healthy ?? '-'} / ${m.expected ?? '-'} machines &middot; maxUnhealthy ${escHtml(String(m.maxUnhealthy ?? ''))}`
+      : '<span style="color:#fbbf24">&#9888; Not configured</span>' + (m.error ? ' &mdash; ' + escHtml(m.error) : '');
+  }
+
+  async function cpEnsureMhc() {
+    const out = document.getElementById('cp-mhc-result');
+    if (cpNeedConnection(out)) return;
+    out.innerHTML = '<div style="color:#64748b">Applying&hellip;</div>';
+    try {
+      const d = await apiPost('/api/control-plane/health-check', cpBody({}));
+      out.innerHTML = '<div style="color:#6ee7b7">&#10003; Health check in place.</div>';
+      cpRenderMhc(d);
+    } catch (e) { out.innerHTML = '<div style="color:#f87171">' + escHtml(e.message) + '</div>'; }
+  }
+
   async function cpActivateCpms() {
     const out = document.getElementById('cp-cpms-result');
     if (cpNeedConnection(out)) return;
@@ -3185,7 +3215,7 @@
     out.innerHTML = '<div style="color:#64748b">Activating&hellip; (about a minute)</div>';
     try {
       const d = await apiPost('/api/control-plane/activate-cpms', cpBody({ strategy }));
-      out.innerHTML = '<div style="color:#6ee7b7">&#10003; Activated.</div>';
+      out.innerHTML = '<div style="color:#6ee7b7">&#10003; Activated.' + (d.mhc && d.mhc.exists ? ' Control-plane health check created.' : '') + '</div>' + (d.mhcError ? '<div style="color:#fbbf24">Health check not created: ' + escHtml(d.mhcError) + ' &mdash; use Create / refresh health check below.</div>' : '');
       cpStatus();
     } catch (e) { out.innerHTML = '<div style="color:#f87171">' + escHtml(e.message) + '</div>'; }
   }
