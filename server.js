@@ -6105,6 +6105,11 @@ function makeSseHelpers(res) {
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection',    'keep-alive');
   res.flushHeaders();
+  // A proxy in front of the app drops a stream that stays silent for a minute or so (dnf, downloads and ISO generation print
+  // nothing for that long), which the wizard shows as an error while the work carries on. A comment line every 15 s prevents it.
+  const keepAlive = setInterval(() => { try { res.write(': keepalive\n\n'); } catch (_) {} }, 15000);
+  res.on('close', () => clearInterval(keepAlive));
+  res.on('finish', () => clearInterval(keepAlive));
   const emit = obj             => res.write(`data: ${JSON.stringify(obj)}\n\n`);
   const step = (label, status) => emit({ type: 'step', label, status });
   const log  = text            => emit({ type: 'log',  text });
