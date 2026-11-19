@@ -6043,6 +6043,13 @@ function makeIsoDetacher(cpDetails, dcId, ionosToken, log) {
           log(`  [wizard] Detached install ISO from ${nm}\n`);
           await ionosWaitAvailable(`/datacenters/${dcId}`, ionosToken, 300000).catch(() => {});
         }
+        // Phase E made the CD-ROM the boot device; give the node its disk back so the next boot comes from the installed image.
+        const vols = await ionosGet(`/datacenters/${dcId}/servers/${cp.id}/volumes?depth=1`, ionosToken);
+        const vol = (vols.items || [])[0];
+        if (vol) {
+          await ionosPatch(`/datacenters/${dcId}/servers/${cp.id}`, ionosToken, { bootVolume: { id: vol.id } });
+          log(`  [wizard] ${nm}: boot device set back to its disk\n`);
+        }
       }
       if (alsoReboot && !rebooted.has(nm)) {
         rebooted.add(nm);
@@ -7081,6 +7088,13 @@ app.post('/api/new-cluster/attach-boot', async (req, res) => {
       await ionosPost(`/datacenters/${dcId}/servers/${cp.id}/cdroms`, ionosToken, { id: isoImageId });
       log(`  Attached ISO to ${cp.name} (${cp.id})\n`);
     }
+    // The ISO must be the boot device. A disk that already holds an earlier install would otherwise win and the node would
+    // loop on Ignition (ocp3 retry). The ISO detach in makeIsoDetacher sets the disk back as the boot device.
+    for (const cp of cpDetails) {
+      await ionosPatch(`/datacenters/${dcId}/servers/${cp.id}`, ionosToken, { bootCdrom: { id: isoImageId } });
+      log(`  ${cp.name}: boot device set to the ISO\n`);
+    }
+    await ionosWaitAvailable(`/datacenters/${dcId}`, ionosToken, 300000).catch(() => {});
     step('Attach agent ISO to control plane VMs (CD-ROM)', 'done');
 
     // NOTE: the guide (6.4.8) keeps the ISO attached but non-bootable with the SSD as boot device. On these
