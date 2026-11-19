@@ -3815,7 +3815,7 @@ app.post('/api/ionos/location-cpu-families', async (req, res) => {
   try {
     const data = await ionosGet(`/locations/${location}?depth=1`, ionosToken);
     const names = (data?.properties?.cpuArchitecture || []).map(arch => arch.cpuFamily).filter(Boolean);
-    const { order, legacy } = rankCpuFamilies(names);
+    const { order, legacy } = rankCpuFamilies(orderableCpuFamilies(location, names));
     res.json({ cpuFamilies: order, legacy: [...legacy] });
   } catch (err) {
     res.status(err.status || 502).json({ error: err.message });
@@ -6094,6 +6094,7 @@ const CPU_FAMILY_DEFAULTS = {
   'de/fra/2': [{ family: 'AMD_EPYC' }, { family: 'INTEL_SIERRAFOREST' }, { family: 'AMD_TURIN' }],
   'de/txl':   [{ family: 'AMD_EPYC' }, { family: 'INTEL_XEON' }],
   'gb/lhr':   [{ family: 'AMD_EPYC' }, { family: 'INTEL_XEON' }],
+  'gb/bhx':   [{ family: 'AMD_EPYC' }, { family: 'INTEL_ICELAKE' }],
   'us/las':   [{ family: 'AMD_EPYC' }, { family: 'INTEL_XEON' }],
   'us/ewr':   [{ family: 'AMD_EPYC' }, { family: 'INTEL_XEON' }],
   'es/vit':   [{ family: 'AMD_EPYC' }, { family: 'INTEL_XEON' }],
@@ -6110,6 +6111,15 @@ const CPU_FAMILY_DEFAULTS = {
 // legacy ones and sort them last, so callers default to a family that can really be ordered.
 const LEGACY_CPU_FAMILIES = ['AMD_EPYC', 'AMD_OPTERON', 'INTEL_XEON', 'INTEL_SKYLAKE', 'INTEL_ICELAKE'];
 const MODERN_CPU_FAMILIES = ['INTEL_SIERRAFOREST', 'AMD_TURIN'];
+// The Locations API also lists families a site does not actually offer (gb/bhx lists AMD_TURIN, but Worcester only has
+// AMD EPYC Milan and Intel Ice Lake). Where a site's real hardware is known, only those families are offered.
+const ORDERABLE_CPU_FAMILIES = { 'gb/bhx': ['AMD_EPYC', 'INTEL_ICELAKE'] };
+function orderableCpuFamilies(location, names) {
+  const only = ORDERABLE_CPU_FAMILIES[location];
+  if (!only) return names;
+  const f = names.filter(n => only.includes(n));
+  return f.length ? f : names;
+}
 function rankCpuFamilies(names) {
   const hasModern = names.some(n => MODERN_CPU_FAMILIES.includes(n));
   const legacy = new Set(hasModern ? names.filter(n => LEGACY_CPU_FAMILIES.includes(n)) : []);
@@ -6122,7 +6132,7 @@ async function resolveCpuFamiliesForLocation(location, token) {
     const data  = await ionosGet(`/locations/${location}`, token);
     const archs = data?.properties?.cpuArchitecture || [];
     if (archs.length > 0) {
-      const { order, legacy } = rankCpuFamilies(archs.map(a => a.cpuFamily));
+      const { order, legacy } = rankCpuFamilies(orderableCpuFamilies(location, archs.map(a => a.cpuFamily)));
       return {
         families: order.map(name => { const a = archs.find(x => x.cpuFamily === name);
           return {

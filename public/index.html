@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.21.0</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.21.2</span>
   </div>
 
   <div class="banner-actions">
@@ -1271,7 +1271,7 @@
         <div class="form-group" id="as-ionos-cpu-family-group">
           <label for="as-ionos-cpu-family">CPU Family</label>
           <select id="as-ionos-cpu-family">
-            <option value="INTEL_ICELAKE" selected>Intel Icelake</option>
+            <option value="INTEL_ICELAKE" selected>Intel Ice Lake</option>
           </select>
           <div class="field-note">Available CPU architectures for this datacenter location</div>
         </div>
@@ -2218,6 +2218,7 @@
                 <option value="de/fra">Frankfurt (de/fra)</option>
                 <option value="de/txl">Berlin (de/txl)</option>
                 <option value="gb/lhr">London (gb/lhr)</option>
+                <option value="gb/bhx">Worcester (gb/bhx)</option>
                 <option value="us/las">Las Vegas (us/las)</option>
                 <option value="us/ewr">Newark (us/ewr)</option>
                 <option value="es/vit">Spain (es/vit)</option>
@@ -2261,9 +2262,10 @@
               <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.75rem">
                 <label style="font-size:0.85rem;color:#94a3b8;white-space:nowrap">CPU Family</label>
                 <select id="ncw-cp-cpu-family" style="flex:1;background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.45rem 0.75rem;font-size:0.85rem">
-                  <option value="AMD_EPYC">AMD_EPYC</option>
-                  <option value="AMD_TURIN">AMD_TURIN (Frankfurt only)</option>
-                  <option value="INTEL_XEON">INTEL_XEON</option>
+                  <option value="AMD_EPYC">AMD EPYC (Milan)</option>
+                  <option value="AMD_TURIN">AMD EPYC Turin (Frankfurt only)</option>
+                  <option value="INTEL_ICELAKE">Intel Ice Lake</option>
+                  <option value="INTEL_XEON">Intel Xeon</option>
                 </select>
                 <button id="ncw-cpu-family-refresh" type="button" onclick="ncwLoadCpuFamilies()"
                   style="background:#1e3a5f;border:1px solid #2d5a8e;color:#e2e8f0;border-radius:6px;padding:0.45rem 0.8rem;font-size:0.82rem;cursor:pointer;white-space:nowrap">
@@ -3677,12 +3679,13 @@
   // ── Dynamic CPU family loader ──────────────────────────────────────────────
   // Map IONOS API cpuFamily strings to human-readable labels
   const CPU_FAMILY_LABELS = {
-    INTEL_ICELAKE:       'Intel Icelake',
+    INTEL_ICELAKE:       'Intel Ice Lake',
     INTEL_SKYLAKE:       'Intel Skylake',
     INTEL_XEON:          'Intel Xeon',
     INTEL_SIERRAFOREST:  'Intel Sierra Forest',
     AMD_OPTERON:         'AMD Opteron',
-    AMD_EPYC:            'AMD EPYC',
+    AMD_EPYC:            'AMD EPYC (Milan)',
+    AMD_TURIN:           'AMD EPYC Turin',
   };
 
   async function loadIonosCpuFamilies() {
@@ -3708,7 +3711,7 @@
       // (this used to pick Icelake whenever it was offered, which is the legacy family at de/fra/2).
       if (!sel.value) sel.value = families[0];
     } catch (_) {
-      sel.innerHTML = '<option value="INTEL_ICELAKE">Intel Icelake (default)</option>';
+      sel.innerHTML = '<option value="INTEL_ICELAKE">Intel Ice Lake (default)</option>';
     }
   }
 
@@ -6220,7 +6223,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
       if (families && families.length > 0) {
         const prev = sel.value;
         sel.innerHTML = families.map(f => {
-          const label = (f.maxCores ? `${f.family}  (max ${f.maxCores}C / ${f.maxRamGB} GB)` : f.family) + (f.legacy ? '  - legacy, may not be orderable' : '');
+          const label = (CPU_FAMILY_LABELS[f.family] || f.family) + (f.maxCores ? `  (max ${f.maxCores}C / ${f.maxRamGB} GB)` : '') + (f.legacy ? '  - legacy, may not be orderable' : '');
           return `<option value="${escHtml(f.family)}">${escHtml(label)}</option>`;
         }).join('');
         // the list is sorted modern-first; keep the user's choice if it is still offered, otherwise the first (modern) one
