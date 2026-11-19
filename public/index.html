@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.22.4</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.22.5</span>
   </div>
 
   <div class="banner-actions">
@@ -2403,6 +2403,9 @@
             <div style="font-size:0.85rem;color:#cbd5e1;margin-bottom:0.4rem">Don&rsquo;t have keys? Paste yours above, or generate two fresh ed25519 key pairs (management VM and nodes).</div>
             <button type="button" id="ncw-gen-keys-btn" onclick="ncwGenerateKeys()"
               style="background:#1e3a5f;border:1px solid #2d5a8e;color:#e2e8f0;border-radius:6px;padding:0.45rem 1rem;font-size:0.85rem;font-weight:600;cursor:pointer">&#128273; Generate fresh key pairs</button>
+            <button type="button" onclick="ncwDownloadEnv()" title="Writes the keys above into the .env you loaded (or a new one) and downloads it"
+              style="background:#14532d;border:1px solid #166534;color:#86efac;border-radius:6px;padding:0.45rem 1rem;font-size:0.85rem;font-weight:600;cursor:pointer;margin-left:0.5rem">&#11015; Download .env with these keys</button>
+            <div style="font-size:0.75rem;color:#64748b;margin-top:0.4rem">Adds the keys to the .env you loaded (existing key entries are replaced) so next time you can just Load .env file. The file contains private keys &mdash; keep it private (it is gitignored here).</div>
             <div id="ncw-gen-keys-result" style="font-size:0.8rem;margin-top:0.6rem"></div>
           </div>
         </div>
@@ -6361,6 +6364,46 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
         `<button type="button" style="${lnk}" onclick="ncwDownloadKey('ocp')">Download node (core) private key</button>`;
     } catch (e) { out.innerHTML = '<span style="color:#f87171">' + escHtml(e.message) + '</span>'; }
     finally { btn.disabled = false; }
+  }
+
+  // Put the SSH keys into the .env that was loaded (replacing any existing entries for them) and download it, so the next
+  // install can simply Load .env file. Private keys are written on one line with backslash-n escapes, which the loader reads back.
+  function ncwEnvWithKeys() {
+    const val = id => document.getElementById(id).value.trim();
+    const oneLine = k => k.trim().split(/\r?\n/).map(x => x.trim()).join('\\n');
+    const ocpPub = val('ncw-ocp-ssh-pub'), mgmtPub = val('ncw-mgmt-ssh-pub') || ocpPub, mgmtPriv = val('ncw-mgmt-ssh-priv');
+    const ocpPriv = ncwGeneratedKeys ? ncwGeneratedKeys.ocp.private : '';
+    const set = new Map();
+    if (mgmtPriv) set.set('OCP_MGMT_HOST_SSH_KEY', oneLine(mgmtPriv));
+    if (ocpPriv)  set.set('OCP_WORKER_SSH_KEY', oneLine(ocpPriv));
+    if (mgmtPub)  set.set('NCW_MGMT_SSH_PUBKEY', mgmtPub);
+    if (ocpPub)   set.set('NCW_OCP_SSH_PUBKEY', ocpPub);
+    const src = (ncwUploadedEnvText || '').split(/\r?\n/);
+    const isEnd = l => /-----END [A-Z ]*PRIVATE KEY-----/.test(l);
+    const out = [], done = new Set();
+    for (let i = 0; i < src.length; i++) {
+      const m = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/.exec(src[i]);
+      if (!m || !set.has(m[1])) { out.push(src[i]); continue; }
+      // skip the old value, including a multi-line private-key block
+      let v = m[2].trim();
+      if (!v && /^\s*["']?-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(src[i + 1] || '')) { i++; v = src[i]; }
+      if (/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(v) && !isEnd(v)) { while (i + 1 < src.length && !isEnd(src[i])) i++; }
+      if (!done.has(m[1])) { out.push(m[1] + '=' + set.get(m[1])); done.add(m[1]); }
+    }
+    const missing = [...set.keys()].filter(k => !done.has(k));
+    if (missing.length) {
+      if (out.length && out[out.length - 1].trim()) out.push('');
+      out.push('# -- SSH keys (added by the Install wizard) --');
+      missing.forEach(k => out.push(k + '=' + set.get(k)));
+    }
+    return out.join('\n').replace(/\n+$/, '') + '\n';
+  }
+  function ncwDownloadEnv() {
+    if (!document.getElementById('ncw-mgmt-ssh-priv').value.trim() && !document.getElementById('ncw-ocp-ssh-pub').value.trim()) { alert('Enter or generate the SSH keys first.'); return; }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([ncwEnvWithKeys()], { type: 'text/plain' }));
+    a.download = '.env.' + (document.getElementById('ncw-cluster-name').value.trim() || 'cluster');
+    document.body.appendChild(a); a.click(); a.remove();
   }
 
   // Worker type (Cube / vCPU / Dedicated Core): the template and CPU-family lists are the control plane's, copied across
