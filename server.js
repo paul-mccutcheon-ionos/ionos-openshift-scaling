@@ -1696,13 +1696,46 @@ async function cpCpmsState(ctx) {
 // keeps quorum), and at most ONE machine is remediated at a time (maxUnhealthy 1 - with 3 members, a second failure is left alone).
 const CP_MHC_NAME = 'control-plane-health-check';
 const CP_MHC      = `/apis/machine.openshift.io/v1beta1/namespaces/${MAPI_NS}/machinehealthchecks`;
+// On platform External the machine-api-operator does not start the machine-api-controllers pod, so nothing acts on a
+// MachineHealthCheck: its status stays empty and no unhealthy machine is ever remediated. The upstream controller is in the
+// machine-api-operator image (/machine-healthcheck), so run it ourselves, using the service account and ClusterRole the
+// operator already creates for the other machine controllers.
+const MHC_CONTROLLER = 'machine-healthcheck-controller';
+const MAPI_DEPLOYMENTS = `/apis/apps/v1/namespaces/${MAPI_NS}/deployments`;
+async function mhcEnsureController(ctx) {
+  const mao = await ocpGet(ctx.apiUrl, `${MAPI_DEPLOYMENTS}/machine-api-operator`, ctx.token);
+  const image = (mao.spec?.template?.spec?.containers || []).find(c => c.name === 'machine-api-operator')?.image;
+  if (!image) throw new Error('could not find the machine-api-operator image to run the health-check controller from');
+  const labels = { 'app.kubernetes.io/name': MHC_CONTROLLER };
+  const dep = {
+    apiVersion: 'apps/v1', kind: 'Deployment',
+    metadata: { name: MHC_CONTROLLER, namespace: MAPI_NS, labels: { ...labels, 'app.kubernetes.io/managed-by': 'ionos-openshift-scaling' } },
+    spec: { replicas: 1, selector: { matchLabels: labels },
+      template: { metadata: { labels }, spec: {
+        serviceAccountName: 'machine-api-controllers',
+        priorityClassName: 'system-node-critical',
+        nodeSelector: { 'node-role.kubernetes.io/control-plane': '' },
+        tolerations: [
+          { key: 'node-role.kubernetes.io/master', effect: 'NoSchedule', operator: 'Exists' },
+          { key: 'node.kubernetes.io/not-ready', effect: 'NoExecute', operator: 'Exists', tolerationSeconds: 120 },
+          { key: 'node.kubernetes.io/unreachable', effect: 'NoExecute', operator: 'Exists', tolerationSeconds: 120 } ],
+        containers: [{ name: MHC_CONTROLLER, image, command: ['/machine-healthcheck'],
+          args: ['--namespace=' + MAPI_NS, '--leader-elect', '--leader-elect-resource-namespace=' + MAPI_NS, '--health-addr=:9442', '--metrics-bind-address=:8083'],
+          resources: { requests: { cpu: '10m', memory: '20Mi' } },
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'] }, runAsNonRoot: true, seccompProfile: { type: 'RuntimeDefault' } } }] } } },
+  };
+  await ocpApplyObj(ctx.apiUrl, ctx.token, MAPI_DEPLOYMENTS, MHC_CONTROLLER, dep);
+}
 async function cpMhcState(ctx) {
+  let controller = false;
+  try { controller = ((await ocpGet(ctx.apiUrl, `${MAPI_DEPLOYMENTS}/${MHC_CONTROLLER}`, ctx.token)).status?.readyReplicas || 0) > 0; } catch (_) {}
   try {
     const m = await ocpGet(ctx.apiUrl, `${CP_MHC}/${CP_MHC_NAME}`, ctx.token);
-    return { exists: true, name: CP_MHC_NAME, expected: m.status?.expectedMachines, healthy: m.status?.currentHealthy, maxUnhealthy: m.spec?.maxUnhealthy };
-  } catch (e) { return e.status === 404 ? { exists: false } : { exists: false, error: e.message }; }
+    return { exists: true, controller, name: CP_MHC_NAME, expected: m.status?.expectedMachines, healthy: m.status?.currentHealthy, maxUnhealthy: m.spec?.maxUnhealthy };
+  } catch (e) { return e.status === 404 ? { exists: false, controller } : { exists: false, controller, error: e.message }; }
 }
 async function cpEnsureMhc(ctx) {
+  await mhcEnsureController(ctx);
   const body = {
     apiVersion: 'machine.openshift.io/v1beta1', kind: 'MachineHealthCheck',
     metadata: { name: CP_MHC_NAME, namespace: MAPI_NS },
@@ -5912,6 +5945,7 @@ app.post('/api/mhc-apply', async (req, res) => {
   };
   const base = `${clusterApiUrl}/apis/machine.openshift.io/v1beta1/namespaces/openshift-machine-api/machinehealthchecks`;
   try {
+    try { await mhcEnsureController({ apiUrl: clusterApiUrl, token: ocpToken }); } catch (e) { console.error('mhc controller:', e.message); }
     // Try PATCH first (update existing), fall back to POST (create new)
     const patchR = await fetch(`${base}/${encodeURIComponent(name)}`, {
       method: 'PATCH',
