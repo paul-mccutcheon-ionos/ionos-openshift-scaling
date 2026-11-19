@@ -435,6 +435,7 @@ const PROVIDER_CLUSTERROLE_RULES = [
 
 const APPROVER_CLUSTERROLE_RULES = [
   { apiGroups: ['certificates.k8s.io'], resources: ['certificatesigningrequests'],           verbs: ['get','list','watch'] },
+  { apiGroups: ['machine.openshift.io'], resources: ['machines'],                              verbs: ['get','list'] },
   { apiGroups: ['certificates.k8s.io'], resources: ['certificatesigningrequests/approval'],  verbs: ['update','patch'] },
   { apiGroups: ['certificates.k8s.io'], resources: ['signers'],
     resourceNames: ['kubernetes.io/kube-apiserver-client-kubelet','kubernetes.io/kubelet-serving'],
@@ -449,13 +450,28 @@ const APPROVER_FALLBACK_IMAGE = 'quay.io/openshift-release-dev/ocp-v4.0-art-dev@
 // (not discarded). The cluster's own `oc` image is used because an unpinned bitnami/kubectl:latest
 // moved to kubectl v1.37 and wedged/failed against OCP 4.19 / Kubernetes 1.32.
 const APPROVER_SCRIPT = [
-  'echo "ionos-machine-auto-approver started"',
+  'echo "ionos-machine-auto-approver started - approves only CSRs that belong to a known Machine"',
+  'BOOT=system:serviceaccount:openshift-machine-config-operator:node-bootstrapper',
   'while true; do',
-  '  OUT=$(oc get csr --request-timeout=30s --no-headers 2>&1) || echo "list failed: $OUT"',
-  '  echo "$OUT" | while read name age signer requestor dur cond; do',
-  '    if [ "$cond" = "Pending" ]; then',
-  '      echo "Approving CSR: $name"',
+  '  M=$(oc -n openshift-machine-api get machines --request-timeout=30s --no-headers -o custom-columns=NAME:.metadata.name,NODE:.status.nodeRef.name 2>&1) || { echo "machine list failed: $M"; sleep 30; continue; }',
+  // names a node may use: the Machine name and the node it is linked to
+  `  KNOWN=$(echo "$M" | awk '{print $1; if ($2 != "<none>") print $2}')`,
+  // a new node's first (client) CSR comes from the node-bootstrapper before the Machine knows its node
+  `  WAITING=$(echo "$M" | awk '$2 == "<none>"' | wc -l)`,
+  '  OUT=$(oc get csr --request-timeout=30s --no-headers -o custom-columns=NAME:.metadata.name,USER:.spec.username,SIGNER:.spec.signerName,COND:.status.conditions[0].type 2>&1) || echo "list failed: $OUT"',
+  '  echo "$OUT" | while read name user signer cond; do',
+  '    [ "$cond" = "<none>" ] || continue',
+  '    case "$signer" in kubernetes.io/kube-apiserver-client-kubelet|kubernetes.io/kubelet-serving) ;; *) echo "Not approving $name: signer $signer"; continue;; esac',
+  '    ok=0',
+  '    case "$user" in',
+  '      "$BOOT") [ "$WAITING" -gt 0 ] && ok=1 ;;',
+  '      system:node:*) echo "$KNOWN" | grep -qxF "${user#system:node:}" && ok=1 ;;',
+  '    esac',
+  '    if [ "$ok" = "1" ]; then',
+  '      echo "Approving CSR: $name ($user)"',
   '      oc adm certificate approve "$name" --request-timeout=30s 2>&1 || true',
+  '    else',
+  '      echo "Not approving $name: requestor $user is not a known machine/node"',
   '    fi',
   '  done',
   '  sleep 30',
@@ -464,7 +480,8 @@ const APPROVER_SCRIPT = [
 
 // 50m CPU / 64Mi was far too small: API discovery (264 resources on OCP 4.19) was CPU-throttled
 // ~89% of the time and the loop wedged.
-const APPROVER_RESOURCES = { requests: { cpu: '50m', memory: '64Mi' }, limits: { cpu: '500m', memory: '256Mi' } };
+// No limits: OPCT's "should set requests but not limits" check (platform namespaces) rejects them.
+const APPROVER_RESOURCES = { requests: { cpu: '50m', memory: '64Mi' } };
 
 function buildApproverDeployment(image) {
   return {
@@ -706,7 +723,7 @@ const POST_UPGRADE_STEPS = [
       const issues = [];
       if (c.image !== want) issues.push(`image ${(c.image || '').slice(0, 60)}… ≠ cluster cli image`);
       if ((c.args || [])[0] !== APPROVER_SCRIPT) issues.push('script differs (no request timeouts / error logging)');
-      if (c.resources?.limits?.cpu !== APPROVER_RESOURCES.limits.cpu) issues.push(`CPU limit ${c.resources?.limits?.cpu || 'none'} (needs ${APPROVER_RESOURCES.limits.cpu})`);
+      if (c.resources?.limits) issues.push('resource limits set (OPCT requires requests only)');
       if ((dep.status?.readyReplicas || 0) < 1) issues.push('no ready replica');
       const note = ctx.cliImage ? '' : ' (cluster cli ImageStream unreadable — image check is best-effort)';
       return issues.length ? { status: 'drift', detail: issues.join('; ') + note }
@@ -2154,7 +2171,7 @@ app.post('/api/deploy-provider', async (req, res) => {
         ports: [{ name: 'metrics', containerPort: 8080 }, { name: 'healthz', containerPort: 8081 }],
         livenessProbe:  { httpGet: { path: '/healthz', port: 'healthz' }, initialDelaySeconds: 15, periodSeconds: 20 },
         readinessProbe: { httpGet: { path: '/readyz',  port: 'healthz' }, initialDelaySeconds: 5,  periodSeconds: 10 },
-        resources: { requests: { cpu: '50m', memory: '64Mi' }, limits: { cpu: '200m', memory: '128Mi' } },
+        resources: { requests: { cpu: '50m', memory: '64Mi' } },
         securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ['ALL'] } }
       }],
       securityContext: { runAsNonRoot: true, seccompProfile: { type: 'RuntimeDefault' } },
@@ -2435,10 +2452,7 @@ app.post('/api/setup-autoscaler', async (req, res) => {
           ],
           livenessProbe:  { httpGet: { path: '/healthz', port: 'healthz' }, initialDelaySeconds: 15, periodSeconds: 20 },
           readinessProbe: { httpGet: { path: '/readyz',  port: 'healthz' }, initialDelaySeconds: 5,  periodSeconds: 10 },
-          resources: {
-            requests: { cpu: '50m', memory: '64Mi' },
-            limits:   { cpu: '200m', memory: '128Mi' }
-          },
+          resources: { requests: { cpu: '50m', memory: '64Mi' } },
           securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ['ALL'] } }
         }],
         securityContext: { runAsNonRoot: true, seccompProfile: { type: 'RuntimeDefault' } },
@@ -7440,23 +7454,134 @@ app.post('/api/compliance/preflight', async (req, res) => {
       items.push({ key: 'dedicated-node', label: 'A dedicated node is tainted for OPCT test workloads', status: 'error', detail: e.message });
     }
 
-    // 5. Kubeconfig on the management host is valid (requires SSH creds)
+    // 5. Cluster operators: opct's own preflight refuses to start unless every operator is Available, not Progressing, not Degraded
+    try {
+      const cos = (await ocpGet(apiUrl, '/apis/config.openshift.io/v1/clusteroperators', ocpToken)).items || [];
+      const cond = (c, t) => (c.status?.conditions || []).find(x => x.type === t)?.status;
+      const bad = cos.filter(c => cond(c, 'Available') !== 'True' || cond(c, 'Progressing') === 'True' || cond(c, 'Degraded') === 'True');
+      items.push({
+        key: 'operators', label: 'All cluster operators are Available, not Progressing, not Degraded',
+        status: cos.length && !bad.length ? 'pass' : 'fail',
+        detail: cos.length ? (bad.length ? `Not ready: ${bad.map(c => c.metadata.name).join(', ')}` : `${cos.length}/${cos.length} healthy`) : 'No cluster operators found'
+      });
+    } catch (e) {
+      items.push({ key: 'operators', label: 'All cluster operators are Available, not Progressing, not Degraded', status: 'error', detail: e.message });
+    }
+
+    // 6. Nodes Ready and schedulable; no stale autoscaler taint (it once left the ingress routers Pending)
+    try {
+      const nodes = (await ocpGet(apiUrl, '/api/v1/nodes', ocpToken)).items || [];
+      const notReady = nodes.filter(n => !(n.status?.conditions || []).some(c => c.type === 'Ready' && c.status === 'True'));
+      const cordoned = nodes.filter(n => n.spec?.unschedulable);
+      const problems = [
+        ...notReady.map(n => `${n.metadata.name} not Ready`),
+        ...cordoned.map(n => `${n.metadata.name} cordoned`)
+      ];
+      items.push({
+        key: 'nodes-ready', label: 'All nodes are Ready and schedulable',
+        status: nodes.length && !problems.length ? 'pass' : 'fail',
+        detail: problems.length ? problems.join(', ') : `${nodes.length} nodes Ready`
+      });
+      const stale = [];
+      for (const n of nodes) for (const t of n.spec?.taints || []) {
+        if (t.key === AUTOSCALER_TAINT || t.key === 'DeletionCandidateOfClusterAutoscaler') stale.push(`${n.metadata.name} (${t.key})`);
+      }
+      items.push({
+        key: 'stale-taints', label: 'No leftover cluster-autoscaler taints on nodes',
+        status: stale.length ? 'fail' : 'pass',
+        detail: stale.length ? stale.join(', ') : 'none'
+      });
+      const workers = nodes.filter(n => n.metadata?.labels?.['node-role.kubernetes.io/worker'] !== undefined);
+      const plain = workers.filter(n => !(n.spec?.taints || []).some(t => t.key === OPCT_TEST_LABEL));
+      items.push({
+        key: 'worker-capacity', label: 'At least two ordinary workers besides the dedicated test node',
+        status: plain.length >= 2 ? 'pass' : 'warn',
+        detail: `${plain.length} ordinary worker(s) + ${workers.length - plain.length} dedicated${plain.length < 2 ? ' - the ingress routers, registry and monitoring all compete for the remaining node' : ''}`
+      });
+    } catch (e) {
+      items.push({ key: 'nodes-ready', label: 'All nodes are Ready and schedulable', status: 'error', detail: e.message });
+    }
+
+    // 7. Ingress routers running (a Pending router makes the OPCT report's console/OAuth checks fail)
+    try {
+      const d = await ocpGet(apiUrl, '/apis/apps/v1/namespaces/openshift-ingress/deployments/router-default', ocpToken);
+      const want = d.spec?.replicas ?? 0, have = d.status?.readyReplicas ?? 0;
+      items.push({
+        key: 'ingress-routers', label: 'Ingress routers are all running',
+        status: want > 0 && want === have ? 'pass' : 'fail',
+        detail: `${have}/${want} router pods ready`
+      });
+    } catch (e) {
+      items.push({ key: 'ingress-routers', label: 'Ingress routers are all running', status: 'error', detail: e.message });
+    }
+
+    // 8. Leftovers from an earlier run. `opct run` refuses to start while the "opct" namespace exists
+    //    ("You must run 'destroy' to clean the environment") - the check that silently blocked ocp2.
+    let opctNs = [];
+    try {
+      const all = (await ocpGet(apiUrl, '/api/v1/namespaces', ocpToken)).items || [];
+      opctNs = all.map(n => n.metadata.name).filter(n => n === 'opct' || n === 'sonobuoy' || /^e2e-test-/.test(n));
+      let running = false, runDetail = '';
+      if (opctNs.includes('opct')) {
+        const pods = (await ocpGet(apiUrl, '/api/v1/namespaces/opct/pods', ocpToken)).items || [];
+        const suite = pods.filter(p => /sonobuoy/.test(p.metadata.name) || p.metadata.labels?.component === 'sonobuoy' || p.metadata.labels?.['sonobuoy-plugin']);
+        running = suite.some(p => ['Running', 'Pending'].includes(p.status?.phase));
+        runDetail = suite.map(p => `${p.metadata.name} ${p.status?.phase}`).join(', ');
+      }
+      if (running) {
+        items.push({ key: 'opct-running', label: 'No OPCT run is already in progress', status: 'fail', detail: `A run is active in the cluster (${runDetail}). Wait for it, or collect its results.` });
+      } else {
+        items.push({
+          key: 'opct-leftovers', label: 'No leftover OPCT / e2e namespaces from an earlier run',
+          status: opctNs.length ? 'fail' : 'pass',
+          detail: opctNs.length ? `Found: ${opctNs.join(', ')} - "opct run" refuses to start until "opct destroy" has cleaned these up` : 'clean'
+        });
+      }
+    } catch (e) {
+      items.push({ key: 'opct-leftovers', label: 'No leftover OPCT / e2e namespaces from an earlier run', status: 'error', detail: e.message });
+    }
+
+    // 9. The management host: opct present, kubeconfig valid AND pointing at this cluster, no opct run already running there
+    const kcPath = (req.body.kubeconfigPath || '/root/.kube/config').trim();
     if (mgmtHost && sshKey) {
       let conn;
       try {
         conn = await sshConnect(mgmtHost, 'root', sshKey, sshPassphrase);
-        const who = await sshRunScript(conn, `export KUBECONFIG=/root/.kube/config; oc whoami 2>&1`);
+        const out = await sshRunScript(conn, `export KUBECONFIG='${kcPath.replace(/'/g, "'\\''")}'
+echo "WHO=$(oc whoami 2>&1 | head -1)"
+echo "SERVER=$(oc whoami --show-server 2>&1 | head -1)"
+echo "OPCT=$(opct version 2>/dev/null | head -1 || true)"
+echo "PROCS=$(pgrep -f 'opct run' | wc -l)"`);
+        const get = k => (out.stdout.match(new RegExp('^' + k + '=(.*)$', 'm')) || [])[1]?.trim() || '';
+        const who = get('WHO'), server = get('SERVER');
+        const hostOf = u => { try { return new URL(u).host.toLowerCase(); } catch (_) { return String(u).toLowerCase(); } };
+        const loggedIn = who && !/error|unauthorized|must be logged|forbidden/i.test(who);
+        const sameCluster = loggedIn && hostOf(server) === hostOf(apiUrl);
         items.push({
-          key: 'kubeconfig', label: 'Management host kubeconfig is valid',
-          status: 'pass', detail: `Logged in as ${who.stdout.trim()}`
+          key: 'kubeconfig', label: 'Management host kubeconfig is valid and points at this cluster',
+          status: sameCluster ? 'pass' : 'fail',
+          detail: !loggedIn ? `Not logged in: ${who || 'no output'}`
+                : sameCluster ? `Logged in as ${who} on ${server}`
+                : `Logged in as ${who}, but on ${server} - this tool is connected to ${apiUrl}`
+        });
+        items.push({
+          key: 'opct-cli', label: 'opct CLI is installed on the management host',
+          status: get('OPCT') ? 'pass' : 'warn',
+          detail: get('OPCT') || 'not installed - Start will download it'
+        });
+        const procs = parseInt(get('PROCS'), 10) || 0;
+        items.push({
+          key: 'opct-process', label: 'No "opct run" process is already running on the management host',
+          status: procs > 0 ? 'fail' : 'pass',
+          detail: procs > 0 ? `${procs} running` : 'none'
         });
       } catch (e) {
-        items.push({ key: 'kubeconfig', label: 'Management host kubeconfig is valid', status: 'fail', detail: e.message });
+        items.push({ key: 'kubeconfig', label: 'Management host kubeconfig is valid and points at this cluster', status: 'fail', detail: e.message });
       } finally {
         if (conn) try { conn.end(); } catch (_) {}
       }
     } else {
-      items.push({ key: 'kubeconfig', label: 'Management host kubeconfig is valid', status: 'unknown', detail: 'Enter management host + SSH key above to check' });
+      items.push({ key: 'kubeconfig', label: 'Management host kubeconfig is valid and points at this cluster', status: 'unknown', detail: 'Enter management host + SSH key above to check' });
     }
 
     res.json({ items });
@@ -7631,6 +7756,68 @@ app.post('/api/compliance/preflight/fix-dedicated-node', async (req, res) => {
   }
 });
 
+// POST /api/compliance/preflight/fix-stale-taints — SSE. Removes the cluster autoscaler's leftover
+// taints (never the OPCT dedicated-node taint, which the run needs).
+app.post('/api/compliance/preflight/fix-stale-taints', async (req, res) => {
+  const { apiUrl, ocpToken } = req.body;
+  const { step, log, done, fail } = makeSseHelpers(res);
+  if (!apiUrl || !ocpToken) { fail('apiUrl and ocpToken are required.'); return; }
+  try {
+    step('Remove leftover autoscaler taints', 'running');
+    const nodes = (await ocpGet(apiUrl, '/api/v1/nodes', ocpToken)).items || [];
+    let n = 0;
+    for (const node of nodes) {
+      if (await removeNodeTaints(apiUrl, ocpToken, node.metadata.name, [AUTOSCALER_TAINT, 'DeletionCandidateOfClusterAutoscaler'])) {
+        log(`  Cleared taint on ${node.metadata.name}\n`); n++;
+      }
+    }
+    step('Remove leftover autoscaler taints', 'done');
+    done(n ? `Cleared autoscaler taints on ${n} node(s).` : 'No autoscaler taints found.');
+  } catch (e) { fail(`Failed to clear the taints: ${e.message}`); }
+});
+
+// POST /api/compliance/preflight/fix-opct-leftovers — SSE. Runs `opct destroy` on the management host, which
+// removes the "opct" namespace, the dedicated-node controller and any stale e2e-test-* namespaces, then waits for
+// them to disappear. Refuses while a run is actually active in the cluster.
+app.post('/api/compliance/preflight/fix-opct-leftovers', async (req, res) => {
+  const { apiUrl, ocpToken, mgmtHost, sshKey, sshPassphrase, kubeconfigPath } = req.body;
+  const { step, log, done, fail } = makeSseHelpers(res);
+  if (!mgmtHost || !sshKey) { fail('Management host and SSH private key are required (opct destroy runs there).'); return; }
+  const kc = (kubeconfigPath || '/root/.kube/config').trim().replace(/'/g, "'\\''");
+  let conn;
+  try {
+    step('Check that no OPCT run is active', 'running');
+    if (apiUrl && ocpToken) {
+      const pods = await ocpGet(apiUrl, '/api/v1/namespaces/opct/pods', ocpToken).catch(() => ({ items: [] }));
+      const active = (pods.items || []).filter(p => (/sonobuoy/.test(p.metadata.name) || p.metadata.labels?.component === 'sonobuoy' || p.metadata.labels?.['sonobuoy-plugin']) && ['Running', 'Pending'].includes(p.status?.phase));
+      if (active.length) throw new Error(`a run is active (${active.map(p => p.metadata.name).join(', ')}); not destroying it`);
+    }
+    step('Check that no OPCT run is active', 'done');
+
+    step('Connect to management host via SSH', 'running');
+    conn = await sshConnect(mgmtHost, 'root', sshKey, sshPassphrase);
+    step('Connect to management host via SSH', 'done');
+
+    step('opct destroy', 'running');
+    const out = await sshRunScript(conn, `export KUBECONFIG='${kc}'; opct destroy 2>&1 | tail -15`);
+    log(out.stdout.split('\n').map(l => '  ' + l.slice(0, 200)).join('\n') + '\n');
+    step('opct destroy', 'done');
+
+    step('Wait for the namespaces to disappear', 'running');
+    let left = '';
+    for (let i = 0; i < 24; i++) {
+      const r = await sshRunScript(conn, `export KUBECONFIG='${kc}'; oc get ns --no-headers 2>/dev/null | awk '{print $1}' | grep -E '^(opct|sonobuoy|e2e-test-)' | tr '\\n' ' '; true`);
+      left = r.stdout.trim();
+      if (!left) break;
+      await new Promise(r2 => setTimeout(r2, 5000));
+    }
+    if (left) throw new Error(`still present after 2 minutes: ${left}`);
+    step('Wait for the namespaces to disappear', 'done');
+    done('OPCT leftovers removed.');
+  } catch (e) { fail(`Failed to clean up: ${e.message}`); }
+  finally { if (conn) try { conn.end(); } catch (_) {} }
+});
+
 // POST /api/compliance/preflight/fix-kubeconfig — SSE. Re-runs `oc login` on
 // the management host to refresh an expired token in its kubeconfig.
 app.post('/api/compliance/preflight/fix-kubeconfig', async (req, res) => {
@@ -7689,14 +7876,14 @@ app.post('/api/compliance/start', async (req, res) => {
     const kaTimer1 = setInterval(() => log('  Still working...\n'), 15000);
     let opctVersion;
     try {
-      const check = await sshRunScript(conn, `opct version 2>&1 || echo __OPCT_NOTFOUND__`);
+      const check = await sshRunScript(conn, `export KUBECONFIG="${kubeconfig}"; opct version 2>&1 || echo __OPCT_NOTFOUND__`);
       if (/__OPCT_NOTFOUND__/.test(check.stdout)) {
         log('  opct not found — installing latest release...\n');
         await sshRunScriptStreaming(conn, `set -e
 curl -sL -o /usr/local/bin/opct https://github.com/redhat-openshift-ecosystem/provider-certification-tool/releases/latest/download/opct-linux-amd64
 chmod +x /usr/local/bin/opct
 opct version`, chunk => log(chunk));
-        const recheck = await sshRunScript(conn, `opct version 2>&1`);
+        const recheck = await sshRunScript(conn, `export KUBECONFIG="${kubeconfig}"; opct version 2>&1`);
         opctVersion = recheck.stdout.trim();
       } else {
         opctVersion = check.stdout.trim();
@@ -7704,6 +7891,17 @@ opct version`, chunk => log(chunk));
       }
     } finally { clearInterval(kaTimer1); }
     step('Check / install opct CLI', 'done');
+
+    // opct run refuses to start while an earlier run's namespace is still there, and it only says so in its log.
+    step('Check for leftovers of an earlier run', 'running');
+    const left = await sshRunScript(conn, `export KUBECONFIG="${kubeconfig}"
+oc get ns --no-headers 2>/dev/null | awk '{print $1}' | grep -E '^(opct|sonobuoy|e2e-test-)' | tr '\n' ' '
+echo
+echo "PROCS=$(pgrep -f 'opct run' | wc -l)"`);
+    const leftNs = (left.stdout.split('\n')[0] || '').trim();
+    if (leftNs) throw new Error(`the cluster still has ${leftNs} from an earlier run, and "opct run" would stop at its own preflight. Use "Fix" on the "No leftover OPCT / e2e namespaces" check (it runs opct destroy), then start again.`);
+    if (/PROCS=[1-9]/.test(left.stdout)) throw new Error('an "opct run" process is already running on the management host.');
+    step('Check for leftovers of an earlier run', 'done');
 
     step('Launch OPCT conformance run (background, 2-5+ hours)', 'running');
     const logFile = `/root/opct-run-${Date.now()}.log`;
@@ -7717,6 +7915,16 @@ nohup opct run --timeout ${timeoutSecs} > "${logFile}" 2>&1 < /dev/null &
 echo $!`);
     const pid = launch.stdout.trim().split('\n').pop().trim();
     log(`  Started opct run — PID ${pid}\n  Log file: ${logFile}\n`);
+    // opct validates first and reports a failure only in its log; watch the first minute so that is not missed.
+    for (let i = 0; i < 12; i++) {
+      await new Promise(r => setTimeout(r, 5000));
+      const chk = await sshRunScript(conn, `tail -c 3000 "${logFile}" 2>/dev/null; echo; kill -0 ${pid} 2>/dev/null && echo __ALIVE__ || echo __EXITED__`);
+      if (/level=error|^Error:|panic:/m.test(chk.stdout)) {
+        const lines = chk.stdout.split('\n').filter(l => /level=error|^Error:|panic:/.test(l)).map(l => l.replace(/^time="[^"]*" level=\w+ msg=/, '').slice(0, 300));
+        throw new Error('opct run failed its own preflight: ' + lines.join(' | '));
+      }
+      if (/__EXITED__/.test(chk.stdout)) break;
+    }
     step('Launch OPCT conformance run (background, 2-5+ hours)', 'done');
 
     opctState = {

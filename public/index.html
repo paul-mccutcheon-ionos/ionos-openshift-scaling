@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.20.1</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.21.0</span>
   </div>
 
   <div class="banner-actions">
@@ -6428,7 +6428,9 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     'zone-labels':        '/api/compliance/preflight/fix-zone-labels',
     'machineset-labels':  '/api/compliance/preflight/fix-machineset-labels',
     'dedicated-node':     '/api/compliance/preflight/fix-dedicated-node',
-    'kubeconfig':         '/api/compliance/preflight/fix-kubeconfig'
+    'kubeconfig':         '/api/compliance/preflight/fix-kubeconfig',
+    'stale-taints':       '/api/compliance/preflight/fix-stale-taints',
+    'opct-leftovers':     '/api/compliance/preflight/fix-opct-leftovers'
   };
 
   function opctPreflightBody() {
@@ -6437,7 +6439,8 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
       ocpToken:      document.getElementById('ocp-token').value.trim(),
       mgmtHost:      document.getElementById('opct-mgmt-host').value.trim(),
       sshKey:        document.getElementById('opct-ssh-key').value.trim(),
-      sshPassphrase: document.getElementById('opct-ssh-passphrase').value
+      sshPassphrase: document.getElementById('opct-ssh-passphrase').value,
+      kubeconfigPath: document.getElementById('opct-kubeconfig-path').value.trim()
     };
   }
 
@@ -6471,6 +6474,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
       pass:    { icon: '&#10003;', color: '#86efac', bg: '#0f2d1f', text: 'Pass' },
       fail:    { icon: '&#10007;', color: '#fca5a5', bg: '#2d1414', text: 'Fail' },
       error:   { icon: '&#9888;',  color: '#fbbf24', bg: '#2d1f00', text: 'Error' },
+      warn:    { icon: '&#9888;',  color: '#fcd34d', bg: '#2a2410', text: 'Warning' },
       unknown: { icon: '&#8226;',  color: '#94a3b8', bg: '#1e2333', text: 'Unknown' }
     }[status] || { icon: '&#8226;', color: '#94a3b8', bg: '#1e2333', text: status });
 
