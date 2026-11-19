@@ -6025,8 +6025,12 @@ const clusterInstallState = new PersistentInstallState();
 // The guide's "ISO attached but not bootable" setup did NOT work on these servers: nodes rebooted into the
 // installer. A detached ISO means the node can only boot the installed disk — also for every later reboot.
 function makeIsoDetacher(cpDetails, dcId, ionosToken, log) {
-  const detached = new Set(), rebooted = new Set();
+  const detached = new Set(), rebooted = new Set(), written = new Set();
   let buf = '';
+  // control-0 is the rendezvous host (agent-config rendezvousIP). It runs the installer service and, later, the bootstrap that serves
+  // the Machine Config Server the other nodes' first boot needs. Take its ISO away only once EVERY node has written its image: on ocp3
+  // it was detached at once, it ended up booting its disk while control-2 was still writing, and nothing was left to serve the config.
+  const rendezvous = (cpDetails && cpDetails[0] && cpDetails[0].name) || 'control-0';
   const find = nm => (cpDetails || []).find(c => c.name === nm);
   async function detach(nm, alsoReboot) {
     const cp = find(nm); if (!cp) return;
@@ -6052,7 +6056,13 @@ function makeIsoDetacher(cpDetails, dcId, ionosToken, log) {
     const lines = buf.split('\n'); buf = lines.pop();
     for (const line of lines) {
       let m = line.match(/Host: (control-\d+)\.\S*, reached installation stage Writing image to disk: 100%/);
-      if (m) { detach(m[1], false); continue; }
+      if (m) {
+        written.add(m[1]);
+        if (m[1] !== rendezvous) detach(m[1], false);
+        else log(`  [wizard] ${m[1]} (rendezvous host) has written its image - keeping its ISO until the other nodes are done\n`);
+        if ((cpDetails || []).length && (cpDetails || []).every(c => written.has(c.name))) detach(rendezvous, false);
+        continue;
+      }
       m = line.match(/Host (control-\d+)\.\S* Expected the host to boot from disk, but it booted the installation image/);
       if (m) detach(m[1], true);
     }
