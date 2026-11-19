@@ -6194,6 +6194,7 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
           mgmtImageId, mgmtImageName } = req.body;
   const { step, log, done, fail } = makeSseHelpers(res);
   const isCubeControlPlane = controlServerType === 'CUBE';
+  const isVcpuControlPlane = controlServerType === 'VCPU';   // shared vCPU cores: no CPU family, Balanced SSD volume
   if (isCubeControlPlane && !controlTemplateId) {
     fail('A Cube template must be selected for the control plane.');
     return;
@@ -6220,7 +6221,7 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
     // de/fra/1) that don't offer that family at all. Cube servers have no
     // CPU-family concept (fixed by the template), so skip this entirely.
     let resolvedCpuFamily = null;
-    if (!isCubeControlPlane) {
+    if (!isCubeControlPlane && !isVcpuControlPlane) {
       const avail = (await resolveCpuFamiliesForLocation(vdcLocation, ionosToken)).families.map(f => f.family);
       if (cpuFamily && avail.includes(cpuFamily)) resolvedCpuFamily = cpuFamily;
       else {
@@ -6366,7 +6367,7 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
       ? 'Create 3 control plane VMs (Cube)'
       : `Create 3 control plane VMs (${controlCores}C / ${controlRamGB} GB / ${controlDiskGB} GB)`;
     step(cpStepLabel, 'running');
-    log(isCubeControlPlane ? `Cube template: ${controlTemplateId}\n` : `CPU family: ${resolvedCpuFamily}\n`);
+    log(isCubeControlPlane ? `Cube template: ${controlTemplateId}\n` : isVcpuControlPlane ? 'Server type: vCPU (shared cores), Balanced SSD volumes\n' : `CPU family: ${resolvedCpuFamily}\n`);
     log(`Placement: servers in ${cpServerZone}` + (isCubeControlPlane ? ' (Cube storage is DAS, no separate storage zone)\n'
       : `; volumes control-0/1/2 in ${cpDiskZones.join(' / ')}\n`));
     const cpKaTimer = setInterval(() => log('  Still waiting on IONOS Cloud API...\n'), 15000);
@@ -6386,15 +6387,15 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
                   name: `${clusterName}-control-${i}`,
                   cores:     parseInt(controlCores, 10),
                   ram:       parseInt(controlRamGB, 10) * 1024,
-                  cpuFamily: resolvedCpuFamily,
-                  type:      'ENTERPRISE',
+                  ...(isVcpuControlPlane ? {} : { cpuFamily: resolvedCpuFamily }),
+                  type:      isVcpuControlPlane ? 'VCPU' : 'ENTERPRISE',
                   availabilityZone: cpServerZone
                 },
             entities: {
               volumes: { items: [{ properties: isCubeControlPlane
                 ? { name: `${clusterName}-control-${i}-root`, type: 'DAS', licenceType: 'LINUX' }
                 : { name: `${clusterName}-control-${i}-root`, size: parseInt(controlDiskGB, 10),
-                    type: 'PERFORMANCE', licenceType: 'LINUX', availabilityZone: cpDiskZones[i] }
+                    type: isVcpuControlPlane ? 'BALANCED' : 'PERFORMANCE', licenceType: 'LINUX', availabilityZone: cpDiskZones[i] }
               }] },
               nics: { items: [{ properties: { name: 'private', lan: privLanId, dhcp: true } }] }
             }
@@ -6431,7 +6432,7 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
         const srv  = await ionosGet(`/datacenters/${dcId}/servers/${cp.id}?depth=1`, ionosToken);
         // UEFI plus Live Vertical Scaling (hot-plug) — the same set ocp1's control volumes have. Setting them together
         // costs one VM restart; setting them separately costs one each (changing either restarts a running VM).
-        const volFlags = { requireLegacyBios: false, cpuHotPlug: true, ramHotPlug: true, nicHotPlug: true, nicHotUnplug: true, discVirtioHotPlug: true, discVirtioHotUnplug: true };
+        const volFlags = isVcpuControlPlane ? { requireLegacyBios: false } : { requireLegacyBios: false, cpuHotPlug: true, ramHotPlug: true, nicHotPlug: true, nicHotUnplug: true, discVirtioHotPlug: true, discVirtioHotUnplug: true };
         const flagsOk  = Object.entries(volFlags).every(([k, v]) => vol.properties?.[k] === v);
         if (srv.properties?.bootVolume?.id === vol.id && flagsOk) { logFound(`control-${i} boot device already set`); continue; }
         if (!flagsOk)

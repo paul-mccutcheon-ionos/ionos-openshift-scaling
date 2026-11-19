@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.21.2</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.22.0</span>
   </div>
 
   <div class="banner-actions">
@@ -2253,13 +2253,14 @@
               <label style="font-size:0.85rem;color:#94a3b8;white-space:nowrap">Server Type</label>
               <select id="ncw-cp-server-type" style="flex:1;background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.45rem 0.75rem;font-size:0.85rem">
                 <option value="ENTERPRISE" selected>Dedicated Core</option>
+                <option value="VCPU">vCPU (shared cores, Balanced SSD)</option>
                 <option value="CUBE">Cube (fixed template)</option>
               </select>
-              <div class="field-note" style="white-space:nowrap">Dedicated Core = pick cores/RAM/disk; Cube = fixed template size</div>
+              <div class="field-note" style="white-space:nowrap">Dedicated Core = pick cores/RAM/disk; vCPU = shared cores, no CPU family; Cube = fixed template size</div>
             </div>
 
             <div id="ncw-cp-dedicated-fields">
-              <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.75rem">
+              <div id="ncw-cp-family-row" style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.75rem">
                 <label style="font-size:0.85rem;color:#94a3b8;white-space:nowrap">CPU Family</label>
                 <select id="ncw-cp-cpu-family" style="flex:1;background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.45rem 0.75rem;font-size:0.85rem">
                   <option value="AMD_EPYC">AMD EPYC (Milan)</option>
@@ -5762,8 +5763,8 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
         `Control Plane:     3× Cube`,
         `                   ${c.controlTemplateName || c.controlTemplateId || '— template not selected —'}`,
       ] : [
-        `Control Plane:     3× Dedicated Core (${c.cpuFamily || 'AMD_EPYC'})`,
-        `                   ${c.controlCores || 8} cores / ${c.controlRamGB || 16} GB RAM / ${c.controlDiskGB || 600} GB Performance SSD`,
+        c.controlServerType === 'VCPU' ? `Control Plane:     3× vCPU (shared cores)` : `Control Plane:     3× Dedicated Core (${c.cpuFamily || 'AMD_EPYC'})`,
+        `                   ${c.controlCores || 8} cores / ${c.controlRamGB || 16} GB RAM / ${c.controlDiskGB || 600} GB ${c.controlServerType === 'VCPU' ? 'Balanced' : 'Performance'} SSD`,
       ]),
       `Placement:         servers ${c.controlServerZone || 'AUTO'}` + (c.controlServerType === 'CUBE' ? '' : `; storage control-0/1/2 → ${(c.controlDiskZones || ['AUTO', 'AUTO', 'AUTO']).join(' / ')}`),
       ``,
@@ -6272,7 +6273,9 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
 
   // Toggle Dedicated Core vs Cube fields for the control plane
   function ncwApplyCpServerType() {
-    const isCube = document.getElementById('ncw-cp-server-type').value === 'CUBE';
+    const st = document.getElementById('ncw-cp-server-type').value;
+    const isCube = st === 'CUBE';
+    document.getElementById('ncw-cp-family-row').style.display = st === 'VCPU' ? 'none' : '';   // vCPU servers have no CPU family
     document.getElementById('ncw-cp-dedicated-fields').style.display = isCube ? 'none' : '';
     document.getElementById('ncw-cp-cube-fields').style.display       = isCube ? '' : 'none';
     document.querySelectorAll('.ncw-cp-dz').forEach(el => { el.style.display = isCube ? 'none' : ''; });
