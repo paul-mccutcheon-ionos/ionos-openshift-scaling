@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.22.2</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.22.3</span>
   </div>
 
   <div class="banner-actions">
@@ -2342,20 +2342,36 @@
           <div>
             <h4 style="margin-bottom:0.6rem;color:#94a3b8;font-size:0.85rem;text-transform:uppercase;letter-spacing:0.05em">Workers (planned)</h4>
             <div id="ncw-w-note" class="field-note" style="margin-bottom:0.6rem">The wizard installs the 3 control-plane nodes. Workers are added afterwards under Machine Autoscaling Management (vCPU or Cube).</div>
+            <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.75rem;flex-wrap:wrap">
+              <label style="font-size:0.85rem;color:#94a3b8;white-space:nowrap">Server Type</label>
+              <select id="ncw-w-server-type" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.45rem 0.75rem;font-size:0.85rem">
+                <option value="VCPU" selected>vCPU (shared cores, Balanced SSD)</option>
+                <option value="ENTERPRISE">Dedicated Core</option>
+                <option value="CUBE">Cube (fixed template)</option>
+              </select>
+              <span id="ncw-w-family-wrap" style="display:none;align-items:center;gap:0.5rem">
+                <label style="font-size:0.85rem;color:#94a3b8;white-space:nowrap">CPU Family</label>
+                <select id="ncw-w-cpu-family" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.45rem 0.75rem;font-size:0.85rem"></select>
+              </span>
+              <span id="ncw-w-template-wrap" style="display:none;align-items:center;gap:0.5rem">
+                <label style="font-size:0.85rem;color:#94a3b8;white-space:nowrap">Cube Template</label>
+                <select id="ncw-w-template" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.45rem 0.75rem;font-size:0.85rem"><option value="">— loading templates —</option></select>
+              </span>
+            </div>
             <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:0.75rem">
               <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
                 Replicas
                 <input id="ncw-w-replicas" type="number" value="2" min="0" max="20" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
               </label>
-              <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+              <label class="ncw-w-sz" style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
                 Cores
                 <input id="ncw-w-cores" type="number" value="4" min="2" max="32" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
               </label>
-              <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+              <label class="ncw-w-sz" style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
                 RAM (GB)
                 <input id="ncw-w-ram" type="number" value="8" min="4" max="128" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
               </label>
-              <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+              <label class="ncw-w-sz" style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
                 Disk (GB)
                 <input id="ncw-w-disk" type="number" value="120" min="50" max="2048" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
               </label>
@@ -3537,7 +3553,7 @@
           case 'NCW_CP_RAM_GB':      { const el = document.getElementById('ncw-cp-ram');   if (el) el.value = val; break; }
           case 'NCW_CP_DISK_GB':     { const el = document.getElementById('ncw-cp-disk');  if (el) el.value = val; break; }
           case 'NCW_W_REPLICAS':     { const el = document.getElementById('ncw-w-replicas'); if (el) el.value = val; break; }
-          case 'NCW_W_SERVER_TYPE':  ncwEnvPending.workerType = val.toUpperCase(); break;
+          case 'NCW_W_SERVER_TYPE':  { ncwEnvPending.workerType = val.toUpperCase(); const el = document.getElementById('ncw-w-server-type'); const v = val.toUpperCase() === 'DEDICATED' ? 'ENTERPRISE' : val.toUpperCase(); if (el && [...el.options].some(o => o.value === v)) { el.value = v; ncwApplyWorkerType(); } break; }
           case 'NCW_W_CUBE_TEMPLATE': ncwEnvPending.workerTemplate = val; break;
           case 'NCW_MGMT_SSH_PUBKEY': { const el = document.getElementById('ncw-mgmt-ssh-pub'); if (el) el.value = val; break; }
           case 'NCW_OCP_SSH_PUBKEY':  { const el = document.getElementById('ncw-ocp-ssh-pub');  if (el) el.value = val; break; }
@@ -5798,9 +5814,11 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
       ]),
       `Placement:         servers ${c.controlServerZone || 'AUTO'}` + (c.controlServerType === 'CUBE' ? '' : `; storage control-0/1/2 → ${(c.controlDiskZones || ['AUTO', 'AUTO', 'AUTO']).join(' / ')}`),
       ``,
-      ncwEnvPending.workerType === 'CUBE'
-        ? `Workers (planned, added after install): ${c.workerReplicas || 2}× Cube ${ncwEnvPending.workerTemplate || ''}`
-        : `Workers (planned, added after install): ${c.workerReplicas || 2}× vCPU ${c.workerCores || 4} cores / ${c.workerRamGB || 8} GB RAM / ${c.workerDiskGB || 120} GB Balanced SSD`,
+      c.workerType === 'CUBE'
+        ? `Workers (planned, added after install): ${c.workerReplicas || 2}× Cube ${c.workerTemplateName || '— template not selected —'}`
+        : c.workerType === 'ENTERPRISE'
+          ? `Workers (planned, added after install): ${c.workerReplicas || 2}× Dedicated Core (${c.workerCpuFamily || 'AMD_EPYC'}) ${c.workerCores || 4} cores / ${c.workerRamGB || 8} GB RAM / ${c.workerDiskGB || 120} GB Performance SSD`
+          : `Workers (planned, added after install): ${c.workerReplicas || 2}× vCPU ${c.workerCores || 4} cores / ${c.workerRamGB || 8} GB RAM / ${c.workerDiskGB || 120} GB Balanced SSD`,
       ``,
       `IONOS Token:       ${c.ionosToken ? '✓ provided' : '✗ missing'}`,
       `FTP Credentials:   ${c.ionosFtpUser ? `${c.ionosFtpUser}  /  ****` : '✗ missing'}`,
@@ -5821,6 +5839,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     if (!c.vdcName)       missing.push('VDC Name');
     if (!c.mgmtSshPrivKey) missing.push('Mgmt SSH Private Key');
     if (c.controlServerType === 'CUBE' && !c.controlTemplateId) missing.push('Cube Template');
+    if (c.workerType === 'CUBE' && !c.workerTemplateId) missing.push('Worker Cube Template');
     const errEl = document.getElementById('ncw-review-error');
     if (missing.length) {
       errEl.classList.remove('hidden');
@@ -5869,6 +5888,10 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
         ncwConfig.controlDiskGB = document.getElementById('ncw-cp-disk').value;
         ncwConfig.controlServerZone = document.getElementById('ncw-cp-server-zone').value;
         ncwConfig.controlDiskZones  = [0, 1, 2].map(i => document.getElementById('ncw-cp-dz-' + i).value);
+        ncwConfig.workerType    = document.getElementById('ncw-w-server-type').value;
+        ncwConfig.workerCpuFamily = document.getElementById('ncw-w-cpu-family').value;
+        ncwConfig.workerTemplateId = document.getElementById('ncw-w-template').value;
+        ncwConfig.workerTemplateName = document.getElementById('ncw-w-template').selectedOptions[0]?.text || '';
         ncwConfig.workerReplicas= document.getElementById('ncw-w-replicas').value;
         ncwConfig.workerCores   = document.getElementById('ncw-w-cores').value;
         ncwConfig.workerRamGB   = document.getElementById('ncw-w-ram').value;
@@ -6259,6 +6282,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
         }).join('');
         // the list is sorted modern-first; keep the user's choice if it is still offered, otherwise the first (modern) one
         sel.value = [...sel.options].some(o => o.value === prev) ? prev : sel.options[0].value;
+        ncwSyncWorkerLists();
         ncwApplyEnvPending();
       }
     } catch (_) { /* keep current options */ }
@@ -6294,12 +6318,37 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
         const defaultTpl = templates.find(t => t.name === 'Basic Cube L');
         if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
         else if (defaultTpl) sel.value = defaultTpl.id;
+        ncwSyncWorkerLists();
       }
     } catch (_) { /* keep current options */ }
     finally {
       if (btn) { btn.disabled = false; btn.textContent = '↻ Refresh'; }
     }
   }
+
+  // Worker type (Cube / vCPU / Dedicated Core): the template and CPU-family lists are the control plane's, copied across
+  function ncwSyncWorkerLists() {
+    const copy = (fromId, toId, pick) => {
+      const from = document.getElementById(fromId), to = document.getElementById(toId);
+      if (!from || !to || !from.options.length || (from.options.length === 1 && !from.options[0].value)) return;
+      const prev = to.value;
+      to.innerHTML = from.innerHTML;
+      const names = [...to.options];
+      const hit = names.find(o => o.value === prev) || (pick && names.find(o => pick(o)));
+      to.value = hit ? hit.value : names[0].value;
+    };
+    copy('ncw-cp-template', 'ncw-w-template', o => ncwEnvPending.workerTemplate && o.text.startsWith(ncwEnvPending.workerTemplate));
+    copy('ncw-cp-cpu-family', 'ncw-w-cpu-family', null);
+  }
+  function ncwApplyWorkerType() {
+    const st = document.getElementById('ncw-w-server-type').value;
+    document.getElementById('ncw-w-family-wrap').style.display   = st === 'ENTERPRISE' ? 'flex' : 'none';
+    document.getElementById('ncw-w-template-wrap').style.display = st === 'CUBE' ? 'flex' : 'none';
+    document.querySelectorAll('.ncw-w-sz').forEach(el => { el.style.display = st === 'CUBE' ? 'none' : ''; });
+    if (st === 'CUBE' && !(document.getElementById('ncw-w-template').value)) ncwLoadTemplates();
+    ncwSyncWorkerLists();
+  }
+  document.getElementById('ncw-w-server-type').addEventListener('change', ncwApplyWorkerType);
 
   // Toggle Dedicated Core vs Cube fields for the control plane
   function ncwApplyCpServerType() {
