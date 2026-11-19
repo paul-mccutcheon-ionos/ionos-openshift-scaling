@@ -6236,6 +6236,20 @@ app.get('/api/new-cluster/cpu-families', async (req, res) => {
 });
 
 // GET /api/new-cluster/ocp-versions
+// POST /api/new-cluster/generate-ssh-keys  { clusterName }
+// Two fresh ed25519 key pairs: one to log in to the management VM (root), one for the RHCOS nodes (core user). Generated in memory
+// and returned once - nothing is written to disk or logged, so the user must save the private keys.
+app.post('/api/new-cluster/generate-ssh-keys', (req, res) => {
+  const name = String((req.body || {}).clusterName || 'ocp').toLowerCase().replace(/[^a-z0-9-]/g, '') || 'ocp';
+  try {
+    const { utils } = require('ssh2');
+    const m = utils.generateKeyPairSync('ed25519', { comment: `${name}-mgmt` });
+    const o = utils.generateKeyPairSync('ed25519', { comment: `${name}-core` });
+    res.set('Cache-Control', 'no-store');
+    res.json({ ok: true, mgmt: { private: m.private, public: m.public.trim() }, ocp: { private: o.private, public: o.public.trim() } });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/api/new-cluster/ocp-versions', async (_req, res) => {
   const minors = ['4.20', '4.19', '4.18', '4.17'];
   const out = [];

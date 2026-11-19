@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.22.3</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.22.4</span>
   </div>
 
   <div class="banner-actions">
@@ -2399,6 +2399,12 @@
             <textarea id="ncw-mgmt-ssh-priv" rows="6" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.8rem;font-family:monospace;resize:vertical"></textarea>
             <span style="font-size:0.75rem;color:#64748b">Used by this tool to SSH into the management VM during installation. Never stored on disk.</span>
           </label>
+          <div style="border:1px dashed #1e3a5f;border-radius:8px;padding:0.8rem 1rem;background:#070f1e">
+            <div style="font-size:0.85rem;color:#cbd5e1;margin-bottom:0.4rem">Don&rsquo;t have keys? Paste yours above, or generate two fresh ed25519 key pairs (management VM and nodes).</div>
+            <button type="button" id="ncw-gen-keys-btn" onclick="ncwGenerateKeys()"
+              style="background:#1e3a5f;border:1px solid #2d5a8e;color:#e2e8f0;border-radius:6px;padding:0.45rem 1rem;font-size:0.85rem;font-weight:600;cursor:pointer">&#128273; Generate fresh key pairs</button>
+            <div id="ncw-gen-keys-result" style="font-size:0.8rem;margin-top:0.6rem"></div>
+          </div>
         </div>
       </div>
 
@@ -6324,6 +6330,37 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     finally {
       if (btn) { btn.disabled = false; btn.textContent = '↻ Refresh'; }
     }
+  }
+
+  // Generate fresh key pairs on the server (in memory, never stored) and fill the three fields; offer the private keys for download
+  let ncwGeneratedKeys = null;
+  function ncwDownloadKey(which) {
+    const k = ncwGeneratedKeys && ncwGeneratedKeys[which]; if (!k) return;
+    const name = (document.getElementById('ncw-cluster-name').value.trim() || 'ocp') + (which === 'mgmt' ? '-mgmt' : '-core');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([k.private.trim() + '\n'], { type: 'text/plain' }));
+    a.download = name + '.key'; document.body.appendChild(a); a.click(); a.remove();
+  }
+  async function ncwGenerateKeys() {
+    const out = document.getElementById('ncw-gen-keys-result'), btn = document.getElementById('ncw-gen-keys-btn');
+    const filled = ['ncw-ocp-ssh-pub', 'ncw-mgmt-ssh-pub', 'ncw-mgmt-ssh-priv'].some(id => document.getElementById(id).value.trim());
+    if (filled && !confirm('These fields already contain a key. Replace them with freshly generated keys?')) return;
+    btn.disabled = true; out.innerHTML = '<span style="color:#64748b">Generating&hellip;</span>';
+    try {
+      const r = await fetch('/api/new-cluster/generate-ssh-keys', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clusterName: document.getElementById('ncw-cluster-name').value.trim() }) });
+      const d = await r.json(); if (!r.ok || d.error) throw new Error(d.error || 'HTTP ' + r.status);
+      ncwGeneratedKeys = d;
+      document.getElementById('ncw-ocp-ssh-pub').value   = d.ocp.public;
+      document.getElementById('ncw-mgmt-ssh-pub').value  = d.mgmt.public;
+      document.getElementById('ncw-mgmt-ssh-priv').value = d.mgmt.private;
+      const lnk = 'background:none;border:none;color:#60a5fa;text-decoration:underline;cursor:pointer;font-size:0.8rem;padding:0';
+      out.innerHTML = '<div style="color:#6ee7b7">&#10003; Keys generated and filled in.</div>' +
+        '<div style="color:#fbbf24;margin:0.3rem 0">&#9888; The private keys exist only in this page and are not stored anywhere. Download them now &mdash; you need them to log in to the management VM and to the nodes later.</div>' +
+        `<button type="button" style="${lnk}" onclick="ncwDownloadKey('mgmt')">Download management VM private key</button> &nbsp;&middot;&nbsp; ` +
+        `<button type="button" style="${lnk}" onclick="ncwDownloadKey('ocp')">Download node (core) private key</button>`;
+    } catch (e) { out.innerHTML = '<span style="color:#f87171">' + escHtml(e.message) + '</span>'; }
+    finally { btn.disabled = false; }
   }
 
   // Worker type (Cube / vCPU / Dedicated Core): the template and CPU-family lists are the control plane's, copied across
