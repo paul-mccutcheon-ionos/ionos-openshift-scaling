@@ -6329,6 +6329,50 @@ app.post('/api/new-cluster/resume-state', async (req, res) => {
   res.json(out);
 });
 
+// Creates (idempotently) the service account the app uses to talk to the new cluster and returns its long-lived token, for OCP_BEARER_TOKEN in
+// the cluster's env file. The token is returned to the browser only; it is not stored on the server.
+app.post('/api/new-cluster/create-api-token', async (req, res) => {
+  const clusterName = String((req.body && req.body.clusterName) || '').trim();
+  const privKey = (req.body && req.body.mgmtSshPrivKey) || '';
+  const saved = clusterInstallState.get(clusterName);
+  const host = saved && saved.infra && saved.infra.mgmtPubIp;
+  if (!host || !privKey) return res.status(400).json({ error: 'Missing saved install state or management SSH key.' });
+  let conn;
+  try {
+    conn = await sshConnect(host, 'root', privKey);
+    const r = await sshRunScript(conn, `set -e
+KC=/tmp/kc-skip-verify
+if [ ! -f $KC ]; then
+  cp /opt/ocp-install/auth/kubeconfig $KC; chmod 600 $KC
+  sed -i '/certificate-authority-data:/d' $KC
+  CL=$(KUBECONFIG=$KC oc config view -o jsonpath='{.clusters[0].name}')
+  KUBECONFIG=$KC oc config set-cluster "$CL" --insecure-skip-tls-verify=true >/dev/null
+fi
+export KUBECONFIG=$KC
+oc -n openshift-machine-api create serviceaccount ionos-scaling-app --dry-run=client -o yaml | oc apply -f - >/dev/null
+oc create clusterrolebinding ionos-scaling-app-cluster-admin --clusterrole=cluster-admin --serviceaccount=openshift-machine-api:ionos-scaling-app --dry-run=client -o yaml | oc apply -f - >/dev/null
+oc apply -f - >/dev/null <<'SECRET_EOF'
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ionos-scaling-app-token
+  namespace: openshift-machine-api
+  annotations:
+    kubernetes.io/service-account.name: ionos-scaling-app
+type: kubernetes.io/service-account-token
+SECRET_EOF
+t=""
+for i in $(seq 1 30); do t=$(oc -n openshift-machine-api get secret ionos-scaling-app-token -o jsonpath='{.data.token}' 2>/dev/null); [ -n "$t" ] && break; sleep 2; done
+[ -n "$t" ] || { echo NO_TOKEN; exit 1; }
+echo "TOKEN:$(echo $t | base64 -d)"
+`);
+    const m = /TOKEN:(\S+)/.exec(r.stdout || '');
+    if (!m) return res.status(502).json({ error: 'The cluster did not return a token.' });
+    res.json({ token: m[1] });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+  finally { try { conn && conn.end(); } catch (_) {} }
+});
+
 app.get('/api/new-cluster/cpu-families', async (req, res) => {
   const { location, token } = req.query;
   if (!location || !token) return res.status(400).json({ error: 'location and token required' });
