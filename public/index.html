@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.22.9</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.22.10</span>
   </div>
 
   <div class="banner-actions">
@@ -3498,9 +3498,20 @@
         switch (key) {
           case 'OCP_CLUSTER_API_URL':      document.getElementById('api-url').value          = val; break;
           case 'OCP_BEARER_TOKEN':         document.getElementById('ocp-token').value         = val; break;
-          case 'OCP_MGMT_HOST':            document.getElementById('mgmt-host').value         = val; break;
+          case 'OCP_MGMT_HOST': {
+            document.getElementById('mgmt-host').value = val;
+            const o = document.getElementById('opct-mgmt-host'); if (o) o.value = val;
+            break;
+          }
+          case 'OCP_MGMT_INTERNAL_IP': {
+            // the management host's private address: the worker Ignition stub is served from it (http://<ip>/worker.ign)
+            const f = document.getElementById('frankfurt-ignition-ip'); if (f && !f.value) f.value = val;
+            const iu = document.getElementById('rhcos-ignition-url'); if (iu && !iu.value) iu.value = 'http://' + val + '/worker.ign';
+            break;
+          }
           case 'OCP_MGMT_HOST_SSH_KEY': {
             document.getElementById('ssh-key').value = decodeKey(val);
+            const o = document.getElementById('opct-ssh-key'); if (o) o.value = decodeKey(val);
             const w = document.getElementById('ncw-mgmt-ssh-priv'); if (w && !w.value.trim()) w.value = decodeKey(val);
             break;
           }
