@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.22.5</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.22.6</span>
   </div>
 
   <div class="banner-actions">
@@ -2423,6 +2423,11 @@
           &#10003; Sufficient IONOS quota: 3× control-plane servers (Dedicated Core or Cube) + 1× vCPU server, 3× public IPs
         </div>
         <div class="error-box hidden" id="ncw-review-error" style="margin-top:0.75rem"></div>
+        <div style="margin-top:0.9rem;padding:0.7rem 0.9rem;border:1px dashed #334155;border-radius:6px;font-size:0.8rem;color:#94a3b8">
+          Cluster already installed (for example the page was reloaded or the PC restarted)?
+          <button type="button" onclick="ncwResumeAtTls()" style="margin-left:0.5rem;padding:0.3rem 0.8rem;border-radius:5px;border:1px solid #1d4ed8;background:transparent;color:#93c5fd;cursor:pointer;font-size:0.78rem;font-weight:600">Resume at TLS / storage</button>
+          <div class="error-box hidden" id="ncw-resume-error" style="margin-top:0.5rem"></div>
+        </div>
       </div>
 
       <!-- Wizard nav buttons -->
@@ -5936,6 +5941,35 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
   document.querySelectorAll('.ncw-step').forEach(el =>
     el.addEventListener('click', () => { ncwCollectStep(); ncwGotoStep(parseInt(el.dataset.step, 10)); })
   );
+
+  // Pick up a finished install after a page reload: the server keeps the infrastructure and install state, the browser supplies the keys.
+  async function ncwResumeAtTls() {
+    const errEl = document.getElementById('ncw-resume-error');
+    const fail = m => { errEl.textContent = m; errEl.classList.remove('hidden'); };
+    errEl.classList.add('hidden');
+    ncwCollectStep();
+    const c = ncwConfig;
+    const need = [];
+    if (!c.clusterName) need.push('Cluster Name');
+    if (!c.baseDomain) need.push('Base Domain');
+    if (!c.ionosToken) need.push('IONOS Token');
+    if (!c.mgmtSshPrivKey) need.push('Mgmt SSH Private Key');
+    if (need.length) return fail('Fill in (or load from the .env file) first: ' + need.join(', ') + '. Step through the wizard with Next so every step is read.');
+    let data;
+    try {
+      const r = await fetch('/api/new-cluster/resume-state', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clusterName: c.clusterName, mgmtSshPrivKey: c.mgmtSshPrivKey }) });
+      data = await r.json();
+      if (!r.ok) return fail(data.error || ('HTTP ' + r.status));
+    } catch (e) { return fail(e.message); }
+    if (!data.installComplete) return fail('The saved state for ' + c.clusterName + ' does not show a completed installation. Use the normal phases instead.');
+    document.getElementById('ncw-config').style.display = 'none';
+    document.getElementById('ncw-install').style.display = '';
+    for (const k of ['infra', 'mgmt', 'geniso', 'upload', 'boot', 'bootstrap', 'finalinstall']) ncwSetPhaseStatus(k, 'done', 'Done ✓ (saved)');
+    ncwShowCredentials(data);
+    ncwEnablePhaseBtn('certs');
+    ncwEnablePhaseBtn('csi');
+  }
 
   function ncwShowConfig() {
     document.getElementById('ncw-config').style.display = '';

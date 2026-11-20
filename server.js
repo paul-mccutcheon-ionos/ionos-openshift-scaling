@@ -6251,6 +6251,34 @@ async function resolveCpuFamiliesForLocation(location, token) {
 
 // GET /api/new-cluster/cpu-families?location=de/txl&token=...
 // Returns Dedicated Core CPU families available in the given IONOS location.
+// Resume: the wizard page keeps its place only in the browser. After a page reload or a PC restart the install can be picked up at the
+// TLS / storage phases: the server still has the infrastructure and install state (secrets excluded); the browser supplies the keys again.
+app.post('/api/new-cluster/resume-state', async (req, res) => {
+  const clusterName = String((req.body && req.body.clusterName) || '').trim();
+  const privKey = (req.body && req.body.mgmtSshPrivKey) || '';
+  const saved = clusterInstallState.get(clusterName);
+  if (!saved || !saved.infra) return res.status(404).json({ error: `No saved install found for cluster "${clusterName}".` });
+  const out = {
+    clusterName, installComplete: !!saved.installComplete,
+    apiUrl: saved.apiUrl || null, consoleUrl: saved.consoleUrl || null,
+    mgmtPubIp: saved.infra.mgmtPubIp || saved.mgmtPubIp || null, mgmtPrivIp: saved.mgmtPrivIp || null,
+    gatewayIp: saved.gatewayIp || null, natPubIp: saved.natPubIp || null, nlbPubIp: saved.nlbPubIp || null,
+    kubeadminPass: null
+  };
+  if (privKey && out.mgmtPubIp) {
+    try {
+      const conn = await sshConnect(out.mgmtPubIp, 'root', privKey);
+      const r = await sshRunScript(conn, 'cat /opt/ocp-install/auth/kubeadmin-password 2>/dev/null; echo; test -f /opt/ocp-install/auth/kubeconfig && echo HAVE_KUBECONFIG');
+      conn.end();
+      const txt = (r.stdout || '').trim().split('\n');
+      out.kubeadminPass = txt[0] && txt[0] !== 'HAVE_KUBECONFIG' ? txt[0].trim() : null;
+      out.kubeconfigOnMgmt = /HAVE_KUBECONFIG/.test(r.stdout || '');
+      if (!out.kubeconfigOnMgmt) return res.status(409).json({ error: 'The management VM has no cluster kubeconfig (/opt/ocp-install/auth/kubeconfig).' });
+    } catch (e) { return res.status(502).json({ error: `Could not reach the management VM ${out.mgmtPubIp} with this SSH key: ${e.message}` }); }
+  }
+  res.json(out);
+});
+
 app.get('/api/new-cluster/cpu-families', async (req, res) => {
   const { location, token } = req.query;
   if (!location || !token) return res.status(400).json({ error: 'location and token required' });
