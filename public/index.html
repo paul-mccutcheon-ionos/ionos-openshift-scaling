@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.22.6</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.22.7</span>
   </div>
 
   <div class="banner-actions">
@@ -2575,7 +2575,7 @@
 
         <div class="ncw-phase" id="ncw-phase-certs" data-status="pending">
           <div class="ncw-phase-hdr" onclick="ncwTogglePhase('certs')" style="display:flex;align-items:center;gap:0.75rem;padding:0.75rem 1rem;background:#0b1e45;border:1px solid #1e3a5f;border-radius:8px;cursor:pointer">
-            <span class="ncw-phase-badge" style="width:1.6rem;height:1.6rem;border-radius:50%;background:#1e3a5f;display:flex;align-items:center;justify-content:center;font-size:0.72rem;font-weight:700;flex-shrink:0;color:#93c5fd">G</span>
+            <span class="ncw-phase-badge" style="width:1.6rem;height:1.6rem;border-radius:50%;background:#1e3a5f;display:flex;align-items:center;justify-content:center;font-size:0.72rem;font-weight:700;flex-shrink:0;color:#93c5fd">H</span>
             <span style="flex:1;font-size:0.9rem;font-weight:600;color:#cbd5e1">Configure TLS certificates (cert-manager, Let's Encrypt)</span>
             <span class="ncw-phase-status" style="font-size:0.78rem;color:#64748b">Pending</span>
             <button class="ncw-run-btn" id="ncw-run-certs" onclick="event.stopPropagation();ncwRunPhase('certs')" disabled
@@ -2590,7 +2590,7 @@
 
         <div class="ncw-phase" id="ncw-phase-csi" data-status="pending">
           <div class="ncw-phase-hdr" onclick="ncwTogglePhase('csi')" style="display:flex;align-items:center;gap:0.75rem;padding:0.75rem 1rem;background:#0b1e45;border:1px solid #1e3a5f;border-radius:8px;cursor:pointer">
-            <span class="ncw-phase-badge" style="width:1.6rem;height:1.6rem;border-radius:50%;background:#1e3a5f;display:flex;align-items:center;justify-content:center;font-size:0.72rem;font-weight:700;flex-shrink:0;color:#93c5fd">H</span>
+            <span class="ncw-phase-badge" style="width:1.6rem;height:1.6rem;border-radius:50%;background:#1e3a5f;display:flex;align-items:center;justify-content:center;font-size:0.72rem;font-weight:700;flex-shrink:0;color:#93c5fd">I</span>
             <span style="flex:1;font-size:0.9rem;font-weight:600;color:#cbd5e1">Install the IONOS Block Storage CSI driver (StorageClasses)</span>
             <span class="ncw-phase-status" style="font-size:0.78rem;color:#64748b">Pending</span>
             <button class="ncw-run-btn" id="ncw-run-csi" onclick="event.stopPropagation();ncwRunPhase('csi')" disabled
@@ -6240,8 +6240,18 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     ncwDownloadEnv(data);   // default action: save the cluster's env file as soon as the install completes
     const panel = document.getElementById('ncw-complete');
     panel.classList.remove('hidden');
-    document.getElementById('ncw-cred-api').textContent     = data.apiUrl     || '—';
-    document.getElementById('ncw-cred-console').textContent = data.consoleUrl || '—';
+    // Both URLs open in a new tab (the API URL answers with JSON, the console is the web UI).
+    const setLink = (id, url) => {
+      const el = document.getElementById(id);
+      el.textContent = '';
+      if (!/^https?:\/\//.test(url || '')) { el.textContent = '—'; return; }
+      const a = document.createElement('a');
+      a.href = url; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.textContent = url;
+      a.style.cssText = 'color:#34d399;text-decoration:underline';
+      el.appendChild(a);
+    };
+    setLink('ncw-cred-api', data.apiUrl);
+    setLink('ncw-cred-console', data.consoleUrl);
     document.getElementById('ncw-cred-pw').textContent      = data.kubeadminPass || '(check /opt/ocp-install/auth/kubeadmin-password on management VM)';
     panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }

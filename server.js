@@ -6079,6 +6079,56 @@ function makeIsoDetacher(cpDetails, dcId, ionosToken, log) {
 }
 
 
+// Watches the cluster while the installer streams (Phase G) and does what the installer sometimes fails to do:
+//  - once the bootstrap is complete and the rendezvous host (control-0) is still not a cluster node (the installer can be stuck on an
+//    earlier "host in error" timeout), take its ISO away, give it its disk back as the boot device and reboot it;
+//  - approve the join requests (CSRs) of control nodes that are not in the cluster yet: the bootstrap CSR (node-bootstrapper) while
+//    a control node is missing, and the client/serving CSRs requested by system:node:<one of our control nodes>. Nothing else.
+function makeControlPlaneRescuer({ cpDetails, dcId, ionosToken, mgmtPubIp, privKey, detacher, log }) {
+  let timer = null, busy = false, stopped = false, completeSince = 0, rescued = false;
+  const names = (cpDetails || []).map(c => c.name);
+  const rendezvous = names[0];
+  const script = `export KUBECONFIG=/opt/ocp-install/auth/kubeconfig
+echo "BOOTSTRAP=$(oc -n kube-system get cm bootstrap -o jsonpath='{.data.status}' 2>/dev/null)"
+echo "NODES=$(oc get nodes --no-headers 2>/dev/null | awk '{print $1}' | paste -sd' ')"
+oc get csr --no-headers 2>/dev/null | awk '$NF=="Pending"{print "CSR " $1 " " $3 " " $4}'
+`;
+  async function tick() {
+    if (busy || stopped || !mgmtPubIp || !privKey) return;
+    busy = true;
+    let conn;
+    try {
+      conn = await sshConnect(mgmtPubIp, 'root', privKey);
+      const { stdout } = await sshRunScript(conn, script);
+      const lines = stdout.split('\n');
+      const bootstrap = ((lines.find(l => l.startsWith('BOOTSTRAP=')) || '').split('=')[1] || '').trim();
+      const nodes = ((lines.find(l => l.startsWith('NODES=')) || '').slice(6)).trim().split(/\s+/).filter(Boolean);
+      const missing = names.filter(n => !nodes.some(x => x.startsWith(n + '.') || x === n));
+      const csrs = lines.filter(l => l.startsWith('CSR ')).map(l => { const p = l.split(' '); return { name: p[1], signer: p[2], requestor: p.slice(3).join(' ') }; });
+      for (const c of csrs) {
+        const own = names.some(n => c.requestor === 'system:node:' + n || c.requestor.startsWith('system:node:' + n + '.'));
+        const boot = c.signer === 'kubernetes.io/kube-apiserver-client-kubelet' && /node-bootstrapper/.test(c.requestor) && missing.length > 0;
+        if (own || boot) {
+          await sshRunScript(conn, `export KUBECONFIG=/opt/ocp-install/auth/kubeconfig; oc adm certificate approve ${c.name.replace(/[^a-z0-9-]/gi, '')}`);
+          log(`  [wizard] Approved join request ${c.name} (${boot ? 'node bootstrap' : c.requestor})\n`);
+        }
+      }
+      if (bootstrap === 'complete' && rendezvous && missing.includes(rendezvous) && !rescued) {
+        completeSince = completeSince || Date.now();
+        if (Date.now() - completeSince > 10 * 60 * 1000) {
+          rescued = true;
+          log(`  [wizard] The bootstrap is complete but ${rendezvous} has not joined the cluster: giving it its disk back and rebooting it\n`);
+          await detacher.sweep();
+          await ionosAction(`/datacenters/${dcId}/servers/${cpDetails[0].id}/reboot`, ionosToken);
+          log(`  [wizard] Rebooted ${rendezvous} so it boots the installed disk\n`);
+        }
+      } else if (bootstrap !== 'complete') completeSince = 0;
+    } catch (e) { /* the cluster API or the VM may be briefly unreachable; try again next tick */ }
+    finally { try { conn && conn.end(); } catch (_) {} busy = false; }
+  }
+  return { start() { timer = setInterval(tick, 60000); }, stop() { stopped = true; clearInterval(timer); } };
+}
+
 // GET that tolerates IONOS read-after-write lag (a just-created server can briefly 404 or
 // have no NIC IP yet): retries until the resource exists and `ready(result)` is true.
 async function ionosGetRetry(path, token, ready = () => true, tries = 18, delayMs = 5000) {
@@ -7175,11 +7225,19 @@ app.post('/api/new-cluster/monitor-bootstrap', async (req, res) => {
     log('Running: openshift-install agent wait-for bootstrap-complete\n');
     log('Streaming installer output — do not close this window.\n\n');
     const detacher = makeIsoDetacher(saved.infra?.cpDetails, saved.infra?.dcId, req.body.ionosToken || saved.ionosToken, log);
+    let bootOut = '';
     await sshRunScriptStreaming(conn, `#!/bin/bash
 cd /opt/ocp-install
 openshift-install agent wait-for bootstrap-complete --dir /opt/ocp-install 2>&1
 echo "BOOTSTRAP_COMPLETE"
-`, chunk => { log(chunk); detacher(chunk); });
+`, chunk => { log(chunk); bootOut += chunk; detacher(chunk); });
+    // The installer exits (and the script echoes BOOTSTRAP_COMPLETE) also when it gave up: do not report that as success.
+    if (/Bootstrap failed to complete|bootstrap process timed out|level=fatal/.test(bootOut)) {
+      step('Wait for bootstrap-complete (~25–35 min)', 'error');
+      conn.end();
+      fail('The installer reported that the bootstrap did not complete (see the log). If the nodes are up, Phase G can still finish the install; otherwise retry Phase E.');
+      return;
+    }
     await detacher.sweep();   // make sure no control VM keeps the install ISO (later reboots must boot the disk)
     step('Wait for bootstrap-complete (~25–35 min)', 'done');
     conn.end();
@@ -7210,11 +7268,16 @@ app.post('/api/new-cluster/monitor-install', async (req, res) => {
 
     let allOut = '';
     const detacher = makeIsoDetacher(saved.infra?.cpDetails, saved.infra?.dcId, req.body.ionosToken || saved.ionosToken, log);
-    await sshRunScriptStreaming(conn, `#!/bin/bash
+    const rescuer = makeControlPlaneRescuer({ cpDetails: saved.infra?.cpDetails, dcId: saved.infra?.dcId, ionosToken: req.body.ionosToken || saved.ionosToken,
+      mgmtPubIp, privKey, detacher, log });
+    rescuer.start();
+    try {
+      await sshRunScriptStreaming(conn, `#!/bin/bash
 cd /opt/ocp-install
 openshift-install agent wait-for install-complete --dir /opt/ocp-install 2>&1
 echo "INSTALL_COMPLETE"
 `, chunk => { log(chunk); allOut += chunk; detacher(chunk); });
+    } finally { rescuer.stop(); }
     await detacher.sweep();
 
     step('Wait for install-complete (~45–60 min)', 'done');
