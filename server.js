@@ -6062,7 +6062,7 @@ function makeIsoDetacher(cpDetails, dcId, ionosToken, log) {
     buf += chunk;
     const lines = buf.split('\n'); buf = lines.pop();
     for (const line of lines) {
-      let m = line.match(/Host: (control-\d+)\.\S*, reached installation stage Writing image to disk: 100%/);
+      let m = line.match(/Host: (control-\d+)\.\S*, reached installation stage (?:Writing image to disk: 100%|Rebooting)/);
       if (m) {
         written.add(m[1]);
         if (m[1] !== rendezvous) detach(m[1], false);
