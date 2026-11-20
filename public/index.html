@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.22.8</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.22.9</span>
   </div>
 
   <div class="banner-actions">
@@ -1186,7 +1186,7 @@
               <div class="form-grid">
                 <div class="form-group">
                   <label for="rhcos-ocp-version">OCP Version</label>
-                  <input type="text" id="rhcos-ocp-version" value="4.19" placeholder="e.g. 4.19" style="width:120px" />
+                  <input type="text" id="rhcos-ocp-version" value="4.20" placeholder="e.g. 4.20" style="width:120px" />
                   <div class="field-note">Major.minor — selects the RHCOS qemu qcow2 from Red Hat's mirror</div>
                 </div>
                 <div class="form-group">
@@ -3905,12 +3905,28 @@
     return `${bestPrefix}${bestNum + 1}`;
   }
 
+  // The RHCOS upload form follows the connected cluster's major.minor until the user types a version of their own.
+  function rhcosUpdateNamePlaceholder() {
+    const v = document.getElementById('rhcos-ocp-version'), n = document.getElementById('rhcos-image-name');
+    if (v && n) n.placeholder = 'auto: rhcos-' + (v.value.trim() || '4.20') + '-qemu';
+  }
+  function rhcosSyncVersion(full) {
+    const v = document.getElementById('rhcos-ocp-version');
+    const mm = (String(full || '').match(/^(\d+\.\d+)/) || [])[1];
+    if (!v || !mm || v.dataset.edited === '1') return;
+    v.value = mm;
+    rhcosUpdateNamePlaceholder();
+  }
+  document.getElementById('rhcos-ocp-version').addEventListener('input', function () { this.dataset.edited = '1'; rhcosUpdateNamePlaceholder(); });
+  rhcosUpdateNamePlaceholder();
+
   // ── Render ─────────────────────────────────────────────────────────────────
   function renderOverview(state) {
     const pillEl   = document.getElementById('version-pill');
     const k8sPill  = document.getElementById('k8s-pill');
     if (state.ocpVersion) {
       pillEl.textContent  = `OCP v${state.ocpVersion}`;
+      rhcosSyncVersion(state.ocpVersion);   // the RHCOS image upload defaults to the connected cluster's version
       k8sPill.textContent = `k8s ${state.version}`;
       k8sPill.style.display = '';
     } else {

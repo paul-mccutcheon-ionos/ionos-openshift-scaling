@@ -2758,9 +2758,8 @@ ip route show default | grep -q default || ip route add default via ${gw} metric
               const tmpQcow2Gz = `/tmp/rhcos-upload/rhcos-qemu-temp.qcow2.gz`;
               const tmpQcow2   = `/tmp/rhcos-upload/rhcos-qemu-temp.qcow2`;
 
-              const qemuChk = await sshRunScript(ftpConn, `command -v qemu-img 2>/dev/null || echo MISSING`);
-              if (qemuChk.stdout.trim() === 'MISSING') {
-                throw new Error('qemu-img is not installed on the management host. Install with: dnf install qemu-img');
+              if (!await ensureRemoteCommand(ftpConn, 'qemu-img', ['qemu-img', 'qemu-kvm-tools'], log)) {
+                throw new Error('qemu-img is not installed on the management host and could not be installed automatically (dnf install qemu-img).');
               }
 
               step(`Downloading RHCOS ${rhcosVer} QEMU image from Red Hat mirror…`, 'working');
@@ -4158,6 +4157,19 @@ function sshRunScript(conn, script) {
 }
 
 // Same as above but calls onData(text) for every chunk (real-time output).
+// Makes sure a command exists on the management host, installing the package with dnf when it does not (RHEL 9 management VMs).
+// Returns true when the command is available afterwards. `pkgs` are tried in order.
+async function ensureRemoteCommand(conn, cmd, pkgs, log) {
+  const has = async () => (await sshRunScript(conn, `command -v ${cmd} 2>/dev/null || echo MISSING`)).stdout.trim() !== 'MISSING';
+  if (await has()) return true;
+  for (const pkg of pkgs) {
+    if (log) log(`  ${cmd} is not installed on the management host - installing ${pkg} (dnf)...\n`);
+    try { await sshRunScript(conn, `dnf install -y ${pkg} 2>&1 | tail -3`); } catch (_) { /* try the next package */ }
+    if (await has()) { if (log) log(`  ${cmd} installed.\n`); return true; }
+  }
+  return false;
+}
+
 function sshRunScriptStreaming(conn, script, onData) {
   return new Promise((resolve, reject) => {
     let stdout = '', stderr = '';
@@ -5654,12 +5666,8 @@ fi
       step(`RHCOS raw image already present — skipped download`, 'ok');
     } else {
       // Check qemu-img is installed
-      const qemuCheck = await sshRunScript(conn, `command -v qemu-img 2>/dev/null || echo MISSING`);
-      if (qemuCheck.stdout.trim() === 'MISSING') {
-        throw new Error(
-          'qemu-img is not installed on the management host. ' +
-          'Install it with: dnf install qemu-img  (or: dnf install qemu-kvm-tools) then retry.'
-        );
+      if (!await ensureRemoteCommand(conn, 'qemu-img', ['qemu-img', 'qemu-kvm-tools'], log)) {
+        throw new Error('qemu-img is not installed on the management host and could not be installed automatically (dnf install qemu-img).');
       }
 
       step(`Downloading RHCOS ${safeVersion} QEMU image…`, 'working');
@@ -5807,9 +5815,8 @@ LFTP_SCRIPT_EOF
 chmod 600 ${lftpScript}
 `);
 
-    const lftpCheck = await sshRunScript(conn, `command -v lftp 2>/dev/null || echo MISSING`);
-    if (lftpCheck.stdout.trim() === 'MISSING') {
-      throw new Error('lftp is not installed on the management host.\nInstall it with: dnf install lftp  (or apt install lftp) then retry.');
+    if (!await ensureRemoteCommand(conn, 'lftp', ['lftp'], log)) {
+      throw new Error('lftp is not installed on the management host and could not be installed automatically (dnf install lftp).');
     }
 
     await sshRunScriptStreaming(conn, `
@@ -6868,14 +6875,14 @@ app.post('/api/new-cluster/setup-management', async (req, res) => {
     }
     step('Connect to management VM via SSH', 'done');
 
-    step('Install httpd, lftp, curl, tar, jq, nmstate', 'running');
+    step('Install httpd, lftp, qemu-img, curl, tar, jq, nmstate', 'running');
     await sshRunScriptStreaming(conn, `#!/bin/bash
 set -e
-dnf install -y httpd lftp curl wget tar jq nmstate 2>&1
+dnf install -y httpd lftp qemu-img curl wget tar jq nmstate 2>&1
 systemctl enable --now httpd
 echo "PKG_DONE"
 `, chunk => log(chunk));
-    step('Install httpd, lftp, curl, tar, jq, nmstate', 'done');
+    step('Install httpd, lftp, qemu-img, curl, tar, jq, nmstate', 'done');
 
     // Resolve exact OCP version
     let exactVer = /^\d+\.\d+\.\d+$/.test(ocpVer) ? ocpVer : null;
