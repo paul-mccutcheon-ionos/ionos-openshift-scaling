@@ -442,8 +442,9 @@ const PROVIDER_CLUSTERROLE_RULES = [
   { apiGroups: [''],                     resources: ['nodes'],                  verbs: ['get','list','watch','patch','update','delete'] },
   { apiGroups: ['coordination.k8s.io'],  resources: ['leases'],                 verbs: ['get','list','watch','create','update','patch','delete'] },
   { apiGroups: [''],                     resources: ['events'],                 verbs: ['create','patch'] },
-  // draining a node before its instance is removed (honours PodDisruptionBudgets): list the node's pods, then evict them
-  { apiGroups: [''],                     resources: ['pods'],                   verbs: ['get','list'] },
+  // draining a node before its instance is removed (honours PodDisruptionBudgets): list the node's pods, then evict them;
+  // watch: the NLB syncer follows the ingress router pods in openshift-ingress
+  { apiGroups: [''],                     resources: ['pods'],                   verbs: ['get','list','watch'] },
   { apiGroups: [''],                     resources: ['pods/eviction'],          verbs: ['create'] },
   // cluster ingress domain: lets the provider's NLB syncer recognise this cluster's load balancer
   { apiGroups: ['config.openshift.io'],  resources: ['ingresses'],              verbs: ['get'] }
