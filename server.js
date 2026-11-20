@@ -56,6 +56,22 @@ const CLOUD_API = 'https://api.ionos.com/cloudapi/v6';
 const INSECURE_AGENT = new https.Agent({ rejectUnauthorized: false });
 
 app.use(express.json());
+
+// Every Server-Sent-Events response gets a ': keepalive' comment every 15 s. Steps that stay silent for minutes (decompressing and converting an
+// image, dnf, ISO generation) otherwise let a proxy close the connection and the browser reports 'network error' while the work continues.
+app.use((req, res, next) => {
+  const orig = res.setHeader.bind(res);
+  res.setHeader = function (name, value) {
+    const r = orig(name, value);
+    if (String(name).toLowerCase() === 'content-type' && /text[/]event-stream/.test(String(value)) && !res._sseKeepalive) {
+      res._sseKeepalive = setInterval(() => { try { if (!res.writableEnded && !res.destroyed) res.write(': keepalive' + String.fromCharCode(10, 10)); } catch (_) {} }, 15000);
+      const stop = () => clearInterval(res._sseKeepalive);
+      res.on('close', stop); res.on('finish', stop);
+    }
+    return r;
+  };
+  next();
+});
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ── OpenShift API helpers ──────────────────────────────────────────────────
