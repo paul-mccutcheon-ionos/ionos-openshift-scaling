@@ -1078,7 +1078,7 @@ async function cpRetry(fn, { tries = 14, delayMs = 15000 } = {}) {
     try { return await fn(); }
     catch (e) {
       const transient = [429, 500, 502, 503, 504].includes(e.status) ||
-        /HTTP 429|HTTP 50[0234]|storage is \(re\)initializing|ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|socket hang up|timed? ?out|TLS handshake|unexpected EOF|leader/i.test(e.message || '');
+        /HTTP 429|HTTP 50[0234]|storage is \(re\)initializing|ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|socket hang up|timed? ?out|TLS handshake|unexpected EOF|Unable to connect to the server|connection refused|leader/i.test(e.message || '');
       if (!transient || i >= tries - 1) throw e;
       await new Promise(r => setTimeout(r, delayMs));
     }
@@ -1992,15 +1992,28 @@ async function cpRetireNode(ctx, target, g, emit) {
 
   step(`Retire ${short}: removing its etcd member`, 'working');
   const out = await withMgmtSsh(ctx, async conn => {
-    const exec = c => sshRunScript(conn, `oc --token='${T}' --server='${A}' --insecure-skip-tls-verify=true -n openshift-etcd exec ${other.etcdPod.name} -c etcdctl -- ${c} 2>&1`);
-    const list = await exec('etcdctl member list');
-    const id = cpEtcdMemberHexId(list.stdout, n);
-    if (!id) return { err: `no etcd member named ${n} in: ${list.stdout.slice(0, 300)}` };
-    const rm = await exec(`etcdctl member remove ${id}`);
-    return { id, text: rm.stdout.trim().slice(0, 300) };
+    const exec = c => cpRetry(() => sshRunScript(conn, `oc --token='${T}' --server='${A}' --insecure-skip-tls-verify=true -n openshift-etcd exec ${other.etcdPod.name} -c etcdctl -- ${c} 2>&1`), { tries: 12, delayMs: 15000 });
+    // Each call rides out a briefly unavailable API server (a down member makes it flap). If a removal went through but the reply was
+    // lost, the next listing no longer contains the member, which counts as done.
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const list = await exec('etcdctl member list');
+      const id = cpEtcdMemberHexId(list.stdout, n);
+      if (!id) {
+        if (/, (started|unstarted),/.test(list.stdout)) return { id: null, text: attempt ? 'member already gone (removed by the previous attempt)' : 'member already gone' };
+        return { err: `could not read the member list: ${list.stdout.slice(0, 300)}` };
+      }
+      try {
+        const rm = await exec(`etcdctl member remove ${id}`);
+        return { id, text: rm.stdout.trim().slice(0, 300) };
+      } catch (e) {
+        if (!/not found/i.test(e.message || '')) throw e;   // not found: list again to see whether it is really gone
+      }
+    }
+    return { err: 'the member could not be removed after several attempts' };
   });
-  if (out.err) throw new Error(`Could not find the etcd member (${out.err}). ${n} is drained and its VM is OFF; start the VM again at IONOS to undo.`);
-  log(`  etcd: ${out.text}\n`);
+  if (out.err) throw new Error(`Could not remove the etcd member (${out.err}). ${n} is drained and its VM is OFF; start the VM again at IONOS to undo.`);
+  log(`  etcd: ${out.text}
+`);
   step(`Retire ${short}: etcd member removed`, 'ok');
 
   step(`Retire ${short}: deleting its etcd secrets and the Node`, 'working');
