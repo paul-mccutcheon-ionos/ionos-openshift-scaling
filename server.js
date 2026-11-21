@@ -1444,6 +1444,7 @@ app.post('/api/control-plane/add', async (req, res) => {
     // on ZONE_1 / ZONE_2, always choosing the zone holding fewer control-plane servers (ties → ZONE_1);
     // a MachineSet has a single zone, so each zone gets its own "<name>-z1" / "<name>-z2" MachineSet.
     const plan = [];
+    if (spec.serverType === 'CUBE') b.zoneMode = 'auto';   // a Cube has no zone selection: IONOS only accepts AUTO
     if (b.zoneMode === 'custom') {
       // explicit placement chosen by the operator: one server zone for all new VMs, a storage zone per VM
       const sz = b.serverZone || 'AUTO';
@@ -1637,6 +1638,10 @@ app.post('/api/control-plane/add-indexed', async (req, res) => {
                             diskType: 'SSD_PREMIUM', cpuFamily: b.cpuFamily || 'INTEL_SIERRAFOREST' });
     }
     if (spec.cores < 4 || spec.ramMB < 16 * 1024) throw new Error('A control-plane node needs at least 4 vCPU and 16 GiB RAM.');
+    if (spec.serverType === 'CUBE') {
+      // A Cube has no zone selection at all: IONOS rejects any explicit zone ("Expected one of [AUTO]"). Never send one.
+      policy.serverZone = 'AUTO'; policy.autoSpread = false; policy.diskZones = ['AUTO', 'AUTO', 'AUTO'];
+    }
     const providerSpec = cpIndexedProviderSpec(spec, policy);
     log(`Type ${spec.serverType}: ${spec.cores} vCPU / ${Math.round(spec.ramMB / 1024)} GiB / ${spec.diskGB} GB ${spec.diskType} · image ${img.name} · LAN ${lan} · ${region}\n`);
     log(`Placement policy: server zone ${serverZone}${policy.autoSpread ? ' (auto-spread on)' : ''}` + (spec.serverType === 'CUBE' ? ' (Cube: no separate storage zone)' : `; storage zone by index ${diskZones.map((z, i) => `${i}:${z}`).join(' ')}`) + '\n');

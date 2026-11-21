@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.22.13</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.22.14</span>
   </div>
 
   <div class="banner-actions">
@@ -1739,7 +1739,7 @@
       </div>
       <div class="form-group">
         <label for="cp-zone-mode">Placement</label>
-        <select id="cp-zone-mode" onchange="cpZoneUi()">
+        <select id="cp-zone-mode" onchange="cpZoneUi()" title="A Cube has no zone choice: IONOS always places it itself (Auto).">
           <option value="auto">Auto (IONOS chooses)</option>
           <option value="spread">Spread automatically (storage zones 1/2/3 by index, servers alternate 1/2)</option>
           <option value="custom" selected>Choose per index (server zone + storage zone)</option>
@@ -1753,7 +1753,7 @@
             <select id="cp-server-zone"><option value="AUTO">Auto (IONOS chooses)</option><option value="ZONE_1" selected>Zone 1</option><option value="ZONE_2">Zone 2</option></select></label>
           <span id="cp-disk-zones" style="display:contents"></span>
         </div>
-        <div class="field-note">Servers can only be in Zone 1 or Zone 2; volumes can also use Zone 3. Cube storage (DAS) is part of the server, so only the server zone applies to Cubes.</div>
+        <div class="field-note">Servers can only be in Zone 1 or Zone 2; volumes can also use Zone 3. A Cube has no zone choice at all (its storage is part of the server): IONOS places it, so Placement is fixed to Auto for Cubes.</div>
       </div>
       <div class="form-group cp-dcore" style="display:none">
         <label for="cp-cores">Cores</label>
@@ -3104,9 +3104,14 @@
   }
 
   function cpTypeChanged() {
-    cpZoneUi();
     const type = document.getElementById('cp-type').value;
     const cube = type === 'cube', vcpu = type === 'vcpu';
+    // A Cube has no zone selection at all (server or storage): IONOS always places it, so only "Auto" is offered.
+    const zm = document.getElementById('cp-zone-mode');
+    if (cube) zm.value = 'auto';
+    [...zm.options].forEach(o => { o.disabled = cube && o.value !== 'auto'; });
+    zm.disabled = cube;
+    cpZoneUi();
     document.querySelectorAll('.cp-dcore').forEach(el => { el.style.display = cube ? 'none' : ''; });
     document.querySelectorAll('.cp-cpufam').forEach(el => { el.style.display = type === 'dcore' ? '' : 'none'; });   // vCPU has no CPU family
     document.querySelectorAll('.cp-cube').forEach(el => { el.style.display = cube ? '' : 'none'; });
@@ -3199,7 +3204,7 @@
     if (!lanId) { err.textContent = 'The private cluster LAN could not be detected — enter it in the LAN ID field on the Autoscaling tab.'; err.style.display = 'block'; return; }
     const count = parseInt(document.getElementById('cp-count').value, 10) || 1;
     const what = type === 'cube' ? 'Cube (' + (document.getElementById('cp-cube-template').selectedOptions[0]?.text || '') + ')' : `${type === 'vcpu' ? 'vCPU (shared cores, Balanced SSD)' : 'Dedicated Core'} ${document.getElementById('cp-cores').value} vCPU / ${document.getElementById('cp-ram').value} GiB`;
-    const zoneMode = document.getElementById('cp-zone-mode').value;
+    const zoneMode = type === 'cube' ? 'auto' : document.getElementById('cp-zone-mode').value;
     const serverZone = zoneMode === 'custom' ? document.getElementById('cp-server-zone').value : 'AUTO';
     const diskZones = zoneMode === 'custom' && type !== 'cube' ? [0, 1, 2].map(i => document.getElementById('cp-dz-' + i)?.value || 'AUTO') : ['AUTO', 'AUTO', 'AUTO'];
     const autoSpread = zoneMode === 'spread';
@@ -3281,6 +3286,7 @@
   // tab opens (switchNav) — ionosToken is declared further down, so loading here hit its TDZ.
   document.querySelectorAll('.cp-dcore').forEach(el => { el.style.display = 'none'; });
   document.querySelectorAll('.cp-cube').forEach(el => { el.style.display = ''; });
+  cpTypeChanged();   // the default type is Cube: placement locked to Auto
   // ── Post-upgrade check / repair ────────────────────────────────────────────
   function postUpgradeBody(extra) {
     return Object.assign({ clusterApiUrl, ocpToken, mgmtHost, sshUser, sshKey, sshPassphrase, ionosToken, datacenterId }, extra || {});
