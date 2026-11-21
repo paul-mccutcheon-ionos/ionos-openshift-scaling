@@ -1588,6 +1588,8 @@ app.post('/api/control-plane/add-indexed', async (req, res) => {
   if (!b.clusterApiUrl || !b.ocpToken) return res.status(400).json({ error: 'clusterApiUrl and ocpToken are required.' });
   if (!['dcore', 'cube', 'vcpu'].includes(b.machineType)) return res.status(400).json({ error: "machineType must be 'dcore', 'cube' or 'vcpu'." });
   if (b.backupConfirmed !== true) return res.status(400).json({ error: 'Confirm that a recent etcd snapshot exists (backupConfirmed).' });
+  const swap = b.swapRetire === true;
+  if (swap && b.retireConfirm !== true) return res.status(400).json({ error: 'The swap option deletes old control-plane nodes and their VMs: confirm it (retireConfirm).' });
   const { step, log, done, fail } = makeSseHelpers(res);
   const ctx = postUpgradeCtx(b);
   const A = ctx.apiUrl, T = ctx.token;
@@ -1647,13 +1649,14 @@ app.post('/api/control-plane/add-indexed', async (req, res) => {
     log(`Placement policy: server zone ${serverZone}${policy.autoSpread ? ' (auto-spread on)' : ''}` + (spec.serverType === 'CUBE' ? ' (Cube: no separate storage zone)' : `; storage zone by index ${diskZones.map((z, i) => `${i}:${z}`).join(' ')}`) + '\n');
 
     const perNodeGiB = Number(spec.diskGB) || 0;
+    const needGiB = swap ? perNodeGiB : count * perNodeGiB;   // swap: each old node's volume is freed before the next new one is made
     try {
       const h = await ionosStorageHeadroom(ctx.ionos.token);
       if (h && perNodeGiB) {
-        log(`Contract storage (SSD + DAS together): ${h.freeGiB} GiB free of ${h.limitGiB} GiB; ${count} node(s) x ${perNodeGiB} GiB = ${count * perNodeGiB} GiB needed\n`);
-        if (count * perNodeGiB > h.freeGiB) {
+        log(`Contract storage (SSD + DAS together): ${h.freeGiB} GiB free of ${h.limitGiB} GiB; ${count} node(s) x ${perNodeGiB} GiB = ${needGiB} GiB needed${swap ? ' (swap: one extra node at a time)' : ''}\n`);
+        if (needGiB > h.freeGiB) {
           const fits = Math.floor(h.freeGiB / perNodeGiB);
-          throw new Error(`Not enough contract storage: ${count} node(s) need ${count * perNodeGiB} GiB but only ${h.freeGiB} GiB of the ${h.limitGiB} GiB SSD+DAS limit is free. ` +
+          throw new Error(`Not enough contract storage: ${swap ? 'the swap needs one extra node' : count + ' node(s)'} (${needGiB} GiB) but only ${h.freeGiB} GiB of the ${h.limitGiB} GiB SSD+DAS limit is free. ` +
             (fits >= 1 ? `At most ${fits} node(s) fit now. ` : 'Not even one fits. ') + 'Free storage or ask IONOS support to raise the limit. Nothing was created.');
         }
       }
@@ -1661,7 +1664,7 @@ app.post('/api/control-plane/add-indexed', async (req, res) => {
 
     // one node at a time: create, then wait until it is a Ready etcd member and everything is healthy
     const before = new Set(g.masters.map(m => m.name));
-    const added = [];
+    const added = [], retired = [];
     const seen = new Set();
     const say = (key, text) => { if (!seen.has(key)) { seen.add(key); log(text + '\n'); } };
     let lastEtcd = null;
@@ -1706,8 +1709,24 @@ app.post('/api/control-plane/add-indexed', async (req, res) => {
       if (!joined) throw new Error(`${label}: timed out after 40 minutes (stage: ${stage}). Nodes added before this one: ${added.join(', ') || 'none'}. Nothing was rolled back - inspect the machine and node.`);
       joined.forEach(m => { before.add(m.name); added.push(m.name); });
       step(`${label}: joined, etcd healthy (${lastEtcd.podsReady} members)`, 'ok');
+      if (swap) {
+        // Swap: the new node is a healthy etcd member, so retire the old node with the same index; the count goes 3 -> 4 -> 3.
+        const cur = await cpGather(ctx);
+        const chk = await cpChecks(ctx, cur);
+        const target = cpPickRetireTarget(cur.masters, index);
+        if (!target || target.managed) {
+          log('Swap: no old (hand-built) control-plane node is left to retire.\n');
+        } else {
+          const gate = cpRetireGate(cur, chk, target);
+          if (gate.blockers.length) throw new Error(`${label} joined, but the old node ${target.name} was NOT retired because: ${gate.blockers.join(' | ')}. etcd has ${cur.etcd.podsReady} members now. Nothing was removed; fix the cause and retire it separately.`);
+          step(`${label}: swap - retiring the old node ${target.name}`, 'working');
+          const r = await cpRetireNode(ctx, target, cur, { step, log });
+          retired.push(r.node);
+          lastEtcd = (await cpGather(ctx)).etcd;
+        }
+      }
     }
-    return done(`Added ${added.join(', ')} one at a time. etcd now has ${lastEtcd?.podsReady} healthy members. When all three indexed machines exist and the old nodes are retired, activate the ControlPlaneMachineSet.`, { nodes: added });
+    return done(`Added ${added.join(', ')} one at a time` + (retired.length ? ` and retired ${retired.join(', ')}` : '') + `. etcd now has ${lastEtcd?.podsReady} healthy members. When all three indexed machines exist and the old nodes are retired, activate the ControlPlaneMachineSet.`, { nodes: added, retired });
   } catch (e) { fail(e.message); } finally { clearInterval(keepAlive); }
 });
 
@@ -1838,6 +1857,171 @@ app.post('/api/control-plane/activate-cpms', async (req, res) => {
 });
 
 // Dry-run plan for retiring one fixed control-plane node. Reads only — it never changes anything.
+// ── Swap: retire an old (hand-built) control-plane node once its replacement has joined ──────────────────────────────────
+// Used by "Add control-plane node" with the swap option, and by POST /api/control-plane/retire. Destructive: it drains the
+// node, powers its VM off, removes its etcd member, deletes the Node and finally deletes the VM and its volumes at IONOS.
+// Only nodes WITHOUT a Machine (the fixed control-0/1/2) are ever retired, and never when fewer than 3 healthy nodes would remain.
+
+// Which old node a newly joined node replaces: the one with the same index (control-0 <-> master-0), else the lowest remaining.
+function cpPickRetireTarget(masters, newIndex) {
+  const fixed = masters.filter(m => !m.managed).sort((a, b) => a.name.localeCompare(b.name));
+  if (!fixed.length) return null;
+  const idxOf = m => { const x = /-(\d+)$/.exec(String(m.name).split('.')[0]); return x ? Number(x[1]) : null; };
+  return fixed.find(m => idxOf(m) === Number(newIndex)) || fixed[0];
+}
+
+// The etcd member ID (hex, as `etcdctl member remove` wants it) of the member named `nodeName` in `etcdctl member list -w json`.
+function cpEtcdMemberHexId(listJson, nodeName) {
+  let data; try { data = typeof listJson === 'string' ? JSON.parse(listJson) : listJson; } catch (_) { return null; }
+  const short = String(nodeName).split('.')[0];
+  const m = (data.members || []).find(x => x.name === nodeName || String(x.name).split('.')[0] === short);
+  return m && m.ID !== undefined ? BigInt(m.ID).toString(16) : null;
+}
+
+// Conditions that must hold before ANY old node may be retired. Returns { blockers, warnings, remaining, healthyAfter }.
+function cpRetireGate(g, checks, target, needReplacement = true) {
+  const blockers = [], warnings = [];
+  if (!target) return { blockers: ['No such control-plane node.'], warnings, remaining: [], healthyAfter: 0 };
+  if (target.managed) blockers.push('This node is Machine-API-managed; delete its Machine instead.');
+  const remaining = g.masters.filter(m => m.name !== target.name);
+  const healthyAfter = remaining.filter(m => m.ready && m.etcdPod?.ready).length;
+  if (healthyAfter < 3) blockers.push(`After removal only ${healthyAfter} healthy control-plane node(s) would remain; at least 3 are needed.`);
+  if (!g.etcd.membersAvailable || g.etcd.podsReady !== g.etcd.pods) blockers.push('etcd is not fully healthy right now.');
+  if (g.operatorIssues.length) blockers.push(`operators with problems: ${g.operatorIssues.map(o => o.name).join(', ')}.`);
+  if (checks.items.find(i => i.id === 'cluster-stable')?.status !== 'ok') blockers.push('The cluster is not stable (upgrade, pool update or degraded operators).');
+  if (checks.items.find(i => i.id === 'provider-nlb')?.status !== 'ok') blockers.push('The provider does not keep the API load-balancer rules in step with the control plane.');
+  if (needReplacement && !g.masters.some(m => m.managed && m.ready && m.etcdPod?.ready)) blockers.push('There is no Ready Machine-managed control-plane node with a healthy etcd member yet.');
+  return { blockers, warnings, remaining, healthyAfter };
+}
+
+const ocpPostJson = async (apiUrl, urlPath, token, body) => {
+  const res = await fetch(`${apiUrl}${urlPath}`, { method: 'POST', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Accept': 'application/json' }, body: JSON.stringify(body), agent: INSECURE_AGENT });
+  if (!res.ok) { const e = new Error(`OpenShift API POST ${urlPath} returned ${res.status}: ${(await res.text()).slice(0, 200)}`); e.status = res.status; throw e; }
+  return res.json().catch(() => ({}));
+};
+const sleepMs = ms => new Promise(r => setTimeout(r, ms));
+
+// Cordon, then evict every pod that is not a DaemonSet / static (mirror) pod, honouring PodDisruptionBudgets (429 = retry).
+async function cpDrainNode(ctx, nodeName, { log, timeoutMs = 20 * 60000 }) {
+  const A = ctx.apiUrl, T = ctx.token;
+  await ocpPatch(A, `/api/v1/nodes/${encodeURIComponent(nodeName)}`, T, { spec: { unschedulable: true } });
+  const deadline = Date.now() + timeoutMs;
+  let last = -1;
+  while (Date.now() < deadline) {
+    const pods = (await ocpGet(A, `/api/v1/pods?fieldSelector=${encodeURIComponent('spec.nodeName=' + nodeName)}`, T)).items || [];
+    const todo = pods.filter(p => {
+      if (p.metadata?.annotations?.['kubernetes.io/config.mirror']) return false;                       // static pod: lives with the node
+      if ((p.metadata?.ownerReferences || []).some(r => r.kind === 'DaemonSet')) return false;          // would be recreated at once
+      return !['Succeeded', 'Failed'].includes(p.status?.phase);
+    });
+    if (!todo.length) return;
+    if (todo.length !== last) { log(`  drain ${nodeName}: ${todo.length} pod(s) still to leave\n`); last = todo.length; }
+    for (const p of todo) {
+      if (p.metadata?.deletionTimestamp) continue;
+      try {
+        await ocpPostJson(A, `/api/v1/namespaces/${encodeURIComponent(p.metadata.namespace)}/pods/${encodeURIComponent(p.metadata.name)}/eviction`, T,
+          { apiVersion: 'policy/v1', kind: 'Eviction', metadata: { name: p.metadata.name, namespace: p.metadata.namespace } });
+      } catch (e) { if (e.status !== 429 && e.status !== 404) throw e; }   // 429: a PodDisruptionBudget refuses for now
+    }
+    await sleepMs(10000);
+  }
+  throw new Error(`drain of ${nodeName} did not finish in ${Math.round(timeoutMs / 60000)} minutes (a PodDisruptionBudget or a stuck pod is holding it)`);
+}
+
+// The whole retire. `emit.step/log` stream progress. Stops at the first problem and says exactly what state the node is in.
+async function cpRetireNode(ctx, target, g, emit) {
+  const { step, log } = emit;
+  const A = ctx.apiUrl, T = ctx.token, n = target.name, short = n.split('.')[0];
+  if (!ctx.ionos) throw new Error('IONOS token / datacenter are required to delete the VM.');
+  // 0. Everything that can fail cleanly must fail BEFORE the node is touched.
+  step(`Retire ${short}: locating its VM`, 'working');
+  const servers = await ionosGet(`/datacenters/${encodeURIComponent(ctx.ionos.dc)}/servers?depth=3`, ctx.ionos.token);
+  const srv = (servers.items || []).find(x => (x.entities?.nics?.items || []).some(nic => (nic.properties?.ips || []).includes(target.ip)));
+  if (!srv) throw new Error(`No IONOS server with the IP ${target.ip} in datacenter ${ctx.ionos.dc}; ${n} was not touched.`);
+  // A Cube's storage (DAS) goes with the server; only real block volumes are deleted separately.
+  const volumes = srv.properties?.type === 'CUBE' ? [] : (srv.entities?.volumes?.items || []).map(v => ({ id: v.id, name: v.properties?.name, size: v.properties?.size, type: v.properties?.type }));
+  log(`  VM: ${srv.properties?.name} (${srv.id}, ${srv.properties?.type}); volumes: ${volumes.map(v => `${v.name} ${v.size || ''}GB ${v.type}`).join(', ') || 'none (Cube storage goes with the server)'}\n`);
+  const other = g.masters.find(m => m.name !== n && m.ready && m.etcdPod?.ready);
+  if (!other) throw new Error('No other Ready control-plane node with a healthy etcd pod to run etcdctl from.');
+  step(`Retire ${short}: VM located`, 'ok');
+
+  step(`Retire ${short}: cordon and drain`, 'working');
+  await cpDrainNode(ctx, n, { log });
+  step(`Retire ${short}: drained`, 'ok');
+
+  step(`Retire ${short}: powering the VM off`, 'working');
+  await ionosAction(`/datacenters/${encodeURIComponent(ctx.ionos.dc)}/servers/${srv.id}/stop`, ctx.ionos.token);
+  for (let i = 0; i < 60; i++) {
+    const s = await ionosGet(`/datacenters/${encodeURIComponent(ctx.ionos.dc)}/servers/${srv.id}`, ctx.ionos.token);
+    if (s.properties?.vmState === 'SHUTOFF') break;
+    if (i === 59) throw new Error(`The VM did not power off. State: ${n} is cordoned and drained, its VM is still running; its etcd member is untouched.`);
+    await sleepMs(5000);
+  }
+  step(`Retire ${short}: VM off`, 'ok');
+
+  step(`Retire ${short}: removing its etcd member`, 'working');
+  const out = await withMgmtSsh(ctx, async conn => {
+    const exec = c => sshRunScript(conn, `oc --token='${T}' --server='${A}' --insecure-skip-tls-verify=true -n openshift-etcd exec ${other.etcdPod.name} -c etcdctl -- ${c} 2>&1`);
+    const list = await exec('etcdctl member list -w json');
+    const id = cpEtcdMemberHexId(list.stdout.slice(list.stdout.indexOf('{')), n);
+    if (!id) return { err: `no etcd member named ${n} in: ${list.stdout.slice(0, 300)}` };
+    const rm = await exec(`etcdctl member remove ${id}`);
+    return { id, text: rm.stdout.trim().slice(0, 300) };
+  });
+  if (out.err) throw new Error(`Could not find the etcd member (${out.err}). ${n} is drained and its VM is OFF; start the VM again at IONOS to undo.`);
+  log(`  etcd: ${out.text}\n`);
+  step(`Retire ${short}: etcd member removed`, 'ok');
+
+  step(`Retire ${short}: deleting its etcd secrets and the Node`, 'working');
+  for (const s of ['etcd-peer-', 'etcd-serving-', 'etcd-serving-metrics-']) {
+    try { await ocpDelete(A, `/api/v1/namespaces/openshift-etcd/secrets/${s}${n}`, T); } catch (e) { if (e.status !== 404) throw e; }
+  }
+  try { await ocpDelete(A, `/api/v1/nodes/${encodeURIComponent(n)}`, T); } catch (e) { if (e.status !== 404) throw e; }
+  step(`Retire ${short}: Node deleted`, 'ok');
+
+  step(`Retire ${short}: waiting for etcd and the operators to settle`, 'working');
+  const deadline = Date.now() + 25 * 60000;
+  let cur = null;
+  while (Date.now() < deadline) {
+    await sleepMs(15000);
+    cur = await cpGather(ctx);
+    if (!cur.masters.some(m => m.name === n) && cur.etcd.membersAvailable && cur.etcd.podsReady === cur.etcd.pods && cur.etcd.pods === cur.masters.length && cur.operatorIssues.length === 0) break;
+    cur = null;
+  }
+  if (!cur) throw new Error(`etcd and the operators did not settle within 25 minutes after removing ${n}. The Node and etcd member are gone; the VM ${srv.properties?.name} (${srv.id}) is still there, powered off. Check the cluster before deleting it.`);
+  step(`Retire ${short}: cluster settled (${cur.etcd.podsReady} etcd members)`, 'ok');
+
+  step(`Retire ${short}: deleting the VM and its volumes at IONOS`, 'working');
+  try { await ionosDetach(`/datacenters/${encodeURIComponent(ctx.ionos.dc)}/servers/${srv.id}`, ctx.ionos.token); } catch (e) { if (e.status !== 404) throw e; }
+  await ionosWaitAvailable(`/datacenters/${encodeURIComponent(ctx.ionos.dc)}`, ctx.ionos.token, 600000).catch(() => {});
+  for (const v of volumes) {
+    try { await ionosDetach(`/datacenters/${encodeURIComponent(ctx.ionos.dc)}/volumes/${v.id}`, ctx.ionos.token); log(`  deleted volume ${v.name} (${v.size || ''}GB)\n`); } catch (e) { if (e.status !== 404) throw e; }
+  }
+  step(`Retire ${short}: VM and volumes deleted`, 'ok');
+  return { node: n, vm: srv.properties?.name, volumes: volumes.length };
+}
+
+// Retire one old control-plane node now (destructive: deletes the node and its VM). The caller must type the node name.
+app.post('/api/control-plane/retire', async (req, res) => {
+  const b = req.body || {};
+  if (!b.clusterApiUrl || !b.ocpToken || !b.node) return res.status(400).json({ error: 'clusterApiUrl, ocpToken and node are required.' });
+  if (b.retireConfirm !== b.node) return res.status(400).json({ error: 'Confirm by sending the node name in retireConfirm: this deletes the node and its VM.' });
+  if (b.backupConfirmed !== true) return res.status(400).json({ error: 'Confirm that a recent etcd snapshot exists (backupConfirmed).' });
+  const { step, log, done, fail } = makeSseHelpers(res);
+  const ctx = postUpgradeCtx(b);
+  try {
+    step('Checking the cluster is ready…', 'working');
+    const g = await cpGather(ctx);
+    const checks = await cpChecks(ctx, g);
+    const target = g.masters.find(m => m.name === b.node);
+    const gate = cpRetireGate(g, checks, target);
+    if (gate.blockers.length) throw new Error('Not allowed: ' + gate.blockers.join(' | '));
+    step('Cluster ready', 'ok');
+    const r = await cpRetireNode(ctx, target, g, { step, log });
+    done(`Retired ${r.node}: Node, etcd member, VM ${r.vm} and ${r.volumes} volume(s) deleted.`, r);
+  } catch (e) { fail(e.message); }
+});
+
 app.post('/api/control-plane/retire-plan', async (req, res) => {
   if (!req.body.clusterApiUrl || !req.body.ocpToken || !req.body.node) return res.status(400).json({ error: 'clusterApiUrl, ocpToken and node are required.' });
   const ctx = postUpgradeCtx(req.body);

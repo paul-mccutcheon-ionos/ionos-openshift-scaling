@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.22.14</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.0</span>
   </div>
 
   <div class="banner-actions">
@@ -1783,6 +1783,27 @@
       </div>
     </div>
     <div class="field-note" id="cp-lan-note" style="margin-top:0.5rem">Network: the private cluster LAN from the Autoscaling tab (detected automatically).</div>
+    <div id="cp-swap-box" style="margin-top:0.9rem;border:1px solid #1e3a5f;border-radius:8px;padding:0.7rem 0.9rem;background:#0b1424">
+      <label style="display:flex;gap:0.5rem;align-items:flex-start;font-size:0.85rem;color:#e2e8f0;cursor:pointer">
+        <input type="checkbox" id="cp-swap" style="accent-color:#f59e0b;width:15px;height:15px;margin-top:0.15rem" />
+        <span><strong>Swap: retire one old node after each new node has joined</strong><br>
+          <span style="color:#94a3b8;font-size:0.8rem">For tight storage quotas. After a new control-plane node is a healthy etcd member, the old (hand-built) node with the same index is drained, its etcd member removed, its Node deleted and its VM and volumes deleted. The cluster goes 3 &rarr; 4 &rarr; 3 instead of growing to 6.
+          <span style="color:#fbbf24"> Destructive: it deletes VMs.</span></span></span>
+      </label>
+      <details style="margin-top:0.5rem;font-size:0.8rem;color:#94a3b8">
+        <summary style="cursor:pointer;color:#93c5fd">Scenarios: what happens</summary>
+        <div style="margin-top:0.5rem;display:grid;gap:0.55rem;line-height:1.45">
+          <div><strong style="color:#e2e8f0">1. Swap on, everything healthy (the purpose).</strong> For each node added: create it, wait until it is Ready and an etcd member and the operators are settled (3&rarr;4 members). Then take the old node with the same index (control-0 &harr; master-0, control-1 &harr; master-1, ...; if that index is gone, the lowest remaining old node): cordon and drain it (PodDisruptionBudgets honoured), power its VM off, remove its etcd member from another master, delete its etcd secrets and the Node, wait for etcd and the operators to settle (back to 3 members), then delete the VM and its volumes at IONOS. Only one extra node exists at any time, so the quota check needs room for ONE node, not all of them. The provider keeps the API and machine-config load-balancer rules in step: the new node is added before the old one disappears.</div>
+          <div><strong style="color:#e2e8f0">2. Swap off (default).</strong> New nodes are added next to the old ones (3&rarr;4&rarr;5&rarr;6 members) and nothing is removed. Needs quota for every new node at once. You retire old nodes later, one at a time.</div>
+          <div><strong style="color:#e2e8f0">3. The new node does not appear or does not become healthy.</strong> Nothing is retired and the run stops with the old nodes untouched. The cluster has its original nodes (plus the unfinished new one).</div>
+          <div><strong style="color:#e2e8f0">4. The new node joined but the safety checks fail before the retire</strong> (etcd not fully healthy, an operator degraded, the load balancer not covering the new node, fewer than 3 healthy nodes would remain). The run stops with 4 control-plane nodes and nothing removed; fix the cause, then retire the old node separately.</div>
+          <div><strong style="color:#e2e8f0">5. The retire fails part-way.</strong> It stops at the failing step and states exactly what was done: a drain blocked by a PodDisruptionBudget (node cordoned, nothing else touched); the VM would not power off (drained, still running); the etcd member could not be found (VM is OFF: start it again at IONOS to undo); etcd or an operator did not settle after the removal (Node and member gone, the VM is still there, powered off: check the cluster first, then delete it). There is no automatic rollback.</div>
+          <div><strong style="color:#e2e8f0">6. No old nodes left.</strong> When all hand-built nodes are gone the swap does nothing and the run just adds the node.</div>
+          <div><strong style="color:#e2e8f0">7. IONOS storage limits.</strong> Freed volumes make room at once, but IONOS also limits how much storage is created and deleted in a short time (error VDC-5-1091). A swap creates and deletes a volume back to back, so on a nearly exhausted account it can still be refused. Then nothing is removed.</div>
+          <div><strong style="color:#e2e8f0">What it never does:</strong> retire a node that has a Machine; retire when fewer than 3 healthy control-plane nodes would remain; retire anything without your snapshot confirmation and this explicit confirmation. Take the etcd snapshot first.</div>
+        </div>
+      </details>
+    </div>
     <div style="margin-top:0.9rem;display:flex;gap:0.9rem;align-items:center;flex-wrap:wrap">
       <button onclick="cpBackup()" style="background:#14233a;color:#93c5fd;border:1px solid #2563eb;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;cursor:pointer">Take etcd snapshot</button>
       <label style="display:flex;gap:0.5rem;align-items:center;font-size:0.85rem;color:#e2e8f0;cursor:pointer">
@@ -1833,16 +1854,21 @@
 
   <!-- ── Control Plane: retire (dry run) ───────────────────────────────────── -->
   <div class="card" id="cp-retire-card" style="display:none">
-    <h2>&#128260; Retire a fixed control-plane node &mdash; dry run</h2>
+    <h2>&#128260; Retire a fixed control-plane node</h2>
     <p style="font-size:0.82rem;color:#64748b;margin:0 0 0.9rem">
-      Shows the safety checks and the exact ordered steps for removing one of the hand-built nodes once its replacement is in place.
-      <strong style="color:#94a3b8">Nothing is changed</strong> &mdash; executing a retire is a separate, deliberate step.
+      &ldquo;Show plan&rdquo; shows the safety checks and the ordered steps for removing one of the hand-built nodes once its replacement is in place; it changes nothing.
+      &ldquo;Retire now&rdquo; then <strong style="color:#fbbf24">does it</strong>: drain, power the VM off, remove the etcd member, delete the Node, delete the VM and its volumes. The same steps the swap option in &ldquo;Add a control-plane node&rdquo; runs automatically.
     </p>
     <div style="display:flex;gap:0.6rem;align-items:center;flex-wrap:wrap">
       <select id="cp-retire-node" style="min-width:180px"><option value="">Run &ldquo;Check readiness&rdquo; first</option></select>
       <button onclick="cpRetirePlan()" style="background:#1e3a5f;color:#93c5fd;border:1px solid #2563eb;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;cursor:pointer">Show plan</button>
+      <button id="cp-retire-btn" onclick="cpRetireNow()" style="background:#3b1d0a;color:#fdba74;border:1px solid #c2410c;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;font-weight:600;cursor:pointer">Retire now (deletes the node and its VM)</button>
     </div>
+    <div class="field-note" style="margin-top:0.4rem">Uses the &ldquo;A recent etcd snapshot exists&rdquo; box above. You also have to type the node name.</div>
     <div id="cp-retire-result" style="font-size:0.85rem;margin-top:0.8rem"></div>
+    <pre id="cp-retire-log" class="hidden" style="max-height:260px;overflow-y:auto;background:#0a0d14;padding:0.6rem 0.8rem;border-radius:6px;font-size:0.75rem;color:#94a3b8;white-space:pre-wrap;margin-top:0.6rem"></pre>
+    <div id="cp-retire-error" style="display:none;color:#f87171;font-size:0.85rem;margin-top:0.5rem"></div>
+    <div id="cp-retire-done" class="hidden" style="color:#6ee7b7;font-size:0.85rem;margin-top:0.5rem"></div>
   </div>
 
   <!-- ── Card: Existing Health Checks ──────────────────────────────────────── -->
@@ -3211,10 +3237,13 @@
     const placement = zoneMode === 'custom'
       ? `servers in ${serverZone}` + (type === 'cube' ? '' : ', storage by index ' + diskZones.map((z, i) => `${i}→${z}`).join(' '))
       : zoneMode === 'spread' ? 'automatic spread (storage zones 1/2/3 by index, servers alternate zones 1 and 2)' : 'Auto (IONOS chooses)';
-    if (!confirm(`Add ${count} control-plane node(s): ${what}\n\nZone placement: ${placement}.\n\nThey are created ONE AT A TIME (each must be a healthy etcd member before the next starts), next to the existing control-plane nodes. Nothing is removed. Continue?`)) return;
+    const swap = document.getElementById('cp-swap').checked;
+    if (!swap && !confirm(`Add ${count} control-plane node(s): ${what}\n\nZone placement: ${placement}.\n\nThey are created ONE AT A TIME (each must be a healthy etcd member before the next starts), next to the existing control-plane nodes. Nothing is removed. Continue?`)) return;
+    if (swap && !confirm(`SWAP: add ${count} control-plane node(s): ${what}\n\nZone placement: ${placement}.\n\nAfter EACH new node is a healthy etcd member, the matching OLD node is drained, its etcd member removed, its Node deleted and its VM and volumes DELETED at IONOS. This cannot be undone.\n\nYou confirm that a recent etcd snapshot exists. Continue?`)) return;
     const btn = document.getElementById('cp-add-btn'); btn.disabled = true; btn.style.opacity = '0.5';
     await cpStream('/api/control-plane/add-indexed', cpBody({
       machineType: type, count, lanId, zoneMode, serverZone, diskZones, autoSpread, imageId: document.getElementById('cp-image').value, backupConfirmed: document.getElementById('cp-backup-ok').checked,
+      swapRetire: swap, retireConfirm: swap,
       cores: document.getElementById('cp-cores').value, ramGiB: document.getElementById('cp-ram').value, diskGB: document.getElementById('cp-disk').value,
       cpuFamily: document.getElementById('cp-cpufamily').value.trim(), cubeTemplateId: document.getElementById('cp-cube-template').value }), log,
       (msg) => { done.innerHTML = '<strong>&#10003; Done.</strong> ' + escHtml(msg); done.classList.remove('hidden'); cpStatus(); },
@@ -3281,6 +3310,26 @@
     } catch (e) { out.innerHTML = `<div style="color:#f87171">Plan failed: ${escHtml(e.message)}</div>`; }
   }
 
+
+  async function cpRetireNow() {
+    const out = document.getElementById('cp-retire-result'), log = document.getElementById('cp-retire-log');
+    const err = document.getElementById('cp-retire-error'), done = document.getElementById('cp-retire-done');
+    err.style.display = 'none'; done.classList.add('hidden');
+    if (cpNeedConnection(err)) { err.style.display = 'block'; return; }
+    const node = document.getElementById('cp-retire-node').value;
+    if (!node) { err.textContent = 'Run "Check readiness" and pick a node first.'; err.style.display = 'block'; return; }
+    if (!document.getElementById('cp-backup-ok').checked) { err.textContent = 'Take an etcd snapshot and tick "A recent etcd snapshot exists" first.'; err.style.display = 'block'; return; }
+    const short = node.split('.')[0];
+    const typed = prompt(`This DRAINS ${node}, powers its VM off, removes its etcd member, deletes the Node and DELETES its VM and volumes at IONOS. It cannot be undone.
+
+Type the node name (${short}) to continue:`);
+    if (typed === null) return;
+    if (typed.trim() !== short && typed.trim() !== node) { err.textContent = 'The name did not match; nothing was done.'; err.style.display = 'block'; return; }
+    const btn = document.getElementById('cp-retire-btn'); btn.disabled = true; btn.style.opacity = '0.5';
+    await cpStream('/api/control-plane/retire', cpBody({ node, backupConfirmed: true, retireConfirm: node }), log,
+      (msg) => { done.innerHTML = '<strong>&#10003; Done.</strong> ' + escHtml(msg); done.classList.remove('hidden'); btn.disabled = false; btn.style.opacity = ''; cpStatus(); },
+      (m) => { err.textContent = m; err.style.display = 'block'; btn.disabled = false; btn.style.opacity = ''; cpStatus(); });
+  }
 
   // The form defaults to Cube: show its fields only. Templates load when the Control Plane
   // tab opens (switchNav) — ionosToken is declared further down, so loading here hit its TDZ.
