@@ -1071,6 +1071,20 @@ const isNodeReady  = n => (n.status?.conditions || []).some(c => c.type === 'Rea
 const nodeIpOf     = n => (n.status?.addresses || []).find(a => a.type === 'InternalIP')?.address;
 const podReady     = p => p.status?.phase === 'Running' && (p.status?.containerStatuses || []).length > 0 && (p.status.containerStatuses || []).every(c => c.ready);
 
+// The API server answers 429 "storage is (re)initializing", 5xx or times out for a while whenever etcd restarts or rolls a new
+// revision, which happens after every control-plane membership change. A long-running add/retire must ride that out, not abort.
+async function cpRetry(fn, { tries = 14, delayMs = 15000 } = {}) {
+  for (let i = 0; ; i++) {
+    try { return await fn(); }
+    catch (e) {
+      const transient = [429, 500, 502, 503, 504].includes(e.status) ||
+        /HTTP 429|HTTP 50[0234]|storage is \(re\)initializing|ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|socket hang up|timed? ?out|TLS handshake|unexpected EOF|leader/i.test(e.message || '');
+      if (!transient || i >= tries - 1) throw e;
+      await new Promise(r => setTimeout(r, delayMs));
+    }
+  }
+}
+
 // Everything the status view and the safety checks need, read-only.
 async function cpGather(ctx) {
   const A = ctx.apiUrl, T = ctx.token;
@@ -1498,7 +1512,7 @@ app.post('/api/control-plane/add', async (req, res) => {
       while (Date.now() < deadline) {
         await new Promise(r => setTimeout(r, 20000));
         polls++;
-        const cur = await cpGather(ctx);
+        const cur = await cpRetry(() => cpGather(ctx));
         lastEtcd = cur.etcd;
         const fresh = cur.masters.filter(m => !before.has(m.name));
         const ms = cur.masterMachines.filter(m => m.machineSet === item.setName);
@@ -1685,7 +1699,7 @@ app.post('/api/control-plane/add-indexed', async (req, res) => {
       while (Date.now() < deadline) {
         await new Promise(r => setTimeout(r, 20000));
         polls++;
-        const cur = await cpGather(ctx);
+        const cur = await cpRetry(() => cpGather(ctx));
         lastEtcd = cur.etcd;
         const fresh = cur.masters.filter(m => !before.has(m.name));
         const mine = cur.masterMachines.find(m => m.name === name);
@@ -1711,8 +1725,8 @@ app.post('/api/control-plane/add-indexed', async (req, res) => {
       step(`${label}: joined, etcd healthy (${lastEtcd.podsReady} members)`, 'ok');
       if (swap) {
         // Swap: the new node is a healthy etcd member, so retire the old node with the same index; the count goes 3 -> 4 -> 3.
-        const cur = await cpGather(ctx);
-        const chk = await cpChecks(ctx, cur);
+        const cur = await cpRetry(() => cpGather(ctx));
+        const chk = await cpRetry(() => cpChecks(ctx, cur));
         const target = cpPickRetireTarget(cur.masters, index);
         if (!target || target.managed) {
           log('Swap: no old (hand-built) control-plane node is left to retire.\n');
@@ -1722,7 +1736,7 @@ app.post('/api/control-plane/add-indexed', async (req, res) => {
           step(`${label}: swap - retiring the old node ${target.name}`, 'working');
           const r = await cpRetireNode(ctx, target, cur, { step, log });
           retired.push(r.node);
-          lastEtcd = (await cpGather(ctx)).etcd;
+          lastEtcd = (await cpRetry(() => cpGather(ctx))).etcd;
         }
       }
     }
@@ -1925,7 +1939,7 @@ async function cpDrainNode(ctx, nodeName, { log, timeoutMs = 20 * 60000 }) {
   const deadline = Date.now() + timeoutMs;
   let last = -1;
   while (Date.now() < deadline) {
-    const pods = (await ocpGet(A, `/api/v1/pods?fieldSelector=${encodeURIComponent('spec.nodeName=' + nodeName)}`, T)).items || [];
+    const pods = (await cpRetry(() => ocpGet(A, `/api/v1/pods?fieldSelector=${encodeURIComponent('spec.nodeName=' + nodeName)}`, T))).items || [];
     const todo = pods.filter(p => {
       if (p.metadata?.annotations?.['kubernetes.io/config.mirror']) return false;                       // static pod: lives with the node
       if ((p.metadata?.ownerReferences || []).some(r => r.kind === 'DaemonSet')) return false;          // would be recreated at once
@@ -2001,7 +2015,7 @@ async function cpRetireNode(ctx, target, g, emit) {
   let cur = null;
   while (Date.now() < deadline) {
     await sleepMs(15000);
-    cur = await cpGather(ctx);
+    cur = await cpRetry(() => cpGather(ctx));
     if (!cur.masters.some(m => m.name === n) && cur.etcd.membersAvailable && cur.etcd.podsReady === cur.etcd.pods && cur.etcd.pods === cur.masters.length && cur.operatorIssues.length === 0) break;
     cur = null;
   }
