@@ -8059,7 +8059,7 @@ app.post('/api/compliance/preflight', async (req, res) => {
         runDetail = suite.map(p => `${p.metadata.name} ${p.status?.phase}`).join(', ');
       }
       if (running) {
-        items.push({ key: 'opct-running', label: 'No OPCT run is already in progress', status: 'fail', detail: `A run is active in the cluster (${runDetail}). Wait for it, or collect its results.` });
+        items.push({ key: 'opct-running', label: 'No OPCT run is already in progress', status: 'fail', detail: `A run is active in the cluster (${runDetail}). Use Fix: a finished run is saved with opct retrieve and then removed; a run still in progress is left alone.` });
       } else {
         items.push({
           key: 'opct-leftovers', label: 'No leftover OPCT / e2e namespaces from an earlier run',
@@ -8316,17 +8316,37 @@ app.post('/api/compliance/preflight/fix-opct-leftovers', async (req, res) => {
   const kc = (kubeconfigPath || '/root/.kube/config').trim().replace(/'/g, "'\\''");
   let conn;
   try {
-    step('Check that no OPCT run is active', 'running');
-    if (apiUrl && ocpToken) {
-      const pods = await ocpGet(apiUrl, '/api/v1/namespaces/opct/pods', ocpToken).catch(() => ({ items: [] }));
-      const active = (pods.items || []).filter(p => (/sonobuoy/.test(p.metadata.name) || p.metadata.labels?.component === 'sonobuoy' || p.metadata.labels?.['sonobuoy-plugin']) && ['Running', 'Pending'].includes(p.status?.phase));
-      if (active.length) throw new Error(`a run is active (${active.map(p => p.metadata.name).join(', ')}); not destroying it`);
-    }
-    step('Check that no OPCT run is active', 'done');
-
     step('Connect to management host via SSH', 'running');
     conn = await sshConnect(mgmtHost, 'root', sshKey, sshPassphrase);
     step('Connect to management host via SSH', 'done');
+
+    // A finished run keeps its sonobuoy pod in phase Running until `opct destroy`, so pod phase alone cannot tell
+    // "active" from "finished". Ask OPCT itself; only a run whose Global Status is "complete" may be cleaned up.
+    step('Check that no OPCT run is active', 'running');
+    let active = false;
+    if (apiUrl && ocpToken) {
+      const pods = await ocpGet(apiUrl, '/api/v1/namespaces/opct/pods', ocpToken).catch(() => ({ items: [] }));
+      active = (pods.items || []).some(p => (/sonobuoy/.test(p.metadata.name) || p.metadata.labels?.component === 'sonobuoy' || p.metadata.labels?.['sonobuoy-plugin']) && ['Running', 'Pending'].includes(p.status?.phase));
+    }
+    if (active) {
+      const st = await sshRunScript(conn, `export KUBECONFIG='${kc}'; opct status 2>&1 | grep -i 'Global Status' | head -1`);
+      const gs = st.stdout.trim();
+      log('  ' + (gs || 'opct status gave no Global Status line') + '\n');
+      if (!/complete/i.test(gs)) throw new Error('a run is still active (' + (gs || 'status unknown') + '); not destroying it');
+    }
+    step('Check that no OPCT run is active', 'done');
+
+    // Results are deleted with the namespace, so save them first and stop if that fails.
+    const nsOut = await sshRunScript(conn, `export KUBECONFIG='${kc}'; oc get ns opct --no-headers 2>/dev/null | awk '{print $1}'`);
+    if (nsOut.stdout.trim() === 'opct' && active) {
+      step('Save the finished run results (opct retrieve)', 'running');
+      const dir = '/root/opct-results/' + new Date().toISOString().replace(/[:.]/g, '-');
+      const rr = await sshRunScript(conn, `export KUBECONFIG='${kc}'; mkdir -p ${dir} && cd ${dir} && opct retrieve . 2>&1 | tail -3; ls -1 ${dir}/*.tar.gz 2>/dev/null | head -1`);
+      const tarball = rr.stdout.split('\n').map(l => l.trim()).filter(l => /\.tar\.gz$/.test(l)).pop();
+      if (!tarball) throw new Error('opct retrieve produced no archive, so the results were NOT deleted. Output: ' + rr.stdout.slice(-300));
+      log('  saved ' + tarball + ' on the management host\n');
+      step('Save the finished run results (opct retrieve)', 'done');
+    }
 
     step('opct destroy', 'running');
     const out = await sshRunScript(conn, `export KUBECONFIG='${kc}'; opct destroy 2>&1 | tail -15`);
