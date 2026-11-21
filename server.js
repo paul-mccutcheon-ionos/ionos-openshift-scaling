@@ -1871,11 +1871,21 @@ function cpPickRetireTarget(masters, newIndex) {
 }
 
 // The etcd member ID (hex, as `etcdctl member remove` wants it) of the member named `nodeName` in `etcdctl member list -w json`.
-function cpEtcdMemberHexId(listJson, nodeName) {
-  let data; try { data = typeof listJson === 'string' ? JSON.parse(listJson) : listJson; } catch (_) { return null; }
+function cpEtcdMemberHexId(listText, nodeName) {
+  // Use the plain `etcdctl member list` output ("<hex id>, started, <name>, <peer url>, <client url>, <learner>"): its id is already the
+  // hex `member remove` wants. (The -w json id is a uint64 that JSON.parse rounds, which gave a wrong id.) JSON text is still
+  // accepted, read as strings, never as numbers.
+  const text = String(listText || '');
   const short = String(nodeName).split('.')[0];
-  const m = (data.members || []).find(x => x.name === nodeName || String(x.name).split('.')[0] === short);
-  return m && m.ID !== undefined ? BigInt(m.ID).toString(16) : null;
+  const same = nm => nm === nodeName || String(nm).split('.')[0] === short;
+  for (const line of text.split('\n')) {
+    const m = /^\s*([0-9a-f]{1,16}),\s*\w+,\s*([^,\s]+),/.exec(line);
+    if (m && same(m[2])) return m[1];
+  }
+  const re = /"ID"\s*:\s*(\d+)[^}]*?"name"\s*:\s*"([^"]*)"/g;
+  let m;
+  while ((m = re.exec(text))) if (same(m[2])) return BigInt(m[1]).toString(16);
+  return null;
 }
 
 // Conditions that must hold before ANY old node may be retired. Returns { blockers, warnings, remaining, healthyAfter }.
@@ -1886,9 +1896,14 @@ function cpRetireGate(g, checks, target, needReplacement = true) {
   const remaining = g.masters.filter(m => m.name !== target.name);
   const healthyAfter = remaining.filter(m => m.ready && m.etcdPod?.ready).length;
   if (healthyAfter < 3) blockers.push(`After removal only ${healthyAfter} healthy control-plane node(s) would remain; at least 3 are needed.`);
-  if (!g.etcd.membersAvailable || g.etcd.podsReady !== g.etcd.pods) blockers.push('etcd is not fully healthy right now.');
-  if (g.operatorIssues.length) blockers.push(`operators with problems: ${g.operatorIssues.map(o => o.name).join(', ')}.`);
-  if (checks.items.find(i => i.id === 'cluster-stable')?.status !== 'ok') blockers.push('The cluster is not stable (upgrade, pool update or degraded operators).');
+  // A target that is already down (cordoned, drained, VM off from an earlier retire that stopped) makes etcd and the operators look
+  // unhealthy by itself, so then only the OTHER nodes decide: resuming such a retire must be possible.
+  const targetDown = !target.ready || !target.etcdPod?.ready;
+  const etcdOk = targetDown ? remaining.every(m => m.etcdPod?.ready) : (g.etcd.membersAvailable && g.etcd.podsReady === g.etcd.pods);
+  if (!etcdOk) blockers.push('etcd is not fully healthy right now' + (targetDown ? ' (on the nodes that stay)' : '') + '.');
+  const issues = g.operatorIssues.filter(o => !(targetDown && ['etcd', 'kube-apiserver', 'kube-controller-manager', 'kube-scheduler'].includes(o.name)));
+  if (issues.length) blockers.push(`operators with problems: ${issues.map(o => o.name).join(', ')}.`);
+  if (!targetDown && checks.items.find(i => i.id === 'cluster-stable')?.status !== 'ok') blockers.push('The cluster is not stable (upgrade, pool update or degraded operators).');
   if (checks.items.find(i => i.id === 'provider-nlb')?.status !== 'ok') blockers.push('The provider does not keep the API load-balancer rules in step with the control plane.');
   if (needReplacement && !g.masters.some(m => m.managed && m.ready && m.etcdPod?.ready)) blockers.push('There is no Ready Machine-managed control-plane node with a healthy etcd member yet.');
   return { blockers, warnings, remaining, healthyAfter };
@@ -1905,6 +1920,8 @@ const sleepMs = ms => new Promise(r => setTimeout(r, ms));
 async function cpDrainNode(ctx, nodeName, { log, timeoutMs = 20 * 60000 }) {
   const A = ctx.apiUrl, T = ctx.token;
   await ocpPatch(A, `/api/v1/nodes/${encodeURIComponent(nodeName)}`, T, { spec: { unschedulable: true } });
+  const nd = await ocpGet(A, `/api/v1/nodes/${encodeURIComponent(nodeName)}`, T);
+  if (!isNodeReady(nd)) { log(`  ${nodeName} is not Ready (already down): its pods cannot terminate and are removed when the Node is deleted\n`); return; }
   const deadline = Date.now() + timeoutMs;
   let last = -1;
   while (Date.now() < deadline) {
@@ -1950,7 +1967,7 @@ async function cpRetireNode(ctx, target, g, emit) {
   step(`Retire ${short}: drained`, 'ok');
 
   step(`Retire ${short}: powering the VM off`, 'working');
-  await ionosAction(`/datacenters/${encodeURIComponent(ctx.ionos.dc)}/servers/${srv.id}/stop`, ctx.ionos.token);
+  if (srv.properties?.vmState !== 'SHUTOFF') await ionosAction(`/datacenters/${encodeURIComponent(ctx.ionos.dc)}/servers/${srv.id}/stop`, ctx.ionos.token);
   for (let i = 0; i < 60; i++) {
     const s = await ionosGet(`/datacenters/${encodeURIComponent(ctx.ionos.dc)}/servers/${srv.id}`, ctx.ionos.token);
     if (s.properties?.vmState === 'SHUTOFF') break;
@@ -1962,8 +1979,8 @@ async function cpRetireNode(ctx, target, g, emit) {
   step(`Retire ${short}: removing its etcd member`, 'working');
   const out = await withMgmtSsh(ctx, async conn => {
     const exec = c => sshRunScript(conn, `oc --token='${T}' --server='${A}' --insecure-skip-tls-verify=true -n openshift-etcd exec ${other.etcdPod.name} -c etcdctl -- ${c} 2>&1`);
-    const list = await exec('etcdctl member list -w json');
-    const id = cpEtcdMemberHexId(list.stdout.slice(list.stdout.indexOf('{')), n);
+    const list = await exec('etcdctl member list');
+    const id = cpEtcdMemberHexId(list.stdout, n);
     if (!id) return { err: `no etcd member named ${n} in: ${list.stdout.slice(0, 300)}` };
     const rm = await exec(`etcdctl member remove ${id}`);
     return { id, text: rm.stdout.trim().slice(0, 300) };
