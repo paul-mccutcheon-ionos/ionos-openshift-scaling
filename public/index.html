@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.22.12</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.22.13</span>
   </div>
 
   <div class="banner-actions">
@@ -1730,6 +1730,7 @@
         <select id="cp-type" onchange="cpTypeChanged()">
           <option value="cube" selected>Cube &mdash; DAS storage</option>
           <option value="dcore">Dedicated Core &mdash; Performance SSD</option>
+          <option value="vcpu">vCPU &mdash; Balanced SSD</option>
         </select>
       </div>
       <div class="form-group">
@@ -1763,11 +1764,11 @@
         <input type="number" id="cp-ram" value="16" min="16" style="width:90px" />
       </div>
       <div class="form-group cp-dcore" style="display:none">
-        <label for="cp-disk">Disk (GB, Performance class SSD)</label>
+        <label for="cp-disk" id="cp-disk-label">Disk (GB, Performance class SSD)</label>
         <input type="number" id="cp-disk" value="600" min="120" style="width:100px" />
-        <div class="field-note">Default 600 GB Performance SSD: IONOS block-storage performance depends on volume size, so smaller volumes are throttled and are not suitable for etcd.</div>
+        <div class="field-note" id="cp-disk-note">Default 600 GB Performance SSD: IONOS block-storage performance depends on volume size, so smaller volumes are throttled and are not suitable for etcd.</div>
       </div>
-      <div class="form-group cp-dcore" style="display:none">
+      <div class="form-group cp-dcore cp-cpufam" style="display:none">
         <label for="cp-cpufamily">CPU family</label>
         <input type="text" id="cp-cpufamily" value="INTEL_SIERRAFOREST" style="width:100%" />
       </div>
@@ -3104,9 +3105,16 @@
 
   function cpTypeChanged() {
     cpZoneUi();
-    const cube = document.getElementById('cp-type').value === 'cube';
+    const type = document.getElementById('cp-type').value;
+    const cube = type === 'cube', vcpu = type === 'vcpu';
     document.querySelectorAll('.cp-dcore').forEach(el => { el.style.display = cube ? 'none' : ''; });
+    document.querySelectorAll('.cp-cpufam').forEach(el => { el.style.display = type === 'dcore' ? '' : 'none'; });   // vCPU has no CPU family
     document.querySelectorAll('.cp-cube').forEach(el => { el.style.display = cube ? '' : 'none'; });
+    const lbl = document.getElementById('cp-disk-label'), note = document.getElementById('cp-disk-note');
+    if (lbl) lbl.textContent = vcpu ? 'Disk (GB, Balanced class SSD)' : 'Disk (GB, Performance class SSD)';
+    if (note) note.textContent = vcpu
+      ? 'Default 600 GB Balanced SSD, the same as the install wizard builds for a vCPU control plane. Block-storage performance depends on volume size, so smaller volumes are throttled and are not suitable for etcd.'
+      : 'Default 600 GB Performance SSD: IONOS block-storage performance depends on volume size, so smaller volumes are throttled and are not suitable for etcd.';
     if (cube) cpLoadCubeTemplates();
   }
 
@@ -3190,7 +3198,7 @@
     const lanId = parseInt(document.getElementById('as-ionos-lan').value, 10);
     if (!lanId) { err.textContent = 'The private cluster LAN could not be detected — enter it in the LAN ID field on the Autoscaling tab.'; err.style.display = 'block'; return; }
     const count = parseInt(document.getElementById('cp-count').value, 10) || 1;
-    const what = type === 'cube' ? 'Cube (' + (document.getElementById('cp-cube-template').selectedOptions[0]?.text || '') + ')' : `Dedicated Core ${document.getElementById('cp-cores').value} vCPU / ${document.getElementById('cp-ram').value} GiB`;
+    const what = type === 'cube' ? 'Cube (' + (document.getElementById('cp-cube-template').selectedOptions[0]?.text || '') + ')' : `${type === 'vcpu' ? 'vCPU (shared cores, Balanced SSD)' : 'Dedicated Core'} ${document.getElementById('cp-cores').value} vCPU / ${document.getElementById('cp-ram').value} GiB`;
     const zoneMode = document.getElementById('cp-zone-mode').value;
     const serverZone = zoneMode === 'custom' ? document.getElementById('cp-server-zone').value : 'AUTO';
     const diskZones = zoneMode === 'custom' && type !== 'cube' ? [0, 1, 2].map(i => document.getElementById('cp-dz-' + i)?.value || 'AUTO') : ['AUTO', 'AUTO', 'AUTO'];

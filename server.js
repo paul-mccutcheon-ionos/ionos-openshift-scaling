@@ -1063,7 +1063,7 @@ app.post('/api/cluster/infra-id', async (req, res) => {
 // like the workers), so etcd keeps its quorum the whole time and the old nodes can be retired later, one by
 // one. Each step is gated on cluster health and nothing is ever removed automatically.
 const CP_MAX_MEMBERS = 6;                                     // etcd: 3 or 5 is the steady state; 6 is allowed only transiently while swapping nodes (quorum 4, tolerates 2 failures, same as 5)
-const CP_SETS = { dcore: 'control-dcore-ionos', cube: 'control-cube-ionos' };
+const CP_SETS = { dcore: 'control-dcore-ionos', cube: 'control-cube-ionos', vcpu: 'control-vcpu-ionos' };
 const CP_WATCHED_OPERATORS = ['etcd', 'kube-apiserver', 'kube-controller-manager', 'kube-scheduler', 'openshift-apiserver', 'authentication', 'machine-config', 'network', 'dns'];
 
 const isMasterNode = n => 'node-role.kubernetes.io/master' in (n.metadata?.labels || {}) || 'node-role.kubernetes.io/control-plane' in (n.metadata?.labels || {});
@@ -1379,7 +1379,7 @@ function cpBuildMachineSet(p) {
 app.post('/api/control-plane/add', async (req, res) => {
   const b = req.body;
   if (!b.clusterApiUrl || !b.ocpToken) return res.status(400).json({ error: 'clusterApiUrl and ocpToken are required.' });
-  if (!['dcore', 'cube'].includes(b.machineType)) return res.status(400).json({ error: "machineType must be 'dcore' or 'cube'." });
+  if (!['dcore', 'cube', 'vcpu'].includes(b.machineType)) return res.status(400).json({ error: "machineType must be 'dcore', 'cube' or 'vcpu'." });
   if (b.backupConfirmed !== true) return res.status(400).json({ error: 'Confirm that a recent etcd snapshot exists (backupConfirmed).' });
   const count = Math.max(1, Math.min(3, parseInt(b.count, 10) || 1));
   const { step, log, done, fail } = makeSseHelpers(res);
@@ -1413,6 +1413,10 @@ app.post('/api/control-plane/add', async (req, res) => {
       const tpl = await ionosGet(`/templates/${encodeURIComponent(b.cubeTemplateId)}`, ctx.ionos.token);
       if (!isCubeTemplate(tpl)) throw new Error('The selected template is not a Cube template.');
       Object.assign(spec, { serverType: 'CUBE', templateUuid: b.cubeTemplateId, templateName: tpl.properties.name, cores: tpl.properties.cores, ramMB: tpl.properties.ram, diskGB: tpl.properties.storageSize, diskType: 'DAS' });
+    } else if (b.machineType === 'vcpu') {
+      // vCPU (shared cores): no CPU family, Balanced SSD volumes (the same as the install wizard's vCPU control plane)
+      Object.assign(spec, { serverType: 'VCPU', cores: parseInt(b.cores, 10) || 8, ramMB: (parseInt(b.ramGiB, 10) || 16) * 1024, diskGB: parseInt(b.diskGB, 10) || 600,
+                            diskType: 'SSD_STANDARD' });
     } else {
       Object.assign(spec, { serverType: 'ENTERPRISE', cores: parseInt(b.cores, 10) || 8, ramMB: (parseInt(b.ramGiB, 10) || 16) * 1024, diskGB: parseInt(b.diskGB, 10) || 600,
                             diskType: 'SSD_PREMIUM', cpuFamily: b.cpuFamily || 'INTEL_SIERRAFOREST' });
@@ -1581,7 +1585,7 @@ async function cpAbortFailedMachine(ctx, name) {
 app.post('/api/control-plane/add-indexed', async (req, res) => {
   const b = req.body;
   if (!b.clusterApiUrl || !b.ocpToken) return res.status(400).json({ error: 'clusterApiUrl and ocpToken are required.' });
-  if (!['dcore', 'cube'].includes(b.machineType)) return res.status(400).json({ error: "machineType must be 'dcore' or 'cube'." });
+  if (!['dcore', 'cube', 'vcpu'].includes(b.machineType)) return res.status(400).json({ error: "machineType must be 'dcore', 'cube' or 'vcpu'." });
   if (b.backupConfirmed !== true) return res.status(400).json({ error: 'Confirm that a recent etcd snapshot exists (backupConfirmed).' });
   const { step, log, done, fail } = makeSseHelpers(res);
   const ctx = postUpgradeCtx(b);
@@ -1624,6 +1628,10 @@ app.post('/api/control-plane/add-indexed', async (req, res) => {
       const tpl = await ionosGet(`/templates/${encodeURIComponent(b.cubeTemplateId)}`, ctx.ionos.token);
       if (!isCubeTemplate(tpl)) throw new Error('The selected template is not a Cube template.');
       Object.assign(spec, { serverType: 'CUBE', templateUuid: b.cubeTemplateId, templateName: tpl.properties.name, cores: tpl.properties.cores, ramMB: tpl.properties.ram, diskGB: tpl.properties.storageSize, diskType: 'DAS' });
+    } else if (b.machineType === 'vcpu') {
+      // vCPU (shared cores): no CPU family, Balanced SSD volumes (the same as the install wizard's vCPU control plane)
+      Object.assign(spec, { serverType: 'VCPU', cores: parseInt(b.cores, 10) || 8, ramMB: (parseInt(b.ramGiB, 10) || 16) * 1024, diskGB: parseInt(b.diskGB, 10) || 600,
+                            diskType: 'SSD_STANDARD' });
     } else {
       Object.assign(spec, { serverType: 'ENTERPRISE', cores: parseInt(b.cores, 10) || 8, ramMB: (parseInt(b.ramGiB, 10) || 16) * 1024, diskGB: parseInt(b.diskGB, 10) || 600,
                             diskType: 'SSD_PREMIUM', cpuFamily: b.cpuFamily || 'INTEL_SIERRAFOREST' });
