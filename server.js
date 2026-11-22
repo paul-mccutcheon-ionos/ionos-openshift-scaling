@@ -3590,6 +3590,13 @@ echo "ALT_WRITE_OK"
         }
       };
 
+      // Never silently overwrite a MachineSet that has a different machine size (applying under an existing name replaces it).
+      try {
+        const prev = await ocpGet(clusterApiUrl, `/apis/machine.openshift.io/v1beta1/namespaces/openshift-machine-api/machinesets/${encodeURIComponent(targetMsName)}`, ocpToken);
+        const pv = prev.spec?.template?.spec?.providerSpec?.value || {};
+        if (pv.instanceType && pv.instanceType !== providerSpec.instanceType)
+          throw new Error(`A MachineSet named "${targetMsName}" already exists with machine type ${pv.instanceType}; this form would replace it with ${providerSpec.instanceType}. Choose a different name (include the size) and apply again.`);
+      } catch (e) { if (e.status !== 404) throw e; }
       await ocpApply(msApiBase, targetMsName, ionosMs);
       log(`MachineSet "${targetMsName}" created with IONOS providerSpec\n`);
       log(`  Image: ${effectiveImageId || ionosImageId}${effectiveImageId && effectiveImageId !== ionosImageId ? ` (copied to ${effectiveRegion})` : ''}\n`);
