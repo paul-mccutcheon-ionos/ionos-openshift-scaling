@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.8</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.9</span>
   </div>
 
   <div class="banner-actions">
@@ -3460,7 +3460,19 @@ Type the node name (${short}) to continue:`);
         renderDeployment('ionos-machine-auto-approver', data.autoApprover || { found: false });
 
       // Surface any Machines not in Running phase (failed provisioning, stuck, etc.)
-      const failed = data.failedMachines || [];
+      // Only a Failed phase, an error message, or a Machine stuck in Provisioning for over 20 minutes counts as a failure.
+      // A young Machine that is still Provisioning is normal: the VM boots, the node joins and its CSR is approved.
+      const allNotRunning = data.failedMachines || [];
+      const ageMin = m => m.creationTimestamp ? (Date.now() - Date.parse(m.creationTimestamp)) / 60000 : 0;
+      const failed = allNotRunning.filter(m => m.phase === 'Failed' || m.errorMessage || m.errorReason || ageMin(m) > 20);
+      const inProgress = allNotRunning.filter(m => !failed.includes(m));
+      if (inProgress.length > 0) {
+        html += `
+          <div style="margin-top:0.6rem;border:1px solid #78580a;border-radius:8px;padding:0.5rem 0.75rem;background:#1d1708;font-size:0.8rem;color:#fcd34d">
+            &#8987; Machines being provisioned (${inProgress.length}) - normal for the first 10 to 20 minutes while the VM boots, the node joins and its certificate request is approved:
+            ${inProgress.map(m => `<code style="color:#e2e8f0">${escHtml(m.name)}</code> <span style="color:#94a3b8">${escHtml(m.phase)}, ${Math.round(ageMin(m))} min</span>`).join(' &middot; ')}
+          </div>`;
+      }
       if (failed.length > 0) {
         const phaseColour = p => p === 'Failed' ? '#f87171' : p === 'Provisioning' ? '#fcd34d' : '#94a3b8';
         const rows = failed.map(m => {
