@@ -3510,6 +3510,14 @@ echo "ALT_WRITE_OK"
       // providerSpec raw value — serialised into the MachineSet spec.
       // Uses the ionoscloudproviderconfig.openshift.io/v1alpha1 API that the
       // IONOS Cloud Machine API provider (machine-api-provider-ionos) understands.
+      // The "-master" RHCOS image carries the control-plane ignition: a worker booted from it joins the cluster as a
+      // control-plane node (and its etcd pod crash-loops). Refuse it for worker MachineSets.
+      {
+        let imgName = '';
+        try { imgName = (await ionosGet(`/images/${ionosImageId}`, ionosToken))?.properties?.name || ''; } catch (_) { /* name check is best-effort */ }
+        if (/master|control/i.test(imgName))
+          throw new Error(`Image "${imgName}" is the control-plane image: a worker started from it joins as a master. Pick the worker image (for example rhcos-4.20-qemu.raw) instead.`);
+      }
       const providerSpec = {
         apiVersion: 'ionoscloudproviderconfig.openshift.io/v1alpha1',
         kind:       'IONOSCloudMachineProviderSpec',
