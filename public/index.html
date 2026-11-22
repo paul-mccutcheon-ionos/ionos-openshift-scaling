@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.5</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.6</span>
   </div>
 
   <div class="banner-actions">
@@ -1275,6 +1275,7 @@
           </select>
           <div class="field-note">Available CPU architectures for this datacenter location</div>
         </div>
+        <div class="field-note" id="as-ionos-zone-note" style="display:none;margin-bottom:0.5rem">Cubes have no zone selection: IONOS places the VM and its built-in storage automatically (AUTO only), so both zone fields are locked.</div>
         <div class="form-group">
           <label for="as-ionos-az">VM Availability Zone</label>
           <select id="as-ionos-az">
@@ -4977,6 +4978,15 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     }
     if (isGpu) loadIonosGpuTemplates();
     if (isCube) loadIonosCubeTemplates();
+    // A Cube has no zone selection (IONOS only accepts AUTO): lock both zone pickers to AUTO.
+    ['as-ionos-az', 'as-ionos-disk-az'].forEach(id => {
+      const z = document.getElementById(id);
+      if (isCube) z.value = 'AUTO';
+      z.disabled = isCube;
+      z.title = isCube ? 'A Cube has no zone selection - IONOS chooses (AUTO only)' : '';
+    });
+    const zn = document.getElementById('as-ionos-zone-note');
+    if (zn) zn.style.display = isCube ? '' : 'none';
     detectPrivateLan();
 
     suggestWorkerSetName();
@@ -5255,8 +5265,8 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     const ionosCpuFamily    = ionosServerType === 'ENTERPRISE' ? document.getElementById('as-ionos-cpu-family').value : '';
     const ionosGpuTemplate  = ionosServerType === 'GPU' ? document.getElementById('as-ionos-gpu-template').value : '';
     const ionosCubeTemplate = ionosServerType === 'CUBE' ? document.getElementById('as-ionos-cube-template').value : '';
-    const ionosAz           = document.getElementById('as-ionos-az').value;
-    const ionosDiskAz       = document.getElementById('as-ionos-disk-az').value;
+    const ionosAz           = ionosServerType === 'CUBE' ? 'AUTO' : document.getElementById('as-ionos-az').value;
+    const ionosDiskAz       = ionosServerType === 'CUBE' ? 'AUTO' : document.getElementById('as-ionos-disk-az').value;
     const deployProvider    = document.getElementById('as-deploy-provider')?.checked || false;
     const registryType     = document.getElementById('as-registry-type')?.value || 'ghcr';
     const registryImage    = document.getElementById('as-registry-image')?.value.trim() || '';

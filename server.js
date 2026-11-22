@@ -3467,8 +3467,9 @@ echo "ALT_WRITE_OK"
       let   cores      = parseInt(machCores,  10) || 4;
       // The ionos-machine-api-provider still takes its own enum (SSD_PREMIUM / SSD_STANDARD) = Performance / Balanced.
       const diskType   = (volClass(machDiskType, 'PERFORMANCE') === 'PERFORMANCE') ? 'SSD_PREMIUM' : 'SSD_STANDARD';
-      const az         = availabilityZone     || 'AUTO';
-      const diskAz     = diskAvailabilityZone || az;
+      // A Cube has no zone selection: IONOS only accepts AUTO for its server and storage (any explicit zone is error 109).
+      const az         = serverType === 'CUBE' ? 'AUTO' : (availabilityZone     || 'AUTO');
+      const diskAz     = serverType === 'CUBE' ? 'AUTO' : (diskAvailabilityZone || az);
       const cpuFam     = cpuFamily            || 'INTEL_ICELAKE';
       const lanId      = effectiveLanId;
       const srvType    = serverType           || 'ENTERPRISE';
