@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.4</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.5</span>
   </div>
 
   <div class="banner-actions">
@@ -6937,6 +6937,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     'ready-to-collect': { color: '#86efac', icon: '&#10003;', text: 'Finished — ready to collect' },
     collected:        { color: '#86efac', icon: '&#10003;', text: 'Collected' },
     'awaiting-pods':  { color: '#fbbf24', icon: '&#8987;',  text: 'Submitted — waiting for pods' },
+    aborted:          { color: '#fca5a5', icon: '&#10007;', text: 'Aborted — the run pods are gone (see Fix in the checklist, then start again)' },
     unknown:          { color: '#94a3b8', icon: '&#8226;',  text: 'Unknown (connect to cluster to check)' }
   };
 
@@ -6948,6 +6949,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     btn.disabled = !enabled;
     const hints = {
       running:            'Still running — the button unlocks once the run finishes.',
+      aborted:            'The run stopped: its test pods were deleted, so there are no results to collect. Clean up and start a new run.',
       'awaiting-pods':    'Submitted, waiting for test pods to start — check back shortly.',
       unknown:            'Can’t verify run status without a cluster connection — connect on the Cluster Connection tab first.',
       idle:               'Start a run above first.',
@@ -7004,7 +7006,11 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
       const ocpTok   = ocpToken || document.getElementById('ocp-token').value.trim();
       const qs = new URLSearchParams({ mgmtHost: opctHost(), ...(apiUrl ? { apiUrl } : {}), ...(ocpTok ? { ocpToken: ocpTok } : {}) });
       const r = await fetch(`/api/compliance/status?${qs}`);
-      const s = await r.json();
+      const raw = await r.text();
+      let s;
+      try { s = JSON.parse(raw); } catch (_) {
+        throw new Error(`the server answered HTTP ${r.status} instead of JSON (${r.status === 504 || r.status === 502 ? 'a gateway timed out waiting for the management host or the cluster' : 'unexpected reply'}) - try Refresh again in a minute`);
+      }
       if (s.status === 'idle') { summaryEl.textContent = 'No OPCT run has been started yet.'; opctSetCollectEnabled('idle'); renderOpctProgress(null); return; }
       if (s.status === 'error') { summaryEl.innerHTML = `<span style="color:#f87171">Status check failed: ${escHtml(s.error || '')}</span>`; opctSetCollectEnabled('error'); renderOpctProgress(null); return; }
 

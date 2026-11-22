@@ -8553,6 +8553,7 @@ app.get('/api/compliance/status', async (req, res) => {
   let logTail = '';
   let opctStatusOut = null;
   let opctStatusError = null;
+  let opctNsExists = false;
   try {
     const conn = await sshConnect(opctState.mgmtHost, 'root', opctState.sshKey, opctState.sshPassphrase);
     try {
@@ -8562,9 +8563,14 @@ app.get('/api/compliance/status', async (req, res) => {
       const tail = await sshRunScript(conn, `f="$(ls -t /root/opct-run-*.log 2>/dev/null | head -1)"; [ -z "$f" ] && f="${opctState.logFile}"; tail -n 80 "$f" 2>/dev/null || echo "(log file not found)"`);
       logTail = tail.stdout.trim();
       try {
-        const st = await sshRunScript(conn, `export KUBECONFIG="${opctState.kubeconfigPath}"; opct status 2>&1; echo "__OPCT_NS__$(oc get ns opct -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null)"`);
+        const st = await sshRunScript(conn, `export KUBECONFIG="${opctState.kubeconfigPath}"; timeout 40 opct status 2>&1 </dev/null; echo "__OPCT_RC__$?"; echo "__OPCT_NS__$(timeout 15 oc get ns opct -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null)"`);
         const nsm = st.stdout.match(/__OPCT_NS__(\S+)/);
-        opctStatusOut = st.stdout.replace(/__OPCT_NS__.*/, '');
+        const rcm = st.stdout.match(/__OPCT_RC__(\d+)/);
+        opctNsExists = !!nsm;
+        // `opct status` blocks forever when the sonobuoy aggregator pod is gone, which used to hang this request until the
+        // proxy returned an HTML error page. It now gives up after 40 s and the run is reported as lost.
+        if (rcm && rcm[1] === '124') opctStatusError = 'opct status timed out after 40 s (the aggregator pod is not responding)';
+        opctStatusOut = st.stdout.replace(/__OPCT_RC__.*/, '').replace(/__OPCT_NS__.*/, '');
         if (nsm) {
           const t = Date.parse(nsm[1]);
           if (t && Math.abs(t - (opctState.startedAt || 0)) > 600000) opctState.startedAt = t;
@@ -8585,7 +8591,11 @@ app.get('/api/compliance/status', async (req, res) => {
   });
 
   let status;
-  if (parsed.globalStatus === 'complete') {
+  if (!parsed.globalStatus && opctStatusError && /timed out/.test(opctStatusError) && opctNsExists && podSummary && podSummary.total === 0 && !opctState.reportRaw) {
+    // The opct namespace is still there but the sonobuoy pods are gone (for example the node that hosted them was
+    // NotReady long enough for its pods to be evicted): the run cannot continue and its results are not retrievable.
+    status = 'aborted';
+  } else if (parsed.globalStatus === 'complete') {
     status = opctState.reportRaw ? 'collected' : 'ready-to-collect';
   } else if (parsed.globalStatus === 'running') {
     status = 'running';
