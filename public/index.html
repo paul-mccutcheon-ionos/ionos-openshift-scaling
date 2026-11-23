@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.12</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.13</span>
   </div>
 
   <div class="banner-actions">
@@ -555,15 +555,15 @@
     </div>
     <div class="nav-item" data-section="manual">
       <span class="nav-item-icon">&#128421;&#65039;</span>
-      Manual Compute Node Scaling
+      Manual Worker Scaling
     </div>
     <div class="nav-item" data-section="autoscaling">
       <span class="nav-item-icon">&#9889;</span>
-      Worker Autoscaling MachineSet Management
+      Worker Autoscaling Management
     </div>
     <div class="nav-item" data-section="controlplane">
       <span class="nav-item-icon">&#128737;</span>
-      Master Autoscaling ControlPlaneMachineSet Management
+      Master Autoscaling Management
     </div>
     <div class="nav-item" data-section="healthchecks">
       <span class="nav-item-icon">&#129657;</span>
@@ -771,7 +771,7 @@
     <h2>&#9881;&#65039; Scaling Action</h2>
     <p style="font-size:0.85rem;color:#94a3b8;margin-bottom:1.25rem">
       Choose whether to add a new worker node (Scale Out) or remove an existing one (Scale In).
-      To configure the Cluster Autoscaler, use the <strong style="color:#a78bfa">Worker Autoscaling MachineSet Management</strong> section.
+      To configure the Cluster Autoscaler, use the <strong style="color:#a78bfa">Worker Autoscaling Management</strong> section.
     </p>
     <div style="display:flex;gap:1.5rem;flex-wrap:wrap">
       <label style="display:flex;align-items:center;gap:0.6rem;cursor:pointer;font-size:0.92rem;color:#e2e8f0;padding:0.75rem 1.25rem;border-radius:8px;border:2px solid #2d3348;background:#151825;transition:border-color 0.15s" id="scale-out-label">
@@ -2370,7 +2370,7 @@
           </div>
           <div>
             <h4 style="margin-bottom:0.6rem;color:#94a3b8;font-size:0.85rem;text-transform:uppercase;letter-spacing:0.05em">Workers (planned)</h4>
-            <div id="ncw-w-note" class="field-note" style="margin-bottom:0.6rem">The wizard installs the 3 control-plane nodes. Workers are added afterwards under Worker Autoscaling MachineSet Management (vCPU or Cube).</div>
+            <div id="ncw-w-note" class="field-note" style="margin-bottom:0.6rem">The wizard installs the 3 control-plane nodes. Workers are added afterwards under Worker Autoscaling Management (vCPU or Cube).</div>
             <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.75rem;flex-wrap:wrap">
               <label style="font-size:0.85rem;color:#94a3b8;white-space:nowrap">Server Type</label>
               <select id="ncw-w-server-type" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.45rem 0.75rem;font-size:0.85rem">
@@ -2652,7 +2652,7 @@
         </p>
         <div style="margin-top:0.75rem;padding:0.6rem 0.85rem;background:#1e1a0a;border:1px solid #78350f;border-radius:6px;font-size:0.8rem;color:#fde68a">
           <strong>&#128204; Next step:</strong> Deploy the IONOS Machine API provider and create worker MachineSets for autoscaling.
-          Use the <strong>Worker Autoscaling MachineSet Management</strong> section after connecting to the cluster.
+          Use the <strong>Worker Autoscaling Management</strong> section after connecting to the cluster.
         </div>
       </div>
 
@@ -3537,7 +3537,7 @@ Type the node name (${short}) to continue:`);
     if (!el || !ncwEnvPending.workerType) return;
     const n = document.getElementById('ncw-w-replicas')?.value || '2';
     el.textContent = `From .env: ${n}× ${ncwEnvPending.workerType === 'CUBE' ? 'Cube (' + (ncwEnvPending.workerTemplate || 'template to choose') + ')' : 'vCPU'}. ` +
-      'The wizard installs the 3 control-plane nodes; add the workers afterwards under Worker Autoscaling MachineSet Management.';
+      'The wizard installs the 3 control-plane nodes; add the workers afterwards under Worker Autoscaling Management.';
   }
 
   // ── Client-side .env file upload — parsed entirely in browser, never sent to server ──
