@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.27</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.28</span>
   </div>
 
   <div class="banner-actions">
@@ -1268,8 +1268,8 @@
                 </div>
                 <div class="form-group">
                   <label for="rhcos-image-name">Image Name in IONOS</label>
-                  <input type="text" id="rhcos-image-name" placeholder="auto: rhcos-4.18-qemu" style="width:100%" />
-                  <div class="field-note">Leave blank to use <code style="color:#38bdf8">rhcos-{version}-qemu</code></div>
+                  <input type="text" id="rhcos-image-name" placeholder="auto: rhcos-4.18-qemu-worker" style="width:100%" />
+                  <div class="field-note">Leave blank to use <code style="color:#38bdf8">rhcos-{version}-qemu-worker</code> (the word &ldquo;worker&rdquo; keeps worker images easy to tell from the master image and to filter on)</div>
                 </div>
                 <div class="form-group">
                   <label for="rhcos-ftp-user">IONOS Login</label>
@@ -4196,7 +4196,7 @@ Type the node name (${short}) to continue:`);
   // The RHCOS upload form follows the connected cluster's major.minor until the user types a version of their own.
   function rhcosUpdateNamePlaceholder() {
     const v = document.getElementById('rhcos-ocp-version'), n = document.getElementById('rhcos-image-name');
-    if (v && n) n.placeholder = 'auto: rhcos-' + (v.value.trim() || '4.20') + '-qemu';
+    if (v && n) n.placeholder = 'auto: rhcos-' + (v.value.trim() || '4.20') + '-qemu-worker';
   }
   function rhcosSyncVersion(full) {
     const v = document.getElementById('rhcos-ocp-version');

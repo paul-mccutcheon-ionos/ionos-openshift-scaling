@@ -3580,7 +3580,7 @@ echo "ALT_WRITE_OK"
         let imgName = '';
         try { imgName = (await ionosGet(`/images/${ionosImageId}`, ionosToken))?.properties?.name || ''; } catch (_) { /* name check is best-effort */ }
         if (/master|control/i.test(imgName))
-          throw new Error(`Image "${imgName}" is the control-plane image: a worker started from it joins as a master. Pick the worker image (for example rhcos-4.20-qemu.raw) instead.`);
+          throw new Error(`Image "${imgName}" is the control-plane image: a worker started from it joins as a master. Pick the worker image (for example rhcos-4.20-qemu-worker.raw) instead.`);
       }
       const providerSpec = {
         apiVersion: 'ionoscloudproviderconfig.openshift.io/v1alpha1',
@@ -5872,7 +5872,7 @@ app.post('/api/upload-rhcos-image', async (req, res) => {
   // Sanitise inputs
   const safeVersion = ocpVersion.replace(/[^0-9.]/g, '');
   const isMasterImage = role === 'master';
-  let finalName     = (reqImageName || (isMasterImage ? `rhcos-${safeVersion}-qemu-v2-master` : `rhcos-${safeVersion}-qemu`)).replace(/[^a-zA-Z0-9._-]/g, '-');
+  let finalName     = (reqImageName || (isMasterImage ? `rhcos-${safeVersion}-qemu-v2-master` : `rhcos-${safeVersion}-qemu-worker`)).replace(/[^a-zA-Z0-9._-]/g, '-');
   const localDir    = '/tmp/rhcos-upload';
   let localRaw      = `${localDir}/${finalName}.raw`;
   const localQcow2  = `${localDir}/rhcos-qemu-temp.qcow2`;
