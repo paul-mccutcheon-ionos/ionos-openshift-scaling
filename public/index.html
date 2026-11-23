@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.28</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.29</span>
   </div>
 
   <div class="banner-actions">
@@ -982,7 +982,7 @@
     <div id="as-ready-result" class="hidden" style="font-size:0.85rem;margin:0 0 0.9rem"></div>
     <ol style="font-size:0.82rem;color:#94a3b8;margin:0 0 0.9rem;padding:0.6rem 0.8rem 0.6rem 1.9rem;background:#0b1424;border:1px solid #1e3a5f;border-radius:8px;line-height:1.6">
       <li><strong style="color:#e2e8f0">Machine API provider</strong> &mdash; check that the provider and the CSR auto-approver run, or deploy them.</li>
-      <li><strong style="color:#e2e8f0">MachineSet</strong> &mdash; create a new IONOS MachineSet (2a), attach to an existing one, or clone one, and set its machine configuration and RHCOS image (2b).</li>
+      <li><strong style="color:#e2e8f0">Machine configuration &amp; MachineSet</strong> &mdash; set the IONOS machine configuration and RHCOS image (2a), then create a new IONOS MachineSet, attach to an existing one, or clone one (2b).</li>
       <li><strong style="color:#e2e8f0">MachineAutoscaler bounds</strong> &mdash; the minimum and maximum number of workers for that MachineSet.</li>
       <li><strong style="color:#e2e8f0">Cluster Autoscaler policy</strong> &mdash; the cluster-wide scale-up and scale-down settings.</li>
       <li><strong style="color:#e2e8f0">Apply</strong> &mdash; creates everything above on the cluster.</li>
@@ -1064,7 +1064,175 @@
     </p>
 
     <!-- Section 1: MachineSet -->
-    <div class="card-section-title" style="margin-top:0;border-top:none;padding-top:0"><span class="cx-sec"><span class="cx-num">2a</span>MachineSet</span></div>
+    <!-- IONOS machine configuration (ionos mode only) -->
+    <div id="as-ionos-config-group" style="display:none">
+      <div class="card-section-title" style="margin-top:0;border-top:none;padding-top:0"><span class="cx-sec"><span class="cx-num">2a</span>IONOS Cloud — Machine Configuration</span></div>
+      <div class="form-grid">
+        <div class="form-group" style="grid-column:1/-1">
+          <label for="as-ionos-image-id">RHCOS Image UUID</label>
+          <div style="display:flex;gap:0.5rem">
+            <input type="text" id="as-ionos-image-id" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" style="flex:1;font-family:monospace;font-size:0.8rem" />
+            <button class="btn btn-sm" id="as-ionos-browse-btn" style="white-space:nowrap">Browse Images</button>
+          </div>
+          <div class="field-note">UUID of the RHCOS public image — click Browse to search. Filter: name contains <code style="color:#38bdf8">rhcos</code></div>
+          <!-- Image browser results -->
+          <div id="as-ionos-images-panel" style="display:none;margin-top:0.5rem">
+            <div style="font-size:0.8rem;color:#64748b;margin-bottom:0.4rem">Select an image to use its UUID:</div>
+            <div id="as-ionos-images-list" style="max-height:180px;overflow-y:auto;border:1px solid #2d3348;border-radius:6px;background:#0a0d14;font-size:0.78rem"></div>
+          </div>
+          <!-- Upload RHCOS image sub-panel -->
+          <div style="margin-top:1rem;border:1px solid #312e51;border-radius:8px;overflow:hidden">
+            <div style="display:flex;justify-content:space-between;align-items:center;padding:0.65rem 0.9rem;background:#1a1730;cursor:pointer" id="rhcos-upload-toggle">
+              <span style="font-size:0.85rem;color:#a78bfa;font-weight:600">&#8593; Upload RHCOS Image to IONOS Cloud</span>
+              <span id="rhcos-upload-chevron" style="color:#64748b;font-size:0.75rem">&#9660; expand</span>
+            </div>
+            <div id="rhcos-upload-panel" style="display:none;padding:0.85rem 1rem">
+              <p style="font-size:0.78rem;color:#64748b;margin-bottom:0.85rem">
+                Downloads the RHCOS <strong style="color:#94a3b8">QEMU/KVM</strong> qcow2 image from Red Hat's mirror, converts it to raw, patches the BLS boot entry for IONOS networking (gateway, DNS, <code style="color:#38bdf8">ignition.platform.id=metal</code>), then uploads to your IONOS account.
+                The metal image will <strong style="color:#f87171">not boot</strong> on IONOS — only the QEMU variant includes the VirtIO drivers IONOS KVM requires.
+                Requires <code style="color:#38bdf8">qemu-img</code> and <code style="color:#38bdf8">lftp</code> on the management host (<code style="color:#38bdf8">dnf install qemu-img lftp</code>).
+                On success the image UUID is auto-filled above.
+              </p>
+              <div class="form-grid">
+                <div class="form-group">
+                  <label for="rhcos-ocp-version">OCP Version</label>
+                  <input type="text" id="rhcos-ocp-version" value="4.20" placeholder="e.g. 4.20" style="width:120px" />
+                  <div class="field-note">Major.minor — selects the RHCOS qemu qcow2 from Red Hat's mirror</div>
+                </div>
+                <div class="form-group">
+                  <label for="rhcos-image-name">Image Name in IONOS</label>
+                  <input type="text" id="rhcos-image-name" placeholder="auto: rhcos-4.18-qemu-worker" style="width:100%" />
+                  <div class="field-note">Leave blank to use <code style="color:#38bdf8">rhcos-{version}-qemu-worker</code> (the word &ldquo;worker&rdquo; keeps worker images easy to tell from the master image and to filter on)</div>
+                </div>
+                <div class="form-group">
+                  <label for="rhcos-ftp-user">IONOS Login</label>
+                  <input type="text" id="rhcos-ftp-user" placeholder="username@cloud.ionos.com" autocomplete="username" style="width:100%" />
+                  <div class="field-note">Same as DCD login — used for the IONOS FTPS image upload server</div>
+                </div>
+                <div class="form-group">
+                  <label for="rhcos-ftp-pass">IONOS Password</label>
+                  <input type="password" id="rhcos-ftp-pass" placeholder="account password" autocomplete="current-password" style="width:100%" />
+                  <div class="field-note">Your IONOS account password — transmitted over SSH only, never stored</div>
+                </div>
+                <div class="form-group">
+                  <label for="rhcos-gateway">Worker Gateway IP</label>
+                  <input type="text" id="rhcos-gateway" placeholder="e.g. 10.7.224.1" style="width:100%" />
+                  <div class="field-note">NAT gateway for the worker private LAN — embedded in BLS kernel args as <code style="color:#38bdf8">rd.route</code>. Pre-filled from .env.</div>
+                </div>
+                <div class="form-group">
+                  <label for="rhcos-ignition-url">Worker Ignition URL</label>
+                  <input type="text" id="rhcos-ignition-url" placeholder="e.g. http://10.7.222.11/worker.ign" style="width:100%" />
+                  <div class="field-note">Embedded in the image as <code style="color:#38bdf8">ignition.config.url</code>. IONOS user-data is not read on platform <em>metal</em>, so without this a new worker boots a bare OS and never joins. The stub (the cluster's worker-user-data) is published on the management host automatically. Pre-filled from the management host's private IP.</div>
+                </div>
+                <div class="form-group">
+                  <label for="rhcos-dns">DNS Servers</label>
+                  <input type="text" id="rhcos-dns" placeholder="e.g. 212.227.123.16;212.227.123.17;" style="width:100%" />
+                  <div class="field-note">Semicolon-separated — embedded in BLS as <code style="color:#38bdf8">nameserver=</code> kernel args. Pre-filled from .env.</div>
+                </div>
+              </div>
+
+              <div id="rhcos-steps" class="hidden" style="display:flex;flex-direction:column;gap:0.35rem;margin-top:0.75rem;margin-bottom:0.6rem">
+                <div class="iso-step" id="rhcos-s1" data-status="pending"><span class="iso-step-icon">○</span><span>Determine datacenter region &amp; FTP server</span></div>
+                <div class="iso-step" id="rhcos-s2" data-status="pending"><span class="iso-step-icon">○</span><span>Connect to management host via SSH</span></div>
+                <div class="iso-step" id="rhcos-s3" data-status="pending"><span class="iso-step-icon">○</span><span>Download RHCOS QEMU image to management host</span></div>
+                <div class="iso-step" id="rhcos-s4" data-status="pending"><span class="iso-step-icon">○</span><span>Convert qcow2 → raw (~16 GB, 10–20 min)</span></div>
+                <div class="iso-step" id="rhcos-s5" data-status="pending"><span class="iso-step-icon">○</span><span>Patch BLS boot entry (networking)</span></div>
+                <div class="iso-step" id="rhcos-s6" data-status="pending"><span class="iso-step-icon">○</span><span>Upload image to IONOS via FTP (~20–40 min)</span></div>
+                <div class="iso-step" id="rhcos-s7" data-status="pending"><span class="iso-step-icon">○</span><span>Wait for IONOS to process &amp; activate image</span></div>
+                <div class="iso-step" id="rhcos-s8" data-status="pending"><span class="iso-step-icon">○</span><span>Patch image metadata (UEFI, cloudInit)</span></div>
+              </div>
+
+              <pre id="rhcos-log" class="hidden" style="max-height:200px;overflow-y:auto;background:#0a0d14;padding:0.6rem 0.8rem;border-radius:6px;font-size:0.75rem;color:#94a3b8;white-space:pre-wrap;margin-bottom:0.75rem"></pre>
+              <div id="rhcos-done" class="hidden" style="background:#2e1065;border:1px solid #7c3aed;border-radius:8px;padding:0.75rem 1rem;font-size:0.85rem;color:#c4b5fd;margin-bottom:0.75rem"></div>
+              <div class="error-box" id="rhcos-error"></div>
+
+              <button class="btn" id="rhcos-upload-btn" style="background:#312e51;color:#a78bfa;font-weight:600;padding:0.6rem 1.2rem;border:1px solid #4c1d95">
+                <span id="rhcos-upload-label">&#8593; Upload RHCOS Image</span>
+                <span class="spinner hidden" id="rhcos-upload-spinner" style="border-top-color:#a78bfa"></span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="as-ionos-server-type">Instance Type</label>
+          <select id="as-ionos-server-type">
+            <option value="ENTERPRISE" selected>Dedicated Core</option>
+            <option value="VCPU">vCPU</option>
+            <option value="CUBE">Cube (fixed template, storage included)</option>
+            <option value="GPU" id="as-ionos-gpu-option" disabled>GPU (NVIDIA H200) — de/fra/2, gb/bhx only</option>
+          </select>
+          <div class="field-note">Dedicated Core = physical CPU cores; vCPU = shared virtual cores (no CPU family selection); Cube = fixed T-shirt size with its own storage; GPU = NVIDIA H200 template (only at de/fra/2 and gb/bhx)</div>
+        </div>
+        <div class="form-group" id="as-ionos-cube-group" style="display:none">
+          <label for="as-ionos-cube-template">Cube Template</label>
+          <select id="as-ionos-cube-template">
+            <option value="">Loading…</option>
+          </select>
+          <div class="field-note">Cores, RAM and storage are fixed by the template (T-shirt size) and come with the VM &mdash; the RHCOS image is simply applied to the built-in storage (no separate disk is created). OpenShift workers need at least 2 vCPU and 8&nbsp;GB RAM, so Basic Cube XS and S are not selectable.</div>
+        </div>
+        <div class="form-group" id="as-ionos-gpu-group" style="display:none">
+          <label for="as-ionos-gpu-template">GPU Template</label>
+          <select id="as-ionos-gpu-template">
+            <option value="">Loading…</option>
+          </select>
+          <div class="field-note">Cores, RAM and storage are fixed by the template and come attached to the VM — the RHCOS image is simply applied to that storage (no separate disk is created). Default quota is one H200-S — larger sizes need a limit increase via IONOS Support.</div>
+        </div>
+        <div class="form-group" id="as-ionos-cpu-family-group">
+          <label for="as-ionos-cpu-family">CPU Family</label>
+          <select id="as-ionos-cpu-family">
+            <option value="INTEL_ICELAKE" selected>Intel Ice Lake</option>
+          </select>
+          <div class="field-note">Available CPU architectures for this datacenter location</div>
+        </div>
+        <div class="field-note" id="as-ionos-zone-note" style="display:none;margin-bottom:0.5rem">Cubes have no zone selection: IONOS places the VM and its built-in storage automatically (AUTO only), so both zone fields are locked.</div>
+        <div class="form-group">
+          <label for="as-ionos-az">VM Availability Zone</label>
+          <select id="as-ionos-az">
+            <option value="AUTO" selected>AUTO</option>
+            <option value="ZONE_1">Zone 1</option>
+            <option value="ZONE_2">Zone 2</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="as-ionos-disk-az">Storage Availability Zone</label>
+          <select id="as-ionos-disk-az">
+            <option value="AUTO" selected>AUTO</option>
+            <option value="ZONE_1">Zone 1</option>
+            <option value="ZONE_2">Zone 2</option>
+            <option value="ZONE_3">Zone 3</option>
+          </select>
+        </div>
+
+        <div class="form-group as-ionos-sized">
+          <label for="as-ionos-cores">vCPU Cores</label>
+          <input type="number" id="as-ionos-cores" value="4" min="1" style="width:100px" />
+        </div>
+        <div class="form-group as-ionos-sized">
+          <label for="as-ionos-ram">RAM (GiB)</label>
+          <input type="number" id="as-ionos-ram" value="8" min="1" style="width:100px" />
+        </div>
+        <div class="form-group as-ionos-sized">
+          <label for="as-ionos-disk">Boot Disk (GB)</label>
+          <input type="number" id="as-ionos-disk" value="120" min="10" style="width:100px" />
+        </div>
+        <div class="form-group as-ionos-sized">
+          <label for="as-ionos-disk-type">Disk Type</label>
+          <select id="as-ionos-disk-type">
+            <option value="PERFORMANCE" selected>Performance</option>
+            <option value="BALANCED">Balanced</option>
+            <option value="ESSENTIAL">Essential</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="as-ionos-lan">LAN ID</label>
+          <input type="number" id="as-ionos-lan" placeholder="detecting…" min="1" style="width:100px" />
+          <div class="field-note" id="as-ionos-lan-note">Private LAN ID for the worker network (same as existing worker nodes). Filled in automatically from the cluster once connected.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card-section-title"><span class="cx-sec"><span class="cx-num">2b</span>MachineSet</span></div>
     <div style="display:flex;gap:1.5rem;flex-wrap:wrap;margin-bottom:1rem">
       <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;font-size:0.88rem;color:#e2e8f0" id="as-mode-ionos-lbl">
         <input type="radio" name="as-ms-mode" value="ionos" id="as-mode-ionos" style="accent-color:#a78bfa;width:14px;height:14px" checked />
@@ -1233,170 +1401,6 @@
         </div>
       </div>
 
-      <div class="card-section-title" style="margin-top:0.75rem"><span class="cx-sec"><span class="cx-num">2b</span>IONOS Cloud — Machine Configuration</span></div>
-      <div class="form-grid">
-        <div class="form-group" style="grid-column:1/-1">
-          <label for="as-ionos-image-id">RHCOS Image UUID</label>
-          <div style="display:flex;gap:0.5rem">
-            <input type="text" id="as-ionos-image-id" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" style="flex:1;font-family:monospace;font-size:0.8rem" />
-            <button class="btn btn-sm" id="as-ionos-browse-btn" style="white-space:nowrap">Browse Images</button>
-          </div>
-          <div class="field-note">UUID of the RHCOS public image — click Browse to search. Filter: name contains <code style="color:#38bdf8">rhcos</code></div>
-          <!-- Image browser results -->
-          <div id="as-ionos-images-panel" style="display:none;margin-top:0.5rem">
-            <div style="font-size:0.8rem;color:#64748b;margin-bottom:0.4rem">Select an image to use its UUID:</div>
-            <div id="as-ionos-images-list" style="max-height:180px;overflow-y:auto;border:1px solid #2d3348;border-radius:6px;background:#0a0d14;font-size:0.78rem"></div>
-          </div>
-          <!-- Upload RHCOS image sub-panel -->
-          <div style="margin-top:1rem;border:1px solid #312e51;border-radius:8px;overflow:hidden">
-            <div style="display:flex;justify-content:space-between;align-items:center;padding:0.65rem 0.9rem;background:#1a1730;cursor:pointer" id="rhcos-upload-toggle">
-              <span style="font-size:0.85rem;color:#a78bfa;font-weight:600">&#8593; Upload RHCOS Image to IONOS Cloud</span>
-              <span id="rhcos-upload-chevron" style="color:#64748b;font-size:0.75rem">&#9660; expand</span>
-            </div>
-            <div id="rhcos-upload-panel" style="display:none;padding:0.85rem 1rem">
-              <p style="font-size:0.78rem;color:#64748b;margin-bottom:0.85rem">
-                Downloads the RHCOS <strong style="color:#94a3b8">QEMU/KVM</strong> qcow2 image from Red Hat's mirror, converts it to raw, patches the BLS boot entry for IONOS networking (gateway, DNS, <code style="color:#38bdf8">ignition.platform.id=metal</code>), then uploads to your IONOS account.
-                The metal image will <strong style="color:#f87171">not boot</strong> on IONOS — only the QEMU variant includes the VirtIO drivers IONOS KVM requires.
-                Requires <code style="color:#38bdf8">qemu-img</code> and <code style="color:#38bdf8">lftp</code> on the management host (<code style="color:#38bdf8">dnf install qemu-img lftp</code>).
-                On success the image UUID is auto-filled above.
-              </p>
-              <div class="form-grid">
-                <div class="form-group">
-                  <label for="rhcos-ocp-version">OCP Version</label>
-                  <input type="text" id="rhcos-ocp-version" value="4.20" placeholder="e.g. 4.20" style="width:120px" />
-                  <div class="field-note">Major.minor — selects the RHCOS qemu qcow2 from Red Hat's mirror</div>
-                </div>
-                <div class="form-group">
-                  <label for="rhcos-image-name">Image Name in IONOS</label>
-                  <input type="text" id="rhcos-image-name" placeholder="auto: rhcos-4.18-qemu-worker" style="width:100%" />
-                  <div class="field-note">Leave blank to use <code style="color:#38bdf8">rhcos-{version}-qemu-worker</code> (the word &ldquo;worker&rdquo; keeps worker images easy to tell from the master image and to filter on)</div>
-                </div>
-                <div class="form-group">
-                  <label for="rhcos-ftp-user">IONOS Login</label>
-                  <input type="text" id="rhcos-ftp-user" placeholder="username@cloud.ionos.com" autocomplete="username" style="width:100%" />
-                  <div class="field-note">Same as DCD login — used for the IONOS FTPS image upload server</div>
-                </div>
-                <div class="form-group">
-                  <label for="rhcos-ftp-pass">IONOS Password</label>
-                  <input type="password" id="rhcos-ftp-pass" placeholder="account password" autocomplete="current-password" style="width:100%" />
-                  <div class="field-note">Your IONOS account password — transmitted over SSH only, never stored</div>
-                </div>
-                <div class="form-group">
-                  <label for="rhcos-gateway">Worker Gateway IP</label>
-                  <input type="text" id="rhcos-gateway" placeholder="e.g. 10.7.224.1" style="width:100%" />
-                  <div class="field-note">NAT gateway for the worker private LAN — embedded in BLS kernel args as <code style="color:#38bdf8">rd.route</code>. Pre-filled from .env.</div>
-                </div>
-                <div class="form-group">
-                  <label for="rhcos-ignition-url">Worker Ignition URL</label>
-                  <input type="text" id="rhcos-ignition-url" placeholder="e.g. http://10.7.222.11/worker.ign" style="width:100%" />
-                  <div class="field-note">Embedded in the image as <code style="color:#38bdf8">ignition.config.url</code>. IONOS user-data is not read on platform <em>metal</em>, so without this a new worker boots a bare OS and never joins. The stub (the cluster's worker-user-data) is published on the management host automatically. Pre-filled from the management host's private IP.</div>
-                </div>
-                <div class="form-group">
-                  <label for="rhcos-dns">DNS Servers</label>
-                  <input type="text" id="rhcos-dns" placeholder="e.g. 212.227.123.16;212.227.123.17;" style="width:100%" />
-                  <div class="field-note">Semicolon-separated — embedded in BLS as <code style="color:#38bdf8">nameserver=</code> kernel args. Pre-filled from .env.</div>
-                </div>
-              </div>
-
-              <div id="rhcos-steps" class="hidden" style="display:flex;flex-direction:column;gap:0.35rem;margin-top:0.75rem;margin-bottom:0.6rem">
-                <div class="iso-step" id="rhcos-s1" data-status="pending"><span class="iso-step-icon">○</span><span>Determine datacenter region &amp; FTP server</span></div>
-                <div class="iso-step" id="rhcos-s2" data-status="pending"><span class="iso-step-icon">○</span><span>Connect to management host via SSH</span></div>
-                <div class="iso-step" id="rhcos-s3" data-status="pending"><span class="iso-step-icon">○</span><span>Download RHCOS QEMU image to management host</span></div>
-                <div class="iso-step" id="rhcos-s4" data-status="pending"><span class="iso-step-icon">○</span><span>Convert qcow2 → raw (~16 GB, 10–20 min)</span></div>
-                <div class="iso-step" id="rhcos-s5" data-status="pending"><span class="iso-step-icon">○</span><span>Patch BLS boot entry (networking)</span></div>
-                <div class="iso-step" id="rhcos-s6" data-status="pending"><span class="iso-step-icon">○</span><span>Upload image to IONOS via FTP (~20–40 min)</span></div>
-                <div class="iso-step" id="rhcos-s7" data-status="pending"><span class="iso-step-icon">○</span><span>Wait for IONOS to process &amp; activate image</span></div>
-                <div class="iso-step" id="rhcos-s8" data-status="pending"><span class="iso-step-icon">○</span><span>Patch image metadata (UEFI, cloudInit)</span></div>
-              </div>
-
-              <pre id="rhcos-log" class="hidden" style="max-height:200px;overflow-y:auto;background:#0a0d14;padding:0.6rem 0.8rem;border-radius:6px;font-size:0.75rem;color:#94a3b8;white-space:pre-wrap;margin-bottom:0.75rem"></pre>
-              <div id="rhcos-done" class="hidden" style="background:#2e1065;border:1px solid #7c3aed;border-radius:8px;padding:0.75rem 1rem;font-size:0.85rem;color:#c4b5fd;margin-bottom:0.75rem"></div>
-              <div class="error-box" id="rhcos-error"></div>
-
-              <button class="btn" id="rhcos-upload-btn" style="background:#312e51;color:#a78bfa;font-weight:600;padding:0.6rem 1.2rem;border:1px solid #4c1d95">
-                <span id="rhcos-upload-label">&#8593; Upload RHCOS Image</span>
-                <span class="spinner hidden" id="rhcos-upload-spinner" style="border-top-color:#a78bfa"></span>
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <div class="form-group">
-          <label for="as-ionos-server-type">Instance Type</label>
-          <select id="as-ionos-server-type">
-            <option value="ENTERPRISE" selected>Dedicated Core</option>
-            <option value="VCPU">vCPU</option>
-            <option value="CUBE">Cube (fixed template, storage included)</option>
-            <option value="GPU" id="as-ionos-gpu-option" disabled>GPU (NVIDIA H200) — de/fra/2, gb/bhx only</option>
-          </select>
-          <div class="field-note">Dedicated Core = physical CPU cores; vCPU = shared virtual cores (no CPU family selection); Cube = fixed T-shirt size with its own storage; GPU = NVIDIA H200 template (only at de/fra/2 and gb/bhx)</div>
-        </div>
-        <div class="form-group" id="as-ionos-cube-group" style="display:none">
-          <label for="as-ionos-cube-template">Cube Template</label>
-          <select id="as-ionos-cube-template">
-            <option value="">Loading…</option>
-          </select>
-          <div class="field-note">Cores, RAM and storage are fixed by the template (T-shirt size) and come with the VM &mdash; the RHCOS image is simply applied to the built-in storage (no separate disk is created). OpenShift workers need at least 2 vCPU and 8&nbsp;GB RAM, so Basic Cube XS and S are not selectable.</div>
-        </div>
-        <div class="form-group" id="as-ionos-gpu-group" style="display:none">
-          <label for="as-ionos-gpu-template">GPU Template</label>
-          <select id="as-ionos-gpu-template">
-            <option value="">Loading…</option>
-          </select>
-          <div class="field-note">Cores, RAM and storage are fixed by the template and come attached to the VM — the RHCOS image is simply applied to that storage (no separate disk is created). Default quota is one H200-S — larger sizes need a limit increase via IONOS Support.</div>
-        </div>
-        <div class="form-group" id="as-ionos-cpu-family-group">
-          <label for="as-ionos-cpu-family">CPU Family</label>
-          <select id="as-ionos-cpu-family">
-            <option value="INTEL_ICELAKE" selected>Intel Ice Lake</option>
-          </select>
-          <div class="field-note">Available CPU architectures for this datacenter location</div>
-        </div>
-        <div class="field-note" id="as-ionos-zone-note" style="display:none;margin-bottom:0.5rem">Cubes have no zone selection: IONOS places the VM and its built-in storage automatically (AUTO only), so both zone fields are locked.</div>
-        <div class="form-group">
-          <label for="as-ionos-az">VM Availability Zone</label>
-          <select id="as-ionos-az">
-            <option value="AUTO" selected>AUTO</option>
-            <option value="ZONE_1">Zone 1</option>
-            <option value="ZONE_2">Zone 2</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label for="as-ionos-disk-az">Storage Availability Zone</label>
-          <select id="as-ionos-disk-az">
-            <option value="AUTO" selected>AUTO</option>
-            <option value="ZONE_1">Zone 1</option>
-            <option value="ZONE_2">Zone 2</option>
-            <option value="ZONE_3">Zone 3</option>
-          </select>
-        </div>
-
-        <div class="form-group as-ionos-sized">
-          <label for="as-ionos-cores">vCPU Cores</label>
-          <input type="number" id="as-ionos-cores" value="4" min="1" style="width:100px" />
-        </div>
-        <div class="form-group as-ionos-sized">
-          <label for="as-ionos-ram">RAM (GiB)</label>
-          <input type="number" id="as-ionos-ram" value="8" min="1" style="width:100px" />
-        </div>
-        <div class="form-group as-ionos-sized">
-          <label for="as-ionos-disk">Boot Disk (GB)</label>
-          <input type="number" id="as-ionos-disk" value="120" min="10" style="width:100px" />
-        </div>
-        <div class="form-group as-ionos-sized">
-          <label for="as-ionos-disk-type">Disk Type</label>
-          <select id="as-ionos-disk-type">
-            <option value="PERFORMANCE" selected>Performance</option>
-            <option value="BALANCED">Balanced</option>
-            <option value="ESSENTIAL">Essential</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label for="as-ionos-lan">LAN ID</label>
-          <input type="number" id="as-ionos-lan" placeholder="detecting…" min="1" style="width:100px" />
-          <div class="field-note" id="as-ionos-lan-note">Private LAN ID for the worker network (same as existing worker nodes). Filled in automatically from the cluster once connected.</div>
-        </div>
-      </div>
 
     </div>
 
@@ -3576,7 +3580,7 @@ Type the node name (${short}) to continue:`);
       const mode = (document.querySelector('input[name="as-ms-mode"]:checked') || {}).value;
       if (mode === 'ionos') {
         const img = (document.getElementById('as-ionos-image-id').value || '').trim();
-        add(img ? 'ok' : 'block', 'RHCOS image chosen (step 2b)', img ? 'Image ' + img + '.' : 'Use "Browse Images" in step 2b, or upload one.');
+        add(img ? 'ok' : 'block', 'RHCOS image chosen (step 2a)', img ? 'Image ' + img + '.' : 'Use "Browse Images" in step 2a, or upload one.');
       }
       const mn = parseInt(document.getElementById('as-min-replicas').value, 10), mx = parseInt(document.getElementById('as-max-replicas').value, 10);
       const boundsOk = Number.isFinite(mn) && Number.isFinite(mx) && mn >= 0 && mx >= 1 && mn <= mx;
@@ -5000,6 +5004,7 @@ Type the node name (${short}) to continue:`);
     document.getElementById('as-clone-replicas-group').style.display = isClone ? '' : 'none';
     // IONOS group
     document.getElementById('as-ionos-group').style.display              = isIonos ? '' : 'none';
+    document.getElementById('as-ionos-config-group').style.display       = isIonos ? '' : 'none';
 document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? 'block' : 'none';
     if (isIonos) detectFrankfurt();
     // Step visibility
