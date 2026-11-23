@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.30</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.31</span>
   </div>
 
   <div class="banner-actions">
@@ -2004,6 +2004,9 @@
         <button onclick="mhcApplyTemplate('conservative')" style="background:#0f2035;color:#6ee7b7;border:1px solid #065f46;border-radius:6px;padding:0.4rem 0.9rem;font-size:0.82rem;cursor:pointer">
           &#128737; Conservative (10m)
         </button>
+        <button onclick="mhcApplyTemplate('controlplane')" style="background:#0f2035;color:#fbbf24;border:1px solid #78580a;border-radius:6px;padding:0.4rem 0.9rem;font-size:0.82rem;cursor:pointer">
+          &#127963; Control Plane
+        </button>
       </div>
     </div>
 
@@ -2021,8 +2024,13 @@
         <select id="mhc-selector-type" onchange="mhcSelectorTypeChanged()" style="background:#0f1117;border:1px solid #2d3348;border-radius:6px;padding:0.45rem 0.65rem;color:#e2e8f0;font-size:0.85rem">
           <option value="worker-role">All worker nodes (role: worker)</option>
           <option value="infra-role">All infra nodes (role: infra)</option>
+          <option value="master-role">Control-plane nodes (role: master)</option>
           <option value="custom">Custom label selector</option>
         </select>
+      </div>
+      <div id="mhc-cp-note" style="display:none;margin-top:0.5rem;font-size:0.8rem;color:#fbbf24;background:#1d1708;border:1px solid #78580a;border-radius:6px;padding:0.5rem 0.75rem;line-height:1.5">
+        &#9888; This check replaces <strong>control-plane</strong> Machines. Keep <strong>maxUnhealthy at 1</strong> so a second failure is never remediated, which would break etcd quorum.
+        Applying also makes sure the health-check controller is running. The ControlPlaneMachineSet that builds the replacement is set up on the <strong>Master Autoscaling Management</strong> page.
       </div>
       <div id="mhc-selector-custom" style="display:none">
         <label style="display:block;font-size:0.78rem;color:#64748b;margin-bottom:0.3rem">Custom matchLabels (one <code style="background:#1e2333;padding:0.05rem 0.3rem;border-radius:3px">key=value</code> per line)</label>
@@ -5923,6 +5931,16 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
       maxUnhealthy: '40%',
       nodeStartupTimeout: '5m',
     },
+    controlplane: {
+      name: 'control-plane-health-check',
+      selectorType: 'master-role',
+      conditions: [
+        { type: 'Ready', status: 'Unknown', timeout: '300s' },
+        { type: 'Ready', status: 'False',   timeout: '300s' },
+      ],
+      maxUnhealthy: '1',
+      nodeStartupTimeout: '20m',
+    },
     conservative: {
       name: 'worker-healthcheck-conservative',
       selectorType: 'worker-role',
@@ -5951,6 +5969,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
   function mhcSelectorTypeChanged() {
     const v = document.getElementById('mhc-selector-type').value;
     document.getElementById('mhc-selector-custom').style.display = v === 'custom' ? 'block' : 'none';
+    document.getElementById('mhc-cp-note').style.display = v === 'master-role' ? 'block' : 'none';
   }
 
   function mhcAddCondition(type = 'Ready', status = 'Unknown', timeout = '300s') {
@@ -5980,6 +5999,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     const type = document.getElementById('mhc-selector-type').value;
     if (type === 'worker-role') return { matchLabels: { 'machine.openshift.io/cluster-api-machine-role': 'worker' } };
     if (type === 'infra-role')  return { matchLabels: { 'machine.openshift.io/cluster-api-machine-role': 'infra' } };
+    if (type === 'master-role') return { matchLabels: { 'machine.openshift.io/cluster-api-machine-role': 'master' } };
     const labels = {};
     document.getElementById('mhc-selector-labels').value.split('\n').forEach(line => {
       const [k, ...rest] = line.trim().split('=');
@@ -6061,6 +6081,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     const selType = document.getElementById('mhc-selector-type');
     if (roleVal === 'worker') { selType.value = 'worker-role'; }
     else if (roleVal === 'infra') { selType.value = 'infra-role'; }
+    else if (roleVal === 'master') { selType.value = 'master-role'; }
     else {
       selType.value = 'custom';
       document.getElementById('mhc-selector-labels').value = Object.entries(labels).map(([k,v]) => `${k}=${v}`).join('\n');
@@ -6081,6 +6102,12 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     if (!conditions.length) { showError('mhc-apply-error', 'Add at least one unhealthy condition.'); return; }
     const maxUnhealthy = document.getElementById('mhc-max-unhealthy').value.trim() || '40%';
     const nodeStartupTimeout = document.getElementById('mhc-startup-timeout').value.trim() || '10m';
+    // A control-plane check that may remediate more than one master at a time can break etcd quorum.
+    if (document.getElementById('mhc-selector-type').value === 'master-role') {
+      const pct = /^(\d+)%$/.exec(maxUnhealthy), whole = /^\d+$/.test(maxUnhealthy);
+      const tooMany = whole ? parseInt(maxUnhealthy, 10) > 1 : pct ? parseInt(pct[1], 10) > 34 : true;
+      if (tooMany && !confirm('This health check selects the control-plane nodes and its maxUnhealthy (' + maxUnhealthy + ') allows more than one master to be replaced at the same time.\n\nWith three masters that can break etcd quorum. Red Hat recommends 1.\n\nApply it anyway?')) return;
+    }
     const btn = document.getElementById('mhc-apply-btn');
     const lbl = document.getElementById('mhc-apply-label');
     const spin = document.getElementById('mhc-apply-spinner');
@@ -6093,7 +6120,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
         clusterApiUrl, ocpToken, name,
         selector: mhcBuildSelector(),
         unhealthyConditions: conditions,
-        maxUnhealthy,
+        maxUnhealthy: /^\d+$/.test(maxUnhealthy) ? parseInt(maxUnhealthy, 10) : maxUnhealthy,   // a whole number must be sent as a number; "1" is not a valid percentage
         nodeStartupTimeout,
       });
       if (!data.ok) throw new Error(data.error);
