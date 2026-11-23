@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.33</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.34</span>
   </div>
 
   <div class="banner-actions">
@@ -2355,9 +2355,10 @@
               IONOS VDC Name
               <input id="ncw-vdc-name" type="text" placeholder="My OpenShift Cluster" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
             </label>
-            <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
-              VDC Location
-              <select id="ncw-vdc-location" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
+            <div style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+              <span id="ncw-vdc-location-label">VDC Location</span>
+              <!-- The native select stays (hidden) as the single source of truth for the rest of the wizard; the flag dropdown below drives it. -->
+              <select id="ncw-vdc-location" aria-labelledby="ncw-vdc-location-label" style="display:none">
                 <option value="de/fra/2">Frankfurt 2 (de/fra/2)</option>
                 <option value="de/fra/1">Frankfurt 1 (de/fra/1)</option>
                 <option value="de/fra">Frankfurt (de/fra)</option>
@@ -2366,10 +2367,109 @@
                 <option value="gb/bhx">Worcester (gb/bhx)</option>
                 <option value="us/las">Las Vegas (us/las)</option>
                 <option value="us/ewr">Newark (us/ewr)</option>
-                <option value="es/vit">Spain (es/vit)</option>
+                <option value="es/vit">Logro&ntilde;o (es/vit)</option>
                 <option value="fr/par">Paris (fr/par)</option>
               </select>
-            </label>
+              <div id="ncw-loc-dd" class="loc-dd"></div>
+            </div>
+            <style>
+              .loc-dd { position: relative; }
+              .loc-dd-btn { width: 100%; display: flex; align-items: center; gap: 0.6rem; background: #0b1e45; border: 1px solid #1e3a5f; color: #e2e8f0;
+                border-radius: 6px; padding: 0.4rem 0.6rem; font-size: 0.85rem; cursor: pointer; text-align: left; }
+              .loc-dd-btn:hover, .loc-dd.open .loc-dd-btn { border-color: #2d6cdf; }
+              .loc-dd-btn:focus-visible { outline: 2px solid #2d6cdf; outline-offset: 1px; }
+              .loc-flag { flex: 0 0 auto; width: 24px; height: 24px; border-radius: 50%; overflow: hidden; display: inline-block;
+                box-shadow: 0 0 0 1px rgba(255,255,255,0.18), 0 1px 3px rgba(0,0,0,0.5); }
+              .loc-flag svg { display: block; width: 100%; height: 100%; }
+              .loc-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+              .loc-code { color: #64748b; font-size: 0.75rem; font-family: ui-monospace, Consolas, monospace; }
+              .loc-caret { color: #64748b; font-size: 0.7rem; transition: transform .15s; }
+              .loc-dd.open .loc-caret { transform: rotate(180deg); }
+              .loc-dd-list { display: none; position: absolute; left: 0; right: 0; top: calc(100% + 4px); z-index: 60; max-height: 340px; overflow-y: auto;
+                background: #0b1e45; border: 1px solid #2d6cdf; border-radius: 8px; padding: 0.3rem; box-shadow: 0 10px 28px rgba(0,0,0,0.55); }
+              .loc-dd.open .loc-dd-list { display: block; }
+              .loc-group { padding: 0.45rem 0.55rem 0.2rem; font-size: 0.68rem; letter-spacing: 0.08em; text-transform: uppercase; color: #64748b; }
+              .loc-opt { display: flex; align-items: center; gap: 0.6rem; padding: 0.4rem 0.55rem; border-radius: 6px; cursor: pointer; color: #e2e8f0; }
+              .loc-opt:hover, .loc-opt.active { background: #12306a; }
+              .loc-opt[aria-selected="true"] { background: #17408a; }
+              .loc-opt[aria-selected="true"] .loc-name { font-weight: 600; }
+            </style>
+            <script>
+              // Flag dropdown for the VDC location (round flags drawn as inline SVG, so they render on every OS; emoji flags do not on Windows)
+              (function () {
+                const R = (x, y, w, h, f) => '<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" fill="' + f + '"/>';
+                const FLAGS = {
+                  de: R(0, 0, 30, 10, '#000') + R(0, 10, 30, 10, '#dd0000') + R(0, 20, 30, 10, '#ffce00'),
+                  fr: R(0, 0, 10, 30, '#0055a4') + R(10, 0, 10, 30, '#fff') + R(20, 0, 10, 30, '#ef4135'),
+                  es: R(0, 0, 30, 7.5, '#aa151b') + R(0, 7.5, 30, 15, '#f1bf00') + R(0, 22.5, 30, 7.5, '#aa151b'),
+                  gb: R(0, 0, 30, 30, '#012169')
+                    + '<path d="M0 0L30 30M30 0L0 30" stroke="#fff" stroke-width="6"/><path d="M0 0L30 30M30 0L0 30" stroke="#c8102e" stroke-width="2"/>'
+                    + '<path d="M15 0V30M0 15H30" stroke="#fff" stroke-width="10"/><path d="M15 0V30M0 15H30" stroke="#c8102e" stroke-width="6"/>',
+                  us: (function () {
+                    let o = R(0, 0, 30, 30, '#fff');
+                    for (let i = 0; i < 13; i += 2) o += R(0, i * 30 / 13, 30, 30 / 13, '#b22234');
+                    o += R(0, 0, 15, 7 * 30 / 13, '#3c3b6e');
+                    for (let r = 0; r < 3; r++) for (let c = 0; c < 4; c++) o += '<circle cx="' + (2.6 + c * 3.4) + '" cy="' + (2.6 + r * 3.4) + '" r="0.8" fill="#fff"/>';
+                    return o;
+                  })()
+                };
+                const GROUPS = [
+                  ['de', 'Germany',        ['de/fra/2', 'de/fra/1', 'de/fra', 'de/txl']],
+                  ['gb', 'United Kingdom', ['gb/lhr', 'gb/bhx']],
+                  ['fr', 'France',         ['fr/par']],
+                  ['es', 'Spain',          ['es/vit']],
+                  ['us', 'United States',  ['us/las', 'us/ewr']]
+                ];
+                const sel = document.getElementById('ncw-vdc-location');
+                const host = document.getElementById('ncw-loc-dd');
+                if (!sel || !host) return;
+                const flag = cc => '<span class="loc-flag" aria-hidden="true"><svg viewBox="0 0 30 30" preserveAspectRatio="xMidYMid slice">' + FLAGS[cc] + '</svg></span>';
+                const info = {};   // code -> { cc, name }
+                [...sel.options].forEach(o => { info[o.value] = { name: o.text.replace(/\s*\(.*\)\s*$/, '') }; });
+                GROUPS.forEach(g => g[2].forEach(code => { if (info[code]) info[code].cc = g[0]; }));
+                let html = '<button type="button" class="loc-dd-btn" aria-haspopup="listbox" aria-expanded="false"></button><div class="loc-dd-list" role="listbox" tabindex="-1">';
+                GROUPS.forEach(g => {
+                  const codes = g[2].filter(c => info[c]);
+                  if (!codes.length) return;
+                  html += '<div class="loc-group">' + g[1] + '</div>';
+                  codes.forEach(c => { html += '<div class="loc-opt" role="option" data-v="' + c + '">' + flag(g[0]) + '<span class="loc-name">' + info[c].name + '</span><span class="loc-code">' + c + '</span></div>'; });
+                });
+                host.innerHTML = html + '</div>';
+                const btn = host.querySelector('.loc-dd-btn'), list = host.querySelector('.loc-dd-list');
+                const opts = [...host.querySelectorAll('.loc-opt')];
+                function paint() {
+                  const v = sel.value, i = info[v] || {};
+                  btn.innerHTML = (i.cc ? flag(i.cc) : '') + '<span class="loc-name">' + (i.name || v || 'Select a location') + '</span><span class="loc-code">' + (v || '') + '</span><span class="loc-caret">&#9660;</span>';
+                  opts.forEach(o => o.setAttribute('aria-selected', o.dataset.v === v ? 'true' : 'false'));
+                }
+                function setOpen(on) {
+                  host.classList.toggle('open', on);
+                  btn.setAttribute('aria-expanded', on ? 'true' : 'false');
+                  if (on) { const a = opts.find(o => o.dataset.v === sel.value) || opts[0]; opts.forEach(o => o.classList.toggle('active', o === a)); a.scrollIntoView({ block: 'nearest' }); }
+                }
+                function pick(v) {
+                  setOpen(false);
+                  if (sel.value !== v) { sel.value = v; sel.dispatchEvent(new Event('change', { bubbles: true })); }
+                  paint(); btn.focus();
+                }
+                btn.addEventListener('click', () => setOpen(!host.classList.contains('open')));
+                opts.forEach(o => o.addEventListener('click', () => pick(o.dataset.v)));
+                host.addEventListener('keydown', e => {
+                  const open = host.classList.contains('open');
+                  const cur = opts.findIndex(o => o.classList.contains('active'));
+                  if (e.key === 'Escape' && open) { setOpen(false); btn.focus(); e.preventDefault(); }
+                  else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    if (!open) { setOpen(true); return; }
+                    const n = Math.max(0, Math.min(opts.length - 1, (cur < 0 ? 0 : cur) + (e.key === 'ArrowDown' ? 1 : -1)));
+                    opts.forEach((o, k) => o.classList.toggle('active', k === n)); opts[n].scrollIntoView({ block: 'nearest' });
+                  } else if ((e.key === 'Enter' || e.key === ' ') && open && cur >= 0) { e.preventDefault(); pick(opts[cur].dataset.v); }
+                });
+                document.addEventListener('click', e => { if (!host.contains(e.target)) setOpen(false); });
+                sel.addEventListener('change', paint);   // the .env loader sets the select and fires change
+                paint();
+              })();
+            </script>
           </div>
           <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
             Management VM OS Image
