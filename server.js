@@ -8675,6 +8675,24 @@ app.post('/api/compliance/attach', (req, res) => {
   res.json({ ok: true, known: !!existing });
 });
 
+// Runs `opct report <tarball>` and returns its text. A report that was killed (exit 137 = out of memory on a small
+// management host) or that printed no summary is reported as an error instead of being stored as an empty report.
+async function opctGenerateReport(conn, tarballPath) {
+  let out;
+  try {
+    out = (await sshRunScript(conn, `opct report "${tarballPath}" 2>&1`)).stdout;
+  } catch (e) {
+    if (/Exit 137|Killed/.test(e.message)) {
+      throw new Error('opct report was killed on the management host, most likely out of memory (large archive). Add RAM or swap to the management host, or generate the report on a larger machine.');
+    }
+    throw e;
+  }
+  if (!/OPCT Summary/.test(out)) {
+    throw new Error('opct report finished but printed no summary: ' + out.trim().slice(-300));
+  }
+  return out;
+}
+
 // POST /api/compliance/collect — SSE. Retrieves the results archive and runs
 // `opct report -s` on the management host, then parses + stores the output.
 app.post('/api/compliance/collect', async (req, res) => {
@@ -8685,7 +8703,14 @@ app.post('/api/compliance/collect', async (req, res) => {
   let conn;
   try {
     conn = await sshConnect(opctState.mgmtHost, 'root', opctState.sshKey, opctState.sshPassphrase);
-    const kaTimer = setInterval(() => log('  Still waiting on management host...\n'), 15000);
+    // Progress line every 15 s that says what is actually running (the old fixed text kept saying "waiting" while the
+    // report was being generated, which read as a hang).
+    let phaseText = 'downloading the results archive';
+    const phaseStart = { t: Date.now() };
+    const kaTimer = setInterval(() => {
+      const s = Math.round((Date.now() - phaseStart.t) / 1000);
+      log(`  Still ${phaseText} on the management host (${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s)...\n`);
+    }, 15000);
     let tarballPath, reportRaw;
     try {
       step('Retrieve OPCT results archive', 'running');
@@ -8702,12 +8727,13 @@ opct retrieve .`, chunk => log(chunk));
       step('Retrieve OPCT results archive', 'done');
 
       step('Generate report (opct report)', 'running');
+      phaseText = 'generating the report (opct prints nothing until it is done; large archives take several minutes)';
+      phaseStart.t = Date.now();
       // NOTE: `-s`/`--save-to` takes a directory to extract results into — it is not
       // a "print report" flag. Passing the tarball path to it leaves zero positional
       // args and opct fails instantly with "accepts 1 arg(s), received 0". The report
       // text this app parses only comes from the plain `opct report <tarball>` form.
-      const rep = await sshRunScript(conn, `opct report "${tarballPath}" 2>&1`);
-      reportRaw = rep.stdout;
+      reportRaw = await opctGenerateReport(conn, tarballPath);
       step('Generate report (opct report)', 'done');
     } finally { clearInterval(kaTimer); }
 
@@ -8756,6 +8782,7 @@ app.get('/api/compliance/report', (req, res) => {
 const OPCT_RESULTS_DIR = '/root/opct-results';
 const OPCT_ARCHIVE_RE  = /^[A-Za-z0-9._-]+\.tar\.gz$/;
 const opctReportCache  = new Map(); // archive name -> { raw, table, grade, parsedAt }
+const opctReportJobs   = new Map(); // "host|archive" -> { status: running|done|failed, startedAt, finishedAt, error }
 
 function opctArchiveRunStart(name) {
   const m = /^opct_(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})_/.exec(name);
@@ -8800,31 +8827,57 @@ app.post('/api/compliance/reports/select', async (req, res) => {
   const archive = String((req.body && req.body.archive) || '');
   if (!OPCT_ARCHIVE_RE.test(archive)) return res.status(400).json({ error: 'Invalid archive name.' });
   if (!opctState || !opctState.mgmtHost || !opctState.sshKey) return res.status(409).json({ error: 'No management host is configured for OPCT yet.' });
-  let conn;
-  try {
-    let entry = opctReportCache.get(archive);
-    if (!entry) {
-      conn = await sshConnect(opctState.mgmtHost, 'root', opctState.sshKey, opctState.sshPassphrase);
-      const known = await opctListArchives(conn);
-      if (!known.some(a => a.name === archive)) return res.status(404).json({ error: 'That archive is not on the management host.' });
-      const rep = await sshRunScript(conn, `opct report "${OPCT_RESULTS_DIR}/${archive}" 2>&1`);
-      const parsed = parseOpctReport(rep.stdout);
-      entry = { raw: rep.stdout, table: parsed.main, grade: parsed.grade, parsedAt: Date.now() };
-      opctReportCache.set(archive, entry);
-    }
+
+  const applyEntry = (entry) => {
     opctState.tarballPath = `${OPCT_RESULTS_DIR}/${archive}`;
     opctState.reportRaw   = entry.raw;
     opctState.reportTable = entry.table;
     opctState.grade       = entry.grade;
     opctState.collectedAt = entry.parsedAt;
     saveOpctState(opctState);
-    res.json(opctReportPayload(opctState));
-  } catch (e) {
-    console.error('[compliance/reports/select] Failed:', e.message);
-    res.status(502).json({ error: `Could not load that report: ${e.message}` });
-  } finally {
-    if (conn) try { conn.end(); } catch (_) {}
+  };
+  const cached = opctReportCache.get(archive);
+  if (cached) { applyEntry(cached); return res.json(opctReportPayload(opctState)); }
+
+  // Generating a report takes minutes on a big archive - far longer than the proxy in front of the app waits for a
+  // reply (it then answers with an HTML gateway error that the page cannot parse). So run it as a background job and
+  // let the page poll /reports/select-status.
+  const key = `${opctState.mgmtHost}|${archive}`;
+  let job = opctReportJobs.get(key);
+  if (!job || job.status === 'failed') {
+    job = { status: 'running', startedAt: Date.now(), error: null };
+    opctReportJobs.set(key, job);
+    (async () => {
+      let conn;
+      try {
+        conn = await sshConnect(opctState.mgmtHost, 'root', opctState.sshKey, opctState.sshPassphrase);
+        const known = await opctListArchives(conn);
+        if (!known.some(a => a.name === archive)) throw new Error('That archive is not on the management host.');
+        const raw = await opctGenerateReport(conn, `${OPCT_RESULTS_DIR}/${archive}`);
+        const parsed = parseOpctReport(raw);
+        const entry = { raw, table: parsed.main, grade: parsed.grade, parsedAt: Date.now() };
+        opctReportCache.set(archive, entry);
+        applyEntry(entry);
+        job.status = 'done';
+      } catch (e) {
+        console.error('[compliance/reports/select] Failed:', e.message);
+        job.status = 'failed'; job.error = `Could not load that report: ${e.message}`;
+      } finally {
+        job.finishedAt = Date.now();
+        if (conn) try { conn.end(); } catch (_) {}
+      }
+    })();
   }
+  res.status(202).json({ pending: true, startedAt: job.startedAt });
+});
+
+// GET /api/compliance/reports/select-status?archive=...&mgmtHost=...
+app.get('/api/compliance/reports/select-status', (req, res) => {
+  const opctState = opctFor(req);
+  const archive = String(req.query.archive || '');
+  const job = opctReportJobs.get(`${opctState.mgmtHost}|${archive}`);
+  if (!job) return res.status(404).json({ status: 'unknown', error: 'No report load is running for that archive.' });
+  res.json({ status: job.status, error: job.error, elapsedMs: (job.finishedAt || Date.now()) - job.startedAt });
 });
 
 // GET /api/compliance/report/raw.txt — untouched `opct report -s` output, suitable

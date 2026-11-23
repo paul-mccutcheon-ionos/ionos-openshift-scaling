@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.9</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.10</span>
   </div>
 
   <div class="banner-actions">
@@ -7142,6 +7142,13 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     return `${r.runStart ? 'Run started' : 'Retrieved'} ${stamp} · ${(r.size / 1048576).toFixed(1)} MB · ${r.name.slice(0, 30)}…`;
   }
 
+  // Reads a JSON reply; a proxy/gateway error page (HTML) becomes a readable message instead of "Unexpected token '<'".
+  async function opctJson(r) {
+    const text = await r.text();
+    try { return JSON.parse(text); }
+    catch (_) { throw new Error(`the server answered with a gateway error (HTTP ${r.status}) instead of data`); }
+  }
+
   async function opctLoadReportList() {
     const sel = document.getElementById('opct-report-select');
     const msg = document.getElementById('opct-report-select-msg');
@@ -7178,8 +7185,22 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ archive: sel.value, mgmtHost: opctHost() })
       });
-      const data = await r.json();
+      const data = await opctJson(r);
       if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+      if (r.status === 202) {   // generated in the background on the server: poll until it is ready
+        const t0 = Date.now();
+        for (;;) {
+          await new Promise(res => setTimeout(res, 5000));
+          const sr = await fetch('/api/compliance/reports/select-status?' + new URLSearchParams({ archive: sel.value, mgmtHost: opctHost() }));
+          let st = null;
+          try { st = await opctJson(sr); } catch (_) { /* gateway hiccup: keep polling */ }
+          const s = Math.round((Date.now() - t0) / 1000);
+          if (st && st.status === 'failed') throw new Error(st.error || 'report generation failed');
+          if (st && st.status === 'done') break;
+          if (sr.status === 404) throw new Error('the server lost track of this report load (it may have restarted) - select it again');
+          msg.textContent = `Generating the report on the management host (${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s) - large archives take several minutes. Downloads unlock when it is loaded…`;
+        }
+      }
       await opctLoadReport();
       msg.textContent = 'Loaded.';
     } catch (e) {
