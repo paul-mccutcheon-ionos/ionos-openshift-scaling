@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.21</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.22</span>
   </div>
 
   <div class="banner-actions">
@@ -741,9 +741,32 @@
     <div class="refresh-ts" id="refresh-ts"></div>
   </div>
 
-  <!-- ── Card 3: MachineSets ────────────────────────────────────────────── -->
+  <!-- ── Card 3a: ControlPlaneMachineSets (master nodes) ──────────────── -->
+  <div class="card hidden" id="cpms-card">
+    <h2>&#128737; Master Nodes &mdash; ControlPlaneMachineSets</h2>
+    <div class="table-wrapper">
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>State</th>
+            <th>Strategy</th>
+            <th>Desired</th>
+            <th>Ready</th>
+            <th>Updated</th>
+            <th>Region</th>
+            <th>AZ</th>
+          </tr>
+        </thead>
+        <tbody id="cpms-tbody"></tbody>
+      </table>
+    </div>
+    <div class="field-note" style="margin-top:0.6rem">Managed on the <strong>Master Autoscaling Management</strong> page. A ControlPlaneMachineSet keeps exactly three control-plane Machines and replaces them safely.</div>
+  </div>
+
+  <!-- ── Card 3b: MachineSets (worker nodes) ───────────────────────────── -->
   <div class="card hidden" id="machinesets-card">
-    <h2>&#9881;&#65039; MachineSets</h2>
+    <h2>&#9881;&#65039; Worker Nodes &mdash; MachineSets</h2>
     <div class="table-wrapper">
       <table>
         <thead>
@@ -2745,7 +2768,7 @@
 <script>
   // ── Side-nav section switching ─────────────────────────────────────────────
   const NAV_GROUPS = {
-    connection:  ['connect-card', 'overview-card', 'machinesets-card', 'nodes-card'],
+    connection:  ['connect-card', 'overview-card', 'cpms-card', 'machinesets-card', 'nodes-card'],
     manual:      ['manual-connect-hint', 'scaling-action-card', 'scale-in-card', 'add-node-card', 'csrs-card'],
     autoscaling:  ['autoscaling-connect-hint', 'post-upgrade-card', 'machine-api-status-card', 'autoscale-card'],
     controlplane:    ['cp-status-card', 'cp-add-card', 'cp-cpms-card', 'cp-retire-card'],
@@ -3991,7 +4014,7 @@ Type the node name (${short}) to continue:`);
     document.getElementById('connected-strip').classList.add('hidden');
     hideError('connect-error');
 
-    ['overview-card','machinesets-card','nodes-card','csrs-card',
+    ['overview-card','cpms-card','machinesets-card','nodes-card','csrs-card',
      'scaling-action-card','scale-in-card','autoscale-card','add-node-card','machine-api-status-card','post-upgrade-card',
      'mhc-list-card','mhc-create-card'].forEach(id =>
       document.getElementById(id).classList.add('hidden')
@@ -4072,6 +4095,26 @@ Type the node name (${short}) to continue:`);
       <div class="stat-mini"><div class="sm-label">Total Nodes</div><div class="sm-value sm-neutral">${state.nodes.length}</div></div>
     `;
     document.getElementById('refresh-ts').textContent = 'Last refreshed: ' + new Date().toLocaleTimeString();
+  }
+
+  function renderCpms(state) {
+    const tbody = document.getElementById('cpms-tbody');
+    const list = state.controlPlaneMachineSets || [];
+    if (!list.length) {
+      tbody.innerHTML = '<tr><td colspan="8" class="no-data">No ControlPlaneMachineSet yet &mdash; the control-plane nodes are not Machine-API managed. Set one up on the Master Autoscaling Management page.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = list.map(c => `
+      <tr>
+        <td class="mono">${escHtml(c.name)}</td>
+        <td style="color:${c.state === 'Active' ? '#34d399' : '#fbbf24'}">${escHtml(c.state)}</td>
+        <td>${escHtml(c.strategy)}</td>
+        <td>${c.desired}</td>
+        <td style="color:${c.ready === c.desired ? '#34d399' : '#f87171'}">${c.ready}</td>
+        <td>${c.updated}</td>
+        <td style="color:#64748b;font-size:0.83rem;font-family:monospace">${escHtml(c.region)}</td>
+        <td style="color:#64748b;font-size:0.83rem">${escHtml(c.az)}</td>
+      </tr>`).join('');
   }
 
   function renderMachineSets(state) {
@@ -4241,9 +4284,10 @@ Type the node name (${short}) to continue:`);
     window._lastState = state;
     renderOverview(state);
     renderMachineSets(state);
+    renderCpms(state);
     renderNodes(state);
     renderCsrs(state);
-    ['overview-card','machinesets-card','nodes-card'].forEach(id =>
+    ['overview-card','cpms-card','machinesets-card','nodes-card'].forEach(id =>
       document.getElementById(id).classList.remove('hidden')
     );
   }

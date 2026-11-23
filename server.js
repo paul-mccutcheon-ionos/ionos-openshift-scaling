@@ -394,11 +394,31 @@ async function fetchClusterState(apiUrl, ocpToken) {
 
   const pendingCsrs = allCsrs.filter(c => c.condition === 'Pending');
 
+  // ControlPlaneMachineSets (master side). Degrade gracefully: the CRD may be absent or the token may lack permission.
+  let controlPlaneMachineSets = [];
+  try {
+    const cp = await ocpGet(apiUrl, '/apis/machine.openshift.io/v1/namespaces/openshift-machine-api/controlplanemachinesets', ocpToken);
+    controlPlaneMachineSets = (cp.items || []).map(c => {
+      const ps = c.spec?.template?.machines_v1beta1_machine_openshift_io?.spec?.providerSpec?.value || {};
+      return {
+        name:     c.metadata?.name || '—',
+        state:    c.spec?.state || '—',
+        strategy: c.spec?.strategy?.type || '—',
+        desired:  c.spec?.replicas ?? 0,
+        ready:    c.status?.readyReplicas ?? 0,
+        updated:  c.status?.updatedReplicas ?? 0,
+        region:   ps.region || '—',
+        az:       ps.availabilityZone || '—'
+      };
+    });
+  } catch (_) {}
+
   return {
     version:     versionData.gitVersion || `${versionData.major}.${versionData.minor}`,
     ocpVersion,
     nodes,
     machineSets,
+    controlPlaneMachineSets,
     pendingCsrs,
     allCsrs,
     recentEvents
