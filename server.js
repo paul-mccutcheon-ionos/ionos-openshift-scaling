@@ -265,8 +265,14 @@ async function ionosWaitState(urlPath, ionosToken, acceptStates = ['AVAILABLE'],
     let data;
     try {
       data = await ionosGet(urlPath, ionosToken);
-    } catch (_) {
-      continue;
+    } catch (e) {
+      // A rejected token never recovers by waiting: fail now with the real reason instead of timing out minutes later.
+      if (e.status === 401 || e.status === 403) {
+        const err = new Error(`IONOS rejected the API token (HTTP ${e.status}) while waiting for ${urlPath}. The token has expired or been revoked: create a new token, put it in the wizard and retry (the steps already done are reused).`);
+        err.status = e.status;
+        throw err;
+      }
+      continue;   // transient error (network, 5xx, 404 right after create): keep polling
     }
     const state = data?.metadata?.state;
     if (acceptStates.includes(state)) return data;

@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.34</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.35</span>
   </div>
 
   <div class="banner-actions">
@@ -2311,6 +2311,7 @@
           <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
             IONOS Cloud API Token
             <input id="ncw-ionos-token" type="password" placeholder="Paste your IONOS Cloud API token" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
+            <span id="ncw-token-note" style="display:none;font-size:0.78rem;line-height:1.45"></span>
           </label>
           <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
             IONOS FTP Username (account email)
@@ -3939,7 +3940,7 @@ Type the node name (${short}) to continue:`);
           case 'OCP_WORKER_NAME_PREFIX':   document.getElementById('worker-name').value       = val; break;
           case 'IONOS_API_TOKEN': {
             const el = document.getElementById('ionos-token'); if (el) el.value = val;
-            const w = document.getElementById('ncw-ionos-token'); if (w && !w.value.trim()) w.value = val;
+            const w = document.getElementById('ncw-ionos-token'); if (w) { w.value = val; w.dispatchEvent(new Event('input')); }
             break;
           }
           case 'IONOS_FTP_USER': {
@@ -6911,6 +6912,32 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
       if (btn) { btn.disabled = false; btn.textContent = '↻ Refresh'; }
     }
   }
+
+  // Read the token's expiry (a JWT) and warn when it will run out during the install (a full install + TLS takes well over an hour)
+  function ncwCheckToken() {
+    const inp = document.getElementById('ncw-ionos-token'), note = document.getElementById('ncw-token-note');
+    if (!inp || !note) return;
+    const t = inp.value.trim();
+    note.style.display = 'none';
+    if (!t) return;
+    let exp = 0;
+    try {
+      const b = t.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+      exp = JSON.parse(atob(b + '='.repeat((4 - b.length % 4) % 4))).exp * 1000;
+    } catch (_) { return; }   // not a JWT we can read: say nothing
+    if (!exp) return;
+    const left = exp - Date.now(), mins = Math.round(left / 60000);
+    const at = new Date(exp).toLocaleString();
+    let msg = '', color = '#4ade80';
+    if (left <= 0) { msg = '&#10007; This token expired on ' + at + '. Create a new one in the DCD Token Manager.'; color = '#f87171'; }
+    else if (left < 3 * 3600e3) { msg = '&#9888; This token expires in ' + (mins >= 120 ? Math.round(mins / 60) + ' hours' : mins + ' minutes') + ' (' + at + '). An install plus the TLS phase can take longer: create a token with a longer lifetime, or the install will fail partway.'; color = '#fbbf24'; }
+    else { msg = '&#10003; Token valid until ' + at + '.'; }
+    note.style.color = color;
+    note.innerHTML = msg;
+    note.style.display = 'block';
+  }
+  document.getElementById('ncw-ionos-token').addEventListener('input', ncwCheckToken);
+  document.getElementById('ncw-ionos-token').addEventListener('change', ncwCheckToken);
 
   // Auto-refresh image list and CPU families when location changes (if token is entered)
   document.getElementById('ncw-vdc-location').addEventListener('change', () => {
