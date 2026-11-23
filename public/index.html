@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.15</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.16</span>
   </div>
 
   <div class="banner-actions">
@@ -1693,16 +1693,17 @@
   <!-- ── Control Plane: status ─────────────────────────────────────────────── -->
   <div class="card" id="cp-status-card" style="display:none">
     <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.5rem;margin-bottom:0.75rem">
+      <style>.cp-num{display:inline-flex;align-items:center;justify-content:center;min-width:1.35rem;height:1.35rem;padding:0 0.3rem;border-radius:999px;background:#2563eb;color:#fff;font-size:0.72rem;font-weight:700;margin-right:0.4rem;vertical-align:middle}</style>
       <h2 style="margin:0">&#128737; Managed Control Plane</h2>
       <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
         <button id="cp-check-btn" onclick="cpStatus()"
-          style="background:#1e3a5f;color:#93c5fd;border:1px solid #2563eb;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;cursor:pointer">&#8635; Check readiness</button>
+          style="background:#1e3a5f;color:#93c5fd;border:1px solid #2563eb;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;cursor:pointer"><span class="cp-num">1</span>&#8635; Check readiness</button>
         <button onclick="cpPrepare()"
-          style="background:#1a2a1a;color:#6ee7b7;border:1px solid #065f46;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;cursor:pointer">Prepare master.ign</button>
+          style="background:#1a2a1a;color:#6ee7b7;border:1px solid #065f46;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;cursor:pointer"><span class="cp-num">2</span>Prepare master.ign</button>
         <button onclick="cpCopyProfile()"
           style="background:#14233a;color:#93c5fd;border:1px solid #2563eb;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;cursor:pointer" title="Copies each control-plane node's type, size and storage as text for the test report">Copy profile for test report</button>
         <button id="cp-image-btn" onclick="cpCreateImage()"
-          style="background:#2d1f4a;color:#c4b5fd;border:1px solid #5b21b6;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;cursor:pointer">Create master image</button>
+          style="background:#2d1f4a;color:#c4b5fd;border:1px solid #5b21b6;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;cursor:pointer"><span class="cp-num">3</span>Create master image</button>
       </div>
     </div>
     <p style="font-size:0.82rem;color:#64748b;margin:0 0 0.75rem">
@@ -1711,13 +1712,21 @@
       workers), so etcd keeps its quorum the whole time. The old nodes are retired later, one at a time.
       <strong style="color:#94a3b8">Check readiness</strong> only reads.
     </p>
+    <ol style="font-size:0.82rem;color:#94a3b8;margin:0 0 0.9rem;padding:0.6rem 0.8rem 0.6rem 1.9rem;background:#0b1424;border:1px solid #1e3a5f;border-radius:8px;line-height:1.6">
+      <li><strong style="color:#e2e8f0">Check readiness</strong> &mdash; read the control plane, etcd, operators and management host.</li>
+      <li><strong style="color:#e2e8f0">Prepare master.ign</strong> &mdash; make the control-plane Ignition file available to new nodes.</li>
+      <li><strong style="color:#e2e8f0">Create master image</strong> &mdash; build the master boot image (once per RHCOS version).</li>
+      <li><strong style="color:#e2e8f0">Add control-plane nodes</strong> &mdash; take an etcd snapshot first, then add the new Machines (card below).</li>
+      <li><strong style="color:#e2e8f0">Activate the ControlPlaneMachineSet</strong> &mdash; once the control plane is master-0/1/2, all Ready.</li>
+      <li><strong style="color:#e2e8f0">Retire the fixed nodes</strong> &mdash; only if you did not use the swap option in step 4.</li>
+    </ol>
     <div id="cp-status-result" style="font-size:0.85rem"></div>
     <pre id="cp-op-log" class="hidden" style="max-height:220px;overflow-y:auto;background:#0a0d14;padding:0.6rem 0.8rem;border-radius:6px;font-size:0.75rem;color:#94a3b8;white-space:pre-wrap;margin-top:0.75rem"></pre>
   </div>
 
   <!-- ── Control Plane: add a node ─────────────────────────────────────────── -->
   <div class="card" id="cp-add-card" style="display:none">
-    <h2>&#10133; Add a control-plane node</h2>
+    <h2><span class="cp-num">4</span>&#10133; Add a control-plane node</h2>
     <p style="font-size:0.82rem;color:#64748b;margin:0 0 0.9rem">
       Creates Machines named <code style="color:#38bdf8">&lt;infra ID&gt;-master-&lt;index&gt;</code> (Red Hat&rsquo;s control-plane naming), one at a time, each with the placement policy below. The three of them are then handed to a real <strong>ControlPlaneMachineSet</strong> (next card). The step checks cluster health and the contract&rsquo;s storage limit on the server and refuses to run if anything is off; nothing is rolled back or removed automatically.
     </p>
@@ -1802,14 +1811,14 @@
       </details>
     </div>
     <div style="margin-top:0.9rem;display:flex;gap:0.9rem;align-items:center;flex-wrap:wrap">
-      <button onclick="cpBackup()" style="background:#14233a;color:#93c5fd;border:1px solid #2563eb;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;cursor:pointer">Take etcd snapshot</button>
+      <button onclick="cpBackup()" style="background:#14233a;color:#93c5fd;border:1px solid #2563eb;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;cursor:pointer">4a Take etcd snapshot</button>
       <label style="display:flex;gap:0.5rem;align-items:center;font-size:0.85rem;color:#e2e8f0;cursor:pointer">
         <input type="checkbox" id="cp-backup-ok" style="accent-color:#3b82f6;width:15px;height:15px" />
-        A recent etcd snapshot exists
+        4b A recent etcd snapshot exists
       </label>
       <button id="cp-add-btn" onclick="cpAdd()" disabled
         style="background:#14532d;color:#86efac;border:1px solid #166534;border-radius:6px;padding:0.4rem 1.1rem;font-size:0.85rem;font-weight:600;cursor:pointer;opacity:0.5">
-        Add control-plane node
+        4c Add control-plane node
       </button>
     </div>
     <pre id="cp-add-log" class="hidden" style="max-height:260px;overflow-y:auto;background:#0a0d14;padding:0.6rem 0.8rem;border-radius:6px;font-size:0.75rem;color:#94a3b8;white-space:pre-wrap;margin-top:0.85rem"></pre>
@@ -1819,7 +1828,7 @@
 
   <!-- ── Control Plane: the ControlPlaneMachineSet ─────────────────────────── -->
   <div class="card" id="cp-cpms-card" style="display:none">
-    <h2>&#128274; ControlPlaneMachineSet</h2>
+    <h2><span class="cp-num">5</span>&#128274; Activate the ControlPlaneMachineSet</h2>
     <p style="font-size:0.82rem;color:#64748b;margin:0 0 0.9rem">
       Red Hat&rsquo;s own operator keeps exactly three control-plane Machines and replaces them safely (it creates the replacement, waits for it to be Ready, then deletes the old one;
       the etcd operator&rsquo;s hook keeps quorum). Activate it once the control plane is exactly <code style="color:#38bdf8">&lt;infra ID&gt;-master-0/1/2</code>, all Ready, with no hand-built node left.
@@ -1851,7 +1860,7 @@
 
   <!-- ── Control Plane: retire (dry run) ───────────────────────────────────── -->
   <div class="card" id="cp-retire-card" style="display:none">
-    <h2>&#128260; Retire a fixed control-plane node</h2>
+    <h2><span class="cp-num">6</span>&#128260; Retire a fixed control-plane node</h2>
     <p style="font-size:0.82rem;color:#64748b;margin:0 0 0.9rem">
       &ldquo;Show plan&rdquo; shows the safety checks and the ordered steps for removing one of the hand-built nodes once its replacement is in place; it changes nothing.
       &ldquo;Retire now&rdquo; then <strong style="color:#fbbf24">does it</strong>: drain, power the VM off, remove the etcd member, delete the Node, delete the VM and its volumes. The same steps the swap option in &ldquo;Add a control-plane node&rdquo; runs automatically.
