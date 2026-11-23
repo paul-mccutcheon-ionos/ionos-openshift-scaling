@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.25</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.26</span>
   </div>
 
   <div class="banner-actions">
@@ -963,7 +963,11 @@
   <div class="card hidden" id="machine-api-status-card">
     <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.5rem;margin-bottom:0.75rem">
       <h2 style="margin:0"><span class="cp-num">1</span>&#128268; Machine API Provider</h2>
-      <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+      <div style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center">
+        <button id="as-ready-btn" onclick="checkAutoscalingReadiness()"
+          style="background:#2563eb;color:#fff;border:1px solid #3b82f6;border-radius:6px;padding:0.4rem 1.1rem;font-size:0.85rem;font-weight:600;cursor:pointer" title="Runs every check on this page in one go">
+          &#10003; Check Readiness
+        </button>
         <button id="check-provider-rbac-btn" onclick="checkProviderRbac()"
           style="background:#1a2a1a;color:#6ee7b7;border:1px solid #065f46;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;cursor:pointer;display:flex;align-items:center;gap:0.4rem">
           <span id="check-provider-rbac-label">&#10003; RBAC Check</span>
@@ -975,6 +979,7 @@
         </button>
       </div>
     </div>
+    <div id="as-ready-result" class="hidden" style="font-size:0.85rem;margin:0 0 0.9rem"></div>
     <ol style="font-size:0.82rem;color:#94a3b8;margin:0 0 0.9rem;padding:0.6rem 0.8rem 0.6rem 1.9rem;background:#0b1424;border:1px solid #1e3a5f;border-radius:8px;line-height:1.6">
       <li><strong style="color:#e2e8f0">Machine API provider</strong> &mdash; check that the provider and the CSR auto-approver run, or deploy them.</li>
       <li><strong style="color:#e2e8f0">MachineSet</strong> &mdash; create a new IONOS MachineSet (2a), attach to an existing one, or clone one, and set its machine configuration and RHCOS image (2b).</li>
@@ -3520,6 +3525,74 @@ Type the node name (${short}) to continue:`);
   }
 
   // ── Machine API Provider status check ─────────────────────────────────────
+  // One button for the whole page: runs every check (provider, auto-approver, RBAC, failed Machines, and the form
+  // inputs the later steps need), refreshes the detail panels below, and shows one summary list.
+  async function checkAutoscalingReadiness() {
+    const btn = document.getElementById('as-ready-btn'), out = document.getElementById('as-ready-result');
+    out.classList.remove('hidden');
+    if (!clusterApiUrl || !ocpToken) {
+      out.innerHTML = '<div style="color:#f87171">Connect to a cluster first (Cluster Connection page).</div>'; return;
+    }
+    btn.disabled = true; btn.style.opacity = '0.6';
+    out.innerHTML = '<div style="color:#64748b">Checking the provider, the auto-approver, permissions and your settings&hellip;</div>';
+    const items = [];
+    const add = (status, title, detail) => items.push({ status, title, detail });
+    try {
+      const params = new URLSearchParams({ apiUrl: clusterApiUrl, ocpToken });
+      const [pr, rb] = await Promise.all([
+        fetch('/api/provider-status?' + params).then(async r => ({ ok: r.ok, j: await r.json().catch(() => ({ error: 'HTTP ' + r.status })) })).catch(e => ({ ok: false, j: { error: e.message } })),
+        apiPost('/api/check-provider-rbac', { clusterApiUrl, ocpToken }).then(j => ({ ok: true, j })).catch(e => ({ ok: false, j: { error: e.message } }))
+      ]);
+      // refresh the detailed panels further down as well (not awaited: they fetch on their own)
+      checkProviderStatus(); checkProviderRbac();
+
+      const dep = (d, label) => {
+        if (!pr.ok) return add('block', label, 'Could not read the cluster: ' + (pr.j.error || 'unknown error'));
+        if (!d || !d.found) return add('block', label, 'Not found. Use "Install" in the Deploy panel below (step 1).');
+        const ok = d.desired > 0 && d.ready >= d.desired;
+        add(ok ? 'ok' : 'block', label, ok ? `Running (${d.ready}/${d.desired} ready).` : `Not ready: ${d.ready}/${d.desired} pods ready. Look at the pod list below; a restart or re-install usually fixes it.`);
+      };
+      dep(pr.j.provider, 'Machine API provider is running');
+      dep(pr.j.autoApprover, 'CSR auto-approver is running');
+
+      if (!rb.ok) add('block', 'Provider permissions (RBAC)', 'Could not check: ' + (rb.j.error || 'unknown error'));
+      else {
+        const bad = (rb.j.checks || []).filter(c => !c.allowed);
+        add(bad.length ? 'block' : 'ok', 'Provider permissions (RBAC)', bad.length
+          ? `Missing: ${bad.map(c => c.verb + ' ' + c.resource).join(', ')}. Run the Post-Upgrade Check & Repair (left menu), or re-install the provider.`
+          : `All ${(rb.j.checks || []).length} required permissions are granted.`);
+      }
+
+      if (pr.ok) {
+        const ageMin = m => m.creationTimestamp ? (Date.now() - Date.parse(m.creationTimestamp)) / 60000 : 0;
+        const failed = (pr.j.failedMachines || []).filter(m => m.phase === 'Failed' || m.errorMessage || m.errorReason || ageMin(m) > 20);
+        add(failed.length ? 'warn' : 'ok', 'No failed Machines', failed.length
+          ? `${failed.length} Machine(s) failed or stuck: ${failed.map(m => m.name).join(', ')}. Delete them (oc delete machine) so the MachineSet can replace them.` : 'No Machine is failed or stuck.');
+      }
+
+      // inputs the later steps need
+      add(ionosToken ? 'ok' : 'block', 'Connected to IONOS Cloud', ionosToken ? 'IONOS API token is set.' : 'Needed to create servers: use step 2 on the Cluster Connection page.');
+      add(datacenterId ? 'ok' : 'block', 'Cluster VDC selected', datacenterId ? 'A VDC is selected.' : 'Select the cluster VDC on the Cluster Connection page.');
+      const mode = (document.querySelector('input[name="as-ms-mode"]:checked') || {}).value;
+      if (mode === 'ionos') {
+        const img = (document.getElementById('as-ionos-image-id').value || '').trim();
+        add(img ? 'ok' : 'block', 'RHCOS image chosen (step 2b)', img ? 'Image ' + img + '.' : 'Use "Browse Images" in step 2b, or upload one.');
+      }
+      const mn = parseInt(document.getElementById('as-min-replicas').value, 10), mx = parseInt(document.getElementById('as-max-replicas').value, 10);
+      const boundsOk = Number.isFinite(mn) && Number.isFinite(mx) && mn >= 0 && mx >= 1 && mn <= mx;
+      add(boundsOk ? 'ok' : 'block', 'Autoscaler bounds make sense (step 3)', boundsOk ? `Min ${mn}, max ${mx}.` : 'Min must be 0 or more, max 1 or more, and min no larger than max.');
+      add('info', 'After a cluster upgrade', 'Run Post-Upgrade Check & Repair from the left menu.');
+    } catch (e) {
+      add('block', 'Readiness check failed', e.message);
+    }
+    const icon = { ok: ['&#10003;', '#6ee7b7'], warn: ['&#9888;', '#fbbf24'], block: ['&#10007;', '#f87171'], info: ['&#8505;', '#93c5fd'] };
+    const blocked = items.filter(i => i.status === 'block').length, warned = items.filter(i => i.status === 'warn').length;
+    out.innerHTML = `<div style="background:#0b1424;border:1px solid #1e3a5f;border-radius:8px;padding:0.7rem 0.9rem">
+      <div style="font-weight:600;margin-bottom:0.4rem;color:${blocked ? '#fbbf24' : '#6ee7b7'}">${blocked ? '&#9888; ' + blocked + ' item(s) need attention before you apply.' : warned ? '&#9888; Ready, with ' + warned + ' warning(s).' : '&#10003; Everything checks out: ready to apply.'}</div>` +
+      items.map(i => { const [ic, col] = icon[i.status]; return `<div style="display:flex;gap:0.6rem;margin:0.25rem 0;align-items:baseline"><span style="color:${col};font-weight:700;width:1rem;flex-shrink:0">${ic}</span><span><span style="color:#e2e8f0">${escHtml(i.title)}</span><div style="color:#64748b;font-size:0.8rem">${escHtml(i.detail)}</div></span></div>`; }).join('') + '</div>';
+    btn.disabled = false; btn.style.opacity = '1';
+  }
+
   async function checkProviderStatus() {
     const btn    = document.getElementById('check-provider-btn');
     const result = document.getElementById('provider-status-result');
