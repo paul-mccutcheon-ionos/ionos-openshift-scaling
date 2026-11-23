@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.20</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.21</span>
   </div>
 
   <div class="banner-actions">
@@ -594,7 +594,7 @@
         .cx-steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:0.8rem;margin-bottom:0.4rem}
         .cx-step{background:#0b1424;border:1px solid #1e3a5f;border-radius:10px;padding:0.75rem 0.85rem;display:flex;flex-direction:column;gap:0.55rem}
         .cx-step-head{display:flex;align-items:center;gap:0.5rem;font-size:0.85rem;font-weight:600;color:#e2e8f0}
-        .cx-num{display:inline-flex;align-items:center;justify-content:center;min-width:1.5rem;height:1.5rem;border-radius:50%;background:#2563eb;color:#fff;font-size:0.78rem;font-weight:700}
+        .cx-num{display:inline-flex;align-items:center;justify-content:center;min-width:1.5rem;height:1.5rem;padding:0 0.35rem;box-sizing:border-box;border-radius:999px;background:#2563eb;color:#fff;font-size:0.78rem;font-weight:700}
         .cx-step .btn,.cx-step select{width:100%;height:2.5rem;margin-top:0}
         .cx-step-note{font-size:0.74rem;color:#64748b;line-height:1.4}
         .cx-sec{display:inline-flex;align-items:center;gap:0.5rem}
@@ -638,7 +638,7 @@
       <div class="error-box" id="get-token-error"></div>
       <div class="error-box" id="connect-error"></div>
 
-      <div class="card-section-title"><span class="cx-sec"><span class="cx-num">1</span>OpenShift cluster access</span></div>
+      <div class="card-section-title"><span class="cx-sec"><span class="cx-num">1a</span>OpenShift cluster access</span></div>
       <div class="form-grid">
         <div class="form-group full-width">
           <label for="api-url">Cluster API URL</label>
@@ -662,7 +662,7 @@
         </div>
       </div>
 
-      <div class="card-section-title"><span class="cx-sec"><span class="cx-num">1</span>OpenShift management host</span> <span style="color:#4b5563;font-weight:400;font-size:0.78rem;text-transform:none;letter-spacing:0">(runs <code>oc login</code> for step 1; also used for automated ISO generation)</span></div>
+      <div class="card-section-title"><span class="cx-sec"><span class="cx-num">1b</span>OpenShift management host</span> <span style="color:#4b5563;font-weight:400;font-size:0.78rem;text-transform:none;letter-spacing:0">(runs <code>oc login</code> for step 1; also used for automated ISO generation)</span></div>
       <p style="font-size:0.8rem;color:#4b5563;margin-bottom:0.75rem">The bastion / management server where <code style="color:#38bdf8">oc</code> is installed and your cluster kubeconfig is present. SSH credentials are used only to run commands such as <code style="color:#38bdf8">oc login</code> and <code style="color:#38bdf8">oc adm node-image create</code> remotely — they are never sent anywhere other than your own server.</p>
       <div class="form-grid">
         <div class="form-group">
