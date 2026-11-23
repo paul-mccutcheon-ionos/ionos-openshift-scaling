@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.10</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.11</span>
   </div>
 
   <div class="banner-actions">
@@ -2126,7 +2126,8 @@
     </div>
     <details style="margin-top:1.25rem">
       <summary style="cursor:pointer;color:#60a5fa;font-size:0.85rem">Show raw opct output</summary>
-      <pre id="opct-report-raw" style="background:#0a0c12;border:1px solid #1e2333;border-radius:6px;padding:0.75rem 1rem;font-size:0.78rem;color:#94a3b8;max-height:400px;overflow:auto;margin-top:0.75rem;white-space:pre-wrap"></pre>
+      <!-- wider than the card (the box-drawn tables are ~170 columns) and never wrapped: scroll sideways instead -->
+      <pre id="opct-report-raw" style="--w:min(1700px,calc(100vw - 300px));width:var(--w);max-width:none;margin-left:min(0px,calc((100% - var(--w))/2));box-sizing:border-box;background:#0a0c12;border:1px solid #1e2333;border-radius:6px;padding:0.75rem 1rem;font-family:ui-monospace,'Cascadia Mono',Consolas,monospace;font-size:0.78rem;line-height:1.3;color:#94a3b8;max-height:70vh;overflow:auto;margin-top:0.75rem;white-space:pre"></pre>
     </details>
   </div>
 
