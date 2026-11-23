@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.31</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.32</span>
   </div>
 
   <div class="banner-actions">
@@ -819,6 +819,15 @@
         <span class="spinner hidden" id="refresh-nodes-spinner"></span>
       </button>
     </div>
+  </div>
+
+  <!-- Manual Worker Scaling: scope note (always visible on this page) -->
+  <div id="manual-scope-note" style="display:none;background:#1d1708;border:2px solid #d97706;border-radius:10px;padding:1rem 1.2rem;margin-bottom:1.25rem;color:#fde68a;font-size:0.9rem;line-height:1.6">
+    <div style="font-weight:700;font-size:1rem;color:#fbbf24;margin-bottom:0.35rem">&#9888; Manual workers only &mdash; not for MachineSet or autoscaled nodes</div>
+    This page is only for <strong>manually configured worker nodes</strong>, built exactly as described in the
+    <strong>IONOS OpenShift Installation Guide</strong>. These nodes are <strong>not</strong> part of an OpenShift
+    <strong>MachineSet</strong>, so the Machine API and the Cluster Autoscaler do not manage them.
+    To scale workers automatically, use <strong>Worker Autoscaling Management</strong> in the left menu instead.
   </div>
 
   <div id="manual-connect-hint" style="text-align:center;padding:3rem 1rem;color:#4b5563;font-size:0.9rem">
@@ -2802,7 +2811,7 @@
   // ── Side-nav section switching ─────────────────────────────────────────────
   const NAV_GROUPS = {
     connection:  ['connect-card', 'overview-card', 'cpms-card', 'machinesets-card', 'nodes-card'],
-    manual:      ['manual-connect-hint', 'scaling-action-card', 'scale-in-card', 'add-node-card', 'csrs-card'],
+    manual:      ['manual-scope-note', 'manual-connect-hint', 'scaling-action-card', 'scale-in-card', 'add-node-card', 'csrs-card'],
     autoscaling:  ['autoscaling-connect-hint', 'machine-api-status-card', 'autoscale-card'],
     postupgrade:  ['postupgrade-connect-hint', 'post-upgrade-card'],
     controlplane:    ['cp-status-card', 'cp-add-card', 'cp-cpms-card', 'cp-retire-card'],
