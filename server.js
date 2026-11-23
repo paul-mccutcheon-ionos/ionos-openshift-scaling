@@ -6780,6 +6780,11 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
           ocpSshPubKey, mgmtSshPubKey,
           mgmtImageId, mgmtImageName } = req.body;
   const { step, log, done, fail } = makeSseHelpers(res);
+  // Management VM size (wizard "Management host" block; defaults 4 vCPU / 8 GB / 50 GB, clamped to sane limits)
+  const mgmtCores  = Math.min(16,   Math.max(2,  parseInt(req.body.mgmtCores,  10) || 4));
+  const mgmtRamGB  = Math.min(64,   Math.max(4,  parseInt(req.body.mgmtRamGB,  10) || 8));
+  const mgmtDiskGB = Math.min(1024, Math.max(50, parseInt(req.body.mgmtDiskGB, 10) || 50));
+  const mgmtLabel  = `Create management VM (${mgmtCores} vCPU, ${mgmtRamGB} GB RAM, ${mgmtDiskGB} GB disk)`;
   const isCubeControlPlane = controlServerType === 'CUBE';
   const isVcpuControlPlane = controlServerType === 'VCPU';   // shared vCPU cores: no CPU family, Balanced SSD volume
   if (isCubeControlPlane && !controlTemplateId) {
@@ -6924,7 +6929,7 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
     // 5 & 6. Find or create servers (fetch server list once for both checks)
     const allSrvs = await ionosGet(`/datacenters/${dcId}/servers?depth=1`, ionosToken);
 
-    step('Create management VM (2 vCPU, 4 GB RAM)', 'running');
+    step(mgmtLabel, 'running');
     let mgmtSrvId;
     const existMgmt = byName(allSrvs.items, `${clusterName}-mgmt`);
     if (existMgmt) {
@@ -6933,10 +6938,10 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
     } else {
       const sshKeys = [(mgmtSshPubKey || ocpSshPubKey || '').trim()].filter(Boolean);
       const srv = await ionosPost(`/datacenters/${dcId}/servers`, ionosToken, {
-        properties: { name: `${clusterName}-mgmt`, cores: 2, ram: 4096, type: 'VCPU' },
+        properties: { name: `${clusterName}-mgmt`, cores: mgmtCores, ram: mgmtRamGB * 1024, type: 'VCPU' },
         entities: {
           volumes: { items: [{ properties: {
-            name: `${clusterName}-mgmt-root`, size: 50, type: 'BALANCED', image: resolvedImageId,
+            name: `${clusterName}-mgmt-root`, size: mgmtDiskGB, type: 'BALANCED', image: resolvedImageId,
             ...(sshKeys.length ? { sshKeys } : { imagePassword: 'Temp1OcpInstall!' })
           }}] },
           nics: { items: [
@@ -6948,7 +6953,7 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
       mgmtSrvId = srv.id;
       logCreated(`Management VM ${mgmtSrvId}`);
     }
-    step('Create management VM (2 vCPU, 4 GB RAM)', 'done');
+    step(mgmtLabel, 'done');
 
     const cpStepLabel = isCubeControlPlane
       ? 'Create 3 control plane VMs (Cube)'

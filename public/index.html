@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.32</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.33</span>
   </div>
 
   <div class="banner-actions">
@@ -2475,6 +2475,24 @@
             </div>
           </div>
           <div>
+            <h4 style="margin-bottom:0.6rem;color:#94a3b8;font-size:0.85rem;text-transform:uppercase;letter-spacing:0.05em">Management host</h4>
+            <div class="field-note" style="margin-bottom:0.6rem">A shared-core (vCPU) server with a Balanced SSD boot disk. It runs the installer, the web server for worker ignition, <code>oc</code> and, later, <code>opct</code>. 2 vCPU / 4 GB was too small in practice: 4 vCPU / 8 GB is the minimum recommended, and more RAM helps if you generate OPCT reports on it.</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.75rem">
+              <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+                Cores
+                <input id="ncw-mgmt-cores" type="number" value="4" min="2" max="16" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
+              </label>
+              <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+                RAM (GB)
+                <input id="ncw-mgmt-ram" type="number" value="8" min="4" max="64" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
+              </label>
+              <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
+                Disk (GB)
+                <input id="ncw-mgmt-disk" type="number" value="50" min="50" max="1024" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
+              </label>
+            </div>
+          </div>
+          <div>
             <h4 style="margin-bottom:0.6rem;color:#94a3b8;font-size:0.85rem;text-transform:uppercase;letter-spacing:0.05em">Workers (planned)</h4>
             <div id="ncw-w-note" class="field-note" style="margin-bottom:0.6rem">The wizard installs the 3 control-plane nodes. Workers are added afterwards under Worker Autoscaling Management (vCPU or Cube).</div>
             <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.75rem;flex-wrap:wrap">
@@ -3880,6 +3898,9 @@ Type the node name (${short}) to continue:`);
           case 'NCW_CP_RAM_GB':      { const el = document.getElementById('ncw-cp-ram');   if (el) el.value = val; break; }
           case 'NCW_CP_DISK_GB':     { const el = document.getElementById('ncw-cp-disk');  if (el) el.value = val; break; }
           case 'NCW_W_REPLICAS':     { const el = document.getElementById('ncw-w-replicas'); if (el) el.value = val; break; }
+          case 'NCW_MGMT_CORES':     { const el = document.getElementById('ncw-mgmt-cores'); if (el) el.value = val; break; }
+          case 'NCW_MGMT_RAM_GB':    { const el = document.getElementById('ncw-mgmt-ram');   if (el) el.value = val; break; }
+          case 'NCW_MGMT_DISK_GB':   { const el = document.getElementById('ncw-mgmt-disk');  if (el) el.value = val; break; }
           case 'NCW_W_SERVER_TYPE':  { ncwEnvPending.workerType = val.toUpperCase(); const el = document.getElementById('ncw-w-server-type'); const v = val.toUpperCase() === 'DEDICATED' ? 'ENTERPRISE' : val.toUpperCase(); if (el && [...el.options].some(o => o.value === v)) { el.value = v; ncwApplyWorkerType(); } break; }
           case 'NCW_W_CUBE_TEMPLATE': ncwEnvPending.workerTemplate = val; break;
           case 'NCW_MGMT_SSH_PUBKEY': { const el = document.getElementById('ncw-mgmt-ssh-pub'); if (el) el.value = val; break; }
@@ -6224,6 +6245,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
         `                   ${c.controlCores || 8} cores / ${c.controlRamGB || 16} GB RAM / ${c.controlDiskGB || 600} GB ${c.controlServerType === 'VCPU' ? 'Balanced' : 'Performance'} SSD`,
       ]),
       `Placement:         servers ${c.controlServerZone || 'AUTO'}` + (c.controlServerType === 'CUBE' ? '' : `; storage control-0/1/2 → ${(c.controlDiskZones || ['AUTO', 'AUTO', 'AUTO']).join(' / ')}`),
+      `Management host:  vCPU ${c.mgmtCores || 4} cores / ${c.mgmtRamGB || 8} GB RAM / ${c.mgmtDiskGB || 50} GB Balanced SSD`,
       ``,
       c.workerType === 'CUBE'
         ? `Workers (planned, added after install): ${c.workerReplicas || 2}× Cube ${c.workerTemplateName || '— template not selected —'}`
@@ -6307,6 +6329,9 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
         ncwConfig.workerCores   = document.getElementById('ncw-w-cores').value;
         ncwConfig.workerRamGB   = document.getElementById('ncw-w-ram').value;
         ncwConfig.workerDiskGB  = document.getElementById('ncw-w-disk').value;
+        ncwConfig.mgmtCores     = document.getElementById('ncw-mgmt-cores').value;
+        ncwConfig.mgmtRamGB     = document.getElementById('ncw-mgmt-ram').value;
+        ncwConfig.mgmtDiskGB    = document.getElementById('ncw-mgmt-disk').value;
         break;
       case 3:
         ncwConfig.ocpSshPubKey  = document.getElementById('ncw-ocp-ssh-pub').value.trim();
@@ -6626,6 +6651,9 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     put('NCW_VDC_LOCATION', c.vdcLocation);
     put('NCW_OCP_VERSION', c.ocpVersion);
     put('NCW_CP_SERVER_TYPE', c.controlServerType);
+    put('NCW_MGMT_CORES', c.mgmtCores);
+    put('NCW_MGMT_RAM_GB', c.mgmtRamGB);
+    put('NCW_MGMT_DISK_GB', c.mgmtDiskGB);
     put('NCW_W_SERVER_TYPE', c.workerType);
     put('DNS_PROVIDER', c.dnsProvider);
     put('DNS_DOMAIN', c.dnsDomain || c.cloudDnsZone);
