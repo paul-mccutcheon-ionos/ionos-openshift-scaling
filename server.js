@@ -4109,15 +4109,23 @@ app.post('/api/ionos/switch-boot-device', async (req, res) => {
 // Used to find the RHCOS image UUID for Machine API providerSpec.
 app.post('/api/ionos/images', async (req, res) => {
   if (!requireFields(res, req.body, ['ionosToken'])) return;
-  const { ionosToken, filter } = req.body;
+  const { ionosToken, filter, datacenterId, excludeMaster } = req.body;
   const needle = (filter || 'rhcos').toLowerCase();
   try {
+    // With a datacenter, only images stored in that datacenter's location can boot a server there.
+    let location = null;
+    if (datacenterId) {
+      const dc = await ionosGet(`/datacenters/${encodeURIComponent(datacenterId)}`, ionosToken);
+      location = dc?.properties?.location || null;
+    }
     // Public images (includes RHCOS uploads visible to the account)
     const data = await ionosGet(`/images?depth=1`, ionosToken);
     const images = (data?.items || [])
       .filter(img => {
         const name = (img.properties?.name || '').toLowerCase();
         const desc = (img.properties?.description || '').toLowerCase();
+        if (location && img.properties?.location !== location) return false;
+        if (excludeMaster && /master/.test(name)) return false;   // control-plane images are not worker images
         return name.includes(needle) || desc.includes(needle);
       })
       .map(img => ({
@@ -4129,7 +4137,7 @@ app.post('/api/ionos/images', async (req, res) => {
         public:   img.properties?.public      ?? false
       }))
       .sort((a, b) => a.name.localeCompare(b.name));
-    res.json({ images });
+    res.json({ images, location });
   } catch (err) {
     res.status(err.status || 502).json({ error: err.message });
   }

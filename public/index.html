@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.26</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.27</span>
   </div>
 
   <div class="banner-actions">
@@ -5349,12 +5349,13 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
       const res  = await fetch('/api/ionos/images', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ionosToken, filter: 'rhcos' })
+        // the connected cluster's VDC fixes the location; control-plane (master) images are left out of this worker list
+        body: JSON.stringify({ ionosToken, filter: 'rhcos', datacenterId, excludeMaster: true })
       });
       const data = await res.json();
       if (!res.ok) { list.textContent = data.error || 'Error fetching images'; return; }
-      if (!data.images || !data.images.length) { list.textContent = 'No RHCOS images found — use Upload RHCOS Image to add one.'; return; }
-      list.innerHTML = data.images.map(img => `
+      if (!data.images || !data.images.length) { list.textContent = 'No RHCOS worker image found' + (data.location ? ' at ' + data.location : '') + ' — use Upload RHCOS Image to add one.'; return; }
+      list.innerHTML = (data.location ? `<div style="padding:0.4rem 0.7rem;color:#64748b;border-bottom:1px solid #1e2333">Worker images at ${escHtml(data.location)} (the cluster's datacenter)</div>` : '') + data.images.map(img => `
         <div style="padding:0.45rem 0.7rem;border-bottom:1px solid #1e2333;cursor:pointer;display:flex;align-items:center;gap:0.6rem"
              onclick="document.getElementById('as-ionos-image-id').value='${escHtml(img.id)}';
                       document.getElementById('as-ionos-images-panel').style.display='none'">
