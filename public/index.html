@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.16</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.17</span>
   </div>
 
   <div class="banner-actions">
@@ -1700,8 +1700,6 @@
           style="background:#1e3a5f;color:#93c5fd;border:1px solid #2563eb;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;cursor:pointer"><span class="cp-num">1</span>&#8635; Check readiness</button>
         <button onclick="cpPrepare()"
           style="background:#1a2a1a;color:#6ee7b7;border:1px solid #065f46;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;cursor:pointer"><span class="cp-num">2</span>Prepare master.ign</button>
-        <button onclick="cpCopyProfile()"
-          style="background:#14233a;color:#93c5fd;border:1px solid #2563eb;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;cursor:pointer" title="Copies each control-plane node's type, size and storage as text for the test report">Copy profile for test report</button>
         <button id="cp-image-btn" onclick="cpCreateImage()"
           style="background:#2d1f4a;color:#c4b5fd;border:1px solid #5b21b6;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;cursor:pointer"><span class="cp-num">3</span>Create master image</button>
       </div>
@@ -1721,6 +1719,11 @@
       <li><strong style="color:#e2e8f0">Retire the fixed nodes</strong> &mdash; only if you did not use the swap option in step 4.</li>
     </ol>
     <div id="cp-status-result" style="font-size:0.85rem"></div>
+    <div style="border-top:1px solid #1e3a5f;margin-top:1rem;padding-top:0.8rem;display:flex;align-items:center;gap:0.8rem;flex-wrap:wrap">
+      <span style="font-size:0.78rem;color:#64748b">Optional, not part of the workflow:</span>
+      <button onclick="cpCopyProfile()"
+          style="background:#14233a;color:#93c5fd;border:1px solid #2563eb;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;cursor:pointer" title="Copies each control-plane node's type, size and storage as text for the test report">Copy profile for test report</button>
+    </div>
     <pre id="cp-op-log" class="hidden" style="max-height:220px;overflow-y:auto;background:#0a0d14;padding:0.6rem 0.8rem;border-radius:6px;font-size:0.75rem;color:#94a3b8;white-space:pre-wrap;margin-top:0.75rem"></pre>
   </div>
 
