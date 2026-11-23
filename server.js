@@ -1200,30 +1200,47 @@ async function cpAbortFailedCreate(ctx, setName, previousReplicas) {
 }
 
 // Readiness checks: 'block' stops the Add button, 'warn' is shown but does not stop it.
+const CP_FIX_PREPARE = { action: 'prepare', label: 'Create master.ign now', confirm: 'Create (or refresh) /root/ignition-serve/master.ign on the management host from the worker stub: same CA, merges /config/master, with the IONOS default-route script.' };
+const CP_FIX_IMAGE   = { action: 'create-image', label: 'Create the master image', confirm: null };
 async function cpChecks(ctx, g) {
   const items = [];
-  const add = (id, title, status, detail) => items.push({ id, title, status, detail });
+  // `fix` (optional, kept only when the item is not ok): { action, label, confirm } is a one-click fix the page can run,
+  // { guide } is step-by-step help for problems that must not be repaired automatically.
+  const add = (id, title, status, detail, fix) => items.push({ id, title, status, detail, ...(fix && status !== 'ok' ? { fix } : {}) });
 
   const stable = !g.upgrading && g.mcp && g.mcp.updated && !g.mcp.updating && !g.mcp.degraded && g.operatorIssues.length === 0;
   add('cluster-stable', 'Cluster is stable (no upgrade, master pool updated, operators healthy)', stable ? 'ok' : 'block',
     stable ? `${g.version}; master pool ${g.mcp?.ready}/${g.mcp?.total} updated; ${g.watched.filter(w => w.ok).length}/${g.watched.length} control-plane operators settled.`
            : [g.upgrading && 'an upgrade is in progress', g.mcp && !g.mcp.updated && 'master pool not updated', g.mcp?.updating && 'master pool is updating', g.mcp?.degraded && 'master pool degraded',
-              g.operatorIssues.length && `operators with problems: ${g.operatorIssues.map(o => o.name).join(', ')}`].filter(Boolean).join('; '));
+              g.operatorIssues.length && `operators with problems: ${g.operatorIssues.map(o => o.name).join(', ')}`].filter(Boolean).join('; '),
+    { guide: [
+      g.upgrading && 'A cluster upgrade is running. Wait until it has finished (oc get clusterversion), then check again. Nothing here can safely speed it up.',
+      g.mcp && (g.mcp.updating || !g.mcp.updated) && 'The master MachineConfigPool is still rolling out a change. Watch it with: oc get mcp master   Wait until UPDATED=True and UPDATING=False.',
+      g.mcp && g.mcp.degraded && 'The master pool is degraded. Find out why: oc describe mcp master (look at the Degraded condition and the node it names), then read the machine-config-daemon pod log on that node in the openshift-machine-config-operator namespace.',
+      ...g.operatorIssues.map(o => `Operator ${o.name} is ${o.degraded === 'True' ? 'Degraded' : 'not Available'}${o.message ? ': ' + o.message : ''}. Inspect it with: oc describe co ${o.name}`),
+      'Adding a control-plane node while the cluster is unstable risks losing etcd quorum, so this check blocks until everything has settled. Check again once the operators are healthy.'
+    ].filter(Boolean).join('\n') });
 
   const etcdOk = g.etcd.membersAvailable && g.etcd.podsReady === g.etcd.pods && g.etcd.pods === g.masters.length;
   add('etcd-healthy', 'etcd is healthy with one member per control-plane node', etcdOk ? 'ok' : 'block',
-    `${g.etcd.podsReady}/${g.etcd.pods} etcd pods ready for ${g.masters.length} control-plane node(s). ${g.etcd.message}`);
+    `${g.etcd.podsReady}/${g.etcd.pods} etcd pods ready for ${g.masters.length} control-plane node(s). ${g.etcd.message}`,
+    { guide: 'etcd must be fully healthy before any node is added or retired.\n1. See the pods: oc -n openshift-etcd get pods -l app=etcd -o wide\n2. See the members: oc -n openshift-etcd rsh <etcd pod>, then etcdctl member list -w table and etcdctl endpoint health --cluster\n3. For a pod that is not Ready: oc -n openshift-etcd logs <pod> -c etcd --tail=100 (look for "took too long", leader changes or disk errors).\n4. Do not add or retire nodes until every member is healthy, and do not remove etcd members by hand without a snapshot.' });
 
   add('members-cap', `Fewer than ${CP_MAX_MEMBERS} control-plane nodes`, g.masters.length < CP_MAX_MEMBERS ? 'ok' : 'block',
-    `${g.masters.length} control-plane node(s) now; this feature adds up to ${CP_MAX_MEMBERS} (etcd runs best with 3 or 5 members; an even count such as 4 or 6 is only a transitional state while swapping nodes).`);
-  add('master-secret', 'Master user-data secret exists', g.masterSecret ? 'ok' : 'block', g.masterSecret ? 'master-user-data-managed found.' : 'Secret master-user-data-managed is missing in openshift-machine-api.');
-  add('approver', 'CSR auto-approver is running', g.approverReady ? 'ok' : 'block', g.approverReady ? 'ionos-machine-auto-approver is ready.' : 'Without it the new node cannot join (its CSRs would wait for manual approval).');
-  add('provider', 'Machine API provider is running', g.providerReady ? 'ok' : 'block', g.providerImage);
+    `${g.masters.length} control-plane node(s) now; this feature adds up to ${CP_MAX_MEMBERS} (etcd runs best with 3 or 5 members; an even count such as 4 or 6 is only a transitional state while swapping nodes).`,
+    { guide: 'The control plane already has the maximum number of nodes. Retire a fixed (hand-built) node with the "Retire a fixed control-plane node" card first, or let the swap that is in progress finish, then check again.' });
+  add('master-secret', 'Master user-data secret exists', g.masterSecret ? 'ok' : 'block', g.masterSecret ? 'master-user-data-managed found.' : 'Secret master-user-data-managed is missing in openshift-machine-api.',
+    { guide: 'The Machine Config Operator normally creates this secret.\n1. Check: oc -n openshift-machine-api get secret master-user-data-managed\n2. If it is missing, look at the operator: oc get co machine-config and oc -n openshift-machine-config-operator get pods. Deleting the machine-config-operator pod makes it recreate the secret.\nDo not create the secret by hand: its content must come from the cluster\'s own Machine Config Server.' });
+  add('approver', 'CSR auto-approver is running', g.approverReady ? 'ok' : 'block', g.approverReady ? 'ionos-machine-auto-approver is ready.' : 'Without it the new node cannot join (its CSRs would wait for manual approval).',
+    { action: 'restart-approver', label: 'Repair / restart the auto-approver', confirm: 'Re-apply the ionos-machine-auto-approver deployment if it has drifted, otherwise restart it. Safe: it only approves the CSRs of known Machines.' });
+  add('provider', 'Machine API provider is running', g.providerReady ? 'ok' : 'block', g.providerImage,
+    { action: 'restart-provider', label: 'Restart the Machine API provider', confirm: 'Restart the ionos-machine-api-provider deployment. Existing machines keep running; the provider reconnects within about a minute.' });
   // The canonical image tag (ionos-machine-api-provider:ionos-machine-api-provider, on GHCR or Docker Hub) is the
   // latest build, which includes control-plane NLB sync; older builds carried "-cp-" in their tag.
   const cpSync = /-cp-/.test(g.providerImage) || /ionos-machine-api-provider:ionos-machine-api-provider$/.test(g.providerImage);
   add('provider-nlb', 'Provider keeps the API load-balancer rules in step with the control plane', cpSync ? 'ok' : 'warn',
-    cpSync ? 'The running provider image includes control-plane NLB sync.' : 'This provider image has no control-plane NLB sync: new masters would not be added to the API rules automatically (needed before retiring any old node).');
+    cpSync ? 'The running provider image includes control-plane NLB sync.' : 'This provider image has no control-plane NLB sync: new masters would not be added to the API rules automatically (needed before retiring any old node).',
+    { guide: `The running provider image (${g.providerImage || 'unknown'}) has no control-plane load-balancer sync, so a new master would not be added to the API (6443) and machine-config (22623) rules of the IONOS load balancer.\n1. Deploy a provider build that includes control-plane NLB sync: on the Worker Autoscaling Management page, update the image in the Machine API provider card.\n2. Check readiness again; this warning clears once the image has control-plane sync.\nAdding nodes works without it, but do not retire an old node until it is resolved (the old node's rules would go before the new one's are added).` });
 
   // contract storage headroom (SSD + DAS are one pool)
   if (ctx.ionos) {
@@ -1231,15 +1248,17 @@ async function cpChecks(ctx, g) {
       const h = await ionosStorageHeadroom(ctx.ionos.token);
       if (h) add('storage-quota', 'Contract has storage headroom for new control-plane nodes', h.freeGiB >= 600 ? 'ok' : 'warn',
         `${h.freeGiB} GiB free of the ${h.limitGiB} GiB SSD+DAS contract limit (${h.usedGiB} GiB used; the DCD shows SSD and DAS as separate bars but IONOS adds them together). ` +
-        `A Dedicated Core node needs its disk size (600 GiB by default); the nodes are added one at a time, so ${h.freeGiB >= 600 ? 'at least one fits.' : 'NONE fits - free storage or ask IONOS to raise the limit.'}`);
-    } catch (e) { add('storage-quota', 'Contract has storage headroom for new control-plane nodes', 'warn', 'Could not read the contract limits: ' + e.message); }
+        `A Dedicated Core node needs its disk size (600 GiB by default); the nodes are added one at a time, so ${h.freeGiB >= 600 ? 'at least one fits.' : 'NONE fits - free storage or ask IONOS to raise the limit.'}`,
+        { guide: `Only ${h.freeGiB} GiB of the ${h.limitGiB} GiB SSD+DAS contract limit is free; a Dedicated Core control-plane node needs 600 GiB by default (a Cube includes its own storage).\nOptions:\n1. Delete unused volumes or snapshots in any datacenter of the contract (SSD and DAS are counted together across all datacenters).\n2. Tick "Swap" in the add card, so each old node is deleted right after its replacement joins (room for ONE node is enough).\n3. Ask IONOS support to raise ssdLimitPerContract. IONOS also limits how much storage is created and deleted in a short time (error VDC-5-1091).` });
+    } catch (e) { add('storage-quota', 'Contract has storage headroom for new control-plane nodes', 'warn', 'Could not read the contract limits: ' + e.message,
+        { guide: 'The IONOS contract limits could not be read, usually because the IONOS API token is missing or has expired. Reconnect to IONOS Cloud on the Cluster Connection page, then check again.' }); }
   }
 
   // management host: master stub
   try {
     const ref = await referenceMcsCa(ctx);
     const stub = await withMgmtSsh(ctx, async conn => (await readIgnStubs(conn)).find(s => s.file.endsWith('/master.ign')));
-    if (!stub) add('stub', 'master.ign Ignition stub on the management host', 'block', `No master.ign next to worker.ign on the management host (${IGN_LOCATIONS.map(l => l.dir).join(' or ')}) — use "Prepare".`);
+    if (!stub) add('stub', 'master.ign Ignition stub on the management host', 'block', `No master.ign next to worker.ign on the management host (${IGN_LOCATIONS.map(l => l.dir).join(' or ')}) — use "Prepare".`, CP_FIX_PREPARE);
     else {
       const st = stubCaState(stub, ref);
       const src = stub.json?.ignition?.config?.merge?.[0]?.source || '';
@@ -1250,10 +1269,12 @@ async function cpChecks(ctx, g) {
       const ok = st.state === 'ok' && roleOk && routeOk;
       add('stub', 'master.ign Ignition stub on the management host', ok ? 'ok' : 'block',
         ok ? `Present, merges ${src}, CA matches the cluster, installs the IONOS default-route script.`
-          : `Present but ${st.state !== 'ok' ? 'its CA is ' + st.state : !roleOk ? 'it does not merge /config/master (' + src + ')' : 'its IONOS default-route script is missing or uses the wrong gateway (new control-plane nodes would have no route and never join)'} — use "Prepare".`);
+          : `Present but ${st.state !== 'ok' ? 'its CA is ' + st.state : !roleOk ? 'it does not merge /config/master (' + src + ')' : 'its IONOS default-route script is missing or uses the wrong gateway (new control-plane nodes would have no route and never join)'} — use "Prepare".`, CP_FIX_PREPARE);
     }
   } catch (e) {
-    add('stub', 'master.ign Ignition stub on the management host', e.skip ? 'warn' : 'block', e.skip ? 'Management host SSH details not supplied — cannot verify.' : e.message);
+    add('stub', 'master.ign Ignition stub on the management host', e.skip ? 'warn' : 'block', e.skip ? 'Management host SSH details not supplied — cannot verify.' : e.message,
+      { guide: e.skip ? 'The management host SSH details are missing. Fill in the host, user and key in section 1b of the Cluster Connection page (or load your .env file), reconnect, and check again.'
+                      : `The management host could not be checked: ${e.message}\nCheck that the host is reachable over SSH, that the key is right, and that the Ignition files are in one of: ${IGN_LOCATIONS.map(l => l.dir).join(', ')}. If worker.ign is missing there, the master stub cannot be derived from it.` });
   }
 
   // master boot image
@@ -1262,8 +1283,9 @@ async function cpChecks(ctx, g) {
     try { images = await cpFindMasterImages(ctx); } catch (e) { images = { images: [], error: e.message }; }
     const ok = images.images.find(i => i.state === 'AVAILABLE');
     add('image', 'Master boot image in the IONOS image store', ok ? 'ok' : 'block',
-      ok ? `${ok.name} (${ok.id}) at ${images.location}.` : `No AVAILABLE rhcos *master* image at ${images.location || 'the datacenter location'} — create it with "Create master image".${images.error ? ' (' + images.error + ')' : ''}`);
-  } else add('image', 'Master boot image in the IONOS image store', 'warn', 'IONOS token / datacenter not supplied.');
+      ok ? `${ok.name} (${ok.id}) at ${images.location}.` : `No AVAILABLE rhcos *master* image at ${images.location || 'the datacenter location'} — create it with "Create master image".${images.error ? ' (' + images.error + ')' : ''}`, CP_FIX_IMAGE);
+  } else add('image', 'Master boot image in the IONOS image store', 'warn', 'IONOS token / datacenter not supplied.',
+    { guide: 'The IONOS token or datacenter is missing, so the image store cannot be checked. Connect to IONOS Cloud and select the cluster VDC on the Cluster Connection page, then check again.' });
 
   return { items, images, canAdd: !items.some(i => i.status === 'block') };
 }
@@ -1325,6 +1347,28 @@ app.post('/api/control-plane/status', async (req, res) => {
     const mhc  = await cpMhcState(ctx);
     let infraId = ''; try { infraId = await clusterInfraId(ctx.apiUrl, ctx.token); } catch (_) {}
     res.json({ ...g, checks: checks.items, canAdd: checks.canAdd, masterImages: checks.images.images, nlb, storage, sets: CP_SETS, maxMembers: CP_MAX_MEMBERS, cpms, mhc, infraId });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// One-click fixes offered by "Check readiness" (the others, prepare and create-image, reuse their own endpoints).
+app.post('/api/control-plane/fix', async (req, res) => {
+  if (!req.body.clusterApiUrl || !req.body.ocpToken) return res.status(400).json({ error: 'clusterApiUrl and ocpToken are required.' });
+  const ctx = postUpgradeCtx(req.body);
+  const restart = name => ocpPatch(ctx.apiUrl, `/apis/apps/v1/namespaces/${MAPI_NS}/deployments/${name}`, ctx.token,
+    { spec: { template: { metadata: { annotations: { 'kubectl.kubernetes.io/restartedAt': new Date().toISOString() } } } } });
+  try {
+    if (req.body.action === 'restart-provider') {
+      await restart('ionos-machine-api-provider');
+      return res.json({ ok: true, message: 'Restarted the Machine API provider. Give it a minute, then check again.' });
+    }
+    if (req.body.action === 'restart-approver') {
+      const step = POST_UPGRADE_STEPS.find(x => x.id === 'approver');
+      const before = await runPostUpgradeStep(step, ctx);
+      if (before.status === 'drift') return res.json({ ok: true, message: 'Re-applied the auto-approver: ' + await step.fix(ctx) });
+      await restart('ionos-machine-auto-approver');
+      return res.json({ ok: true, message: 'The auto-approver matched its expected definition, so it was restarted. Give it a minute, then check again.' });
+    }
+    res.status(400).json({ error: 'Unknown fix action.' });
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
 

@@ -523,7 +523,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.22</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.23</span>
   </div>
 
   <div class="banner-actions">
@@ -1752,7 +1752,7 @@
       <style>.cp-num{display:inline-flex;align-items:center;justify-content:center;min-width:1.35rem;height:1.35rem;padding:0 0.3rem;border-radius:999px;background:#2563eb;color:#fff;font-size:0.72rem;font-weight:700;margin-right:0.4rem;vertical-align:middle}</style>
       <h2 style="margin:0">&#128737; Managed Control Plane</h2>
       <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
-        <button id="cp-check-btn" onclick="cpStatus()"
+        <button id="cp-check-btn" onclick="cpFixMsg='';cpStatus()"
           style="background:#1e3a5f;color:#93c5fd;border:1px solid #2563eb;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;cursor:pointer"><span class="cp-num">1</span>&#8635; Check readiness</button>
         <button onclick="cpPrepare()"
           style="background:#1a2a1a;color:#6ee7b7;border:1px solid #065f46;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;cursor:pointer"><span class="cp-num">2</span>Prepare master.ign</button>
@@ -3133,21 +3133,28 @@
       <td style="padding:0.2rem 0.6rem;color:${m.managed ? '#6ee7b7' : '#94a3b8'}">${m.managed ? (m.owner === 'ControlPlaneMachineSet' ? 'ControlPlaneMachineSet' : m.machineSet ? 'MachineSet ' + escHtml(m.machineSet) : 'Machine ' + escHtml(m.machine)) : 'fixed (hand-built)'}</td>
       <td style="padding:0.2rem 0.6rem;color:${m.etcdPod?.ready ? '#6ee7b7' : '#f87171'}">${m.etcdPod ? (m.etcdPod.ready ? 'etcd Ready' : 'etcd starting') : 'no etcd pod'}</td>
       <td style="padding:0.2rem 0.6rem;color:${/DAS/.test((d.storage?.[m.name]?.volumes || []).join()) ? '#c4b5fd' : '#94a3b8'}">${escHtml(d.storage?.[m.name] ? d.storage[m.name].type + (d.storage[m.name].zone ? ' ' + d.storage[m.name].zone : '') + ' · ' + d.storage[m.name].volumes.join(', ') : '')}</td></tr>`).join('');
-    const das = d.masters.filter(m => /DAS/.test((d.storage?.[m.name]?.volumes || []).join())).length;
     const nlb = Array.isArray(d.nlb)
       ? d.nlb.map(r => `<div style="color:#94a3b8">port ${r.port} &rarr; ${r.targets.map(escHtml).join(', ')}</div>`).join('')
       : `<div style="color:#64748b">${escHtml(d.nlb?.error || 'not checked (IONOS token / datacenter needed)')}</div>`;
-    const checks = d.checks.map(c => {
+    const fixBtn = 'border-radius:6px;padding:0.25rem 0.75rem;font-size:0.78rem;font-weight:600;cursor:pointer;';
+    const checks = d.checks.map((c, i) => {
       const [ic, col] = icon[c.status] || icon.warn;
+      let fix = '';
+      if (c.fix && c.fix.action) fix = `<div style="margin-top:0.35rem"><button type="button" onclick="cpFix(${i})" style="${fixBtn}background:#14532d;color:#86efac;border:1px solid #166534">&#128295; Fix: ${escHtml(c.fix.label)}</button></div>`;
+      else if (c.fix && c.fix.guide) fix = `<div style="margin-top:0.35rem"><button type="button" onclick="cpToggleGuide(${i})" style="${fixBtn}background:#14233a;color:#93c5fd;border:1px solid #2563eb">&#128161; How to fix</button>
+        <pre id="cp-guide-${i}" class="hidden" style="margin:0.4rem 0 0;white-space:pre-wrap;background:#0a0d14;border:1px solid #1e3a5f;border-radius:6px;padding:0.6rem 0.8rem;font-size:0.78rem;color:#cbd5e1;font-family:inherit;line-height:1.5">${escHtml(c.fix.guide)}</pre></div>`;
       return `<div style="display:flex;gap:0.6rem;margin:0.3rem 0;align-items:baseline"><span style="color:${col};font-weight:700;width:1rem;flex-shrink:0">${ic}</span>
-        <span><span style="color:#e2e8f0">${escHtml(c.title)}</span><div style="color:#64748b;font-size:0.8rem">${escHtml(c.detail || '')}</div></span></div>`;
+        <span><span style="color:#e2e8f0">${escHtml(c.title)}</span><div style="color:#64748b;font-size:0.8rem">${escHtml(c.detail || '')}</div>${fix}</span></div>`;
     }).join('');
+    const autoFixes = d.checks.filter(c => c.fix && c.fix.action && c.fix.action !== 'create-image');
+    const fixAll = autoFixes.length > 1
+      ? `<div style="margin:0.6rem 0"><button type="button" onclick="cpFixAll()" style="${fixBtn}background:#14532d;color:#86efac;border:1px solid #166534;padding:0.35rem 0.9rem">&#128295; Fix all that can be fixed automatically (${autoFixes.length})</button></div>` : '';
+    const fixMsg = cpFixMsg ? `<div style="margin:0.5rem 0;padding:0.5rem 0.8rem;border-radius:6px;background:#0b1424;border:1px solid #1e3a5f;color:#93c5fd;font-size:0.82rem;white-space:pre-wrap">${escHtml(cpFixMsg)}</div>` : '';
     out.innerHTML = `
       <div style="margin-bottom:0.6rem;color:#94a3b8">OpenShift ${escHtml(d.version || '')} &middot; etcd: ${d.etcd.podsReady}/${d.etcd.pods} pods ready &mdash; ${escHtml(d.etcd.message || '')}</div>
       <table style="border-collapse:collapse;margin-bottom:0.4rem">${rows}</table>
-      <div style="margin-bottom:0.7rem;color:#c4b5fd;font-size:0.82rem">Control-plane nodes on DAS storage (Cube): <strong>${das} of ${d.masters.length}</strong> &mdash; target for the certification run: all control-plane nodes on DAS.</div>
       <div style="margin-bottom:0.7rem"><div style="color:#64748b;font-size:0.78rem;margin-bottom:0.15rem">API / machine-config load balancer targets</div>${nlb}</div>
-      ${checks}
+      ${fixMsg}${fixAll}${checks}
       <div style="margin-top:0.5rem;color:${d.canAdd ? '#6ee7b7' : '#fbbf24'};font-weight:600">${d.canAdd ? '&#10003; Ready to add a control-plane node.' : '&#9888; Not ready yet &mdash; resolve the items marked &#10007;.'}</div>`;
 
     // image select
@@ -3159,6 +3166,41 @@
     const fixed = d.masters.filter(m => !m.managed);
     rs.innerHTML = fixed.length ? fixed.map(m => `<option value="${escHtml(m.name)}">${escHtml(m.name)} (${escHtml(m.ip || '')})</option>`).join('') : '<option value="">No fixed control-plane nodes</option>';
     cpUpdateAddButton();
+  }
+
+  // ── Fix actions offered by "Check readiness" ───────────────────────────────
+  let cpFixMsg = '';
+  function cpToggleGuide(i) { const el = document.getElementById('cp-guide-' + i); if (el) el.classList.toggle('hidden'); }
+
+  async function cpRunFix(fix) {
+    if (fix.action === 'prepare')          return (await apiPost('/api/control-plane/prepare', cpBody())).message;
+    if (fix.action === 'restart-approver' || fix.action === 'restart-provider')
+                                           return (await apiPost('/api/control-plane/fix', cpBody({ action: fix.action }))).message;
+    throw new Error('No automatic fix for this item.');
+  }
+
+  async function cpFix(i) {
+    const c = cpLastStatus && cpLastStatus.checks[i]; if (!c || !c.fix) return;
+    if (c.fix.action === 'create-image') { cpCreateImage(); return; }   // has its own confirmation, log and progress
+    if (c.fix.confirm && !confirm(c.fix.label + '\n\n' + c.fix.confirm + '\n\nContinue?')) return;
+    const out = document.getElementById('cp-status-result');
+    out.insertAdjacentHTML('afterbegin', '<div style="color:#64748b;margin-bottom:0.5rem">Fixing: ' + escHtml(c.fix.label) + '&hellip;</div>');
+    try { cpFixMsg = '\u2713 ' + c.fix.label + ': ' + await cpRunFix(c.fix); }
+    catch (e) { cpFixMsg = '\u2717 ' + c.fix.label + ' failed: ' + e.message; }
+    await cpStatus();
+  }
+
+  async function cpFixAll() {
+    const todo = (cpLastStatus ? cpLastStatus.checks : []).filter(c => c.fix && c.fix.action && c.fix.action !== 'create-image');
+    if (!todo.length) return;
+    if (!confirm('Run these fixes one after the other?\n\n' + todo.map(c => '- ' + c.fix.label).join('\n') + '\n\nNone of them deletes anything.')) return;
+    const lines = [];
+    for (const c of todo) {
+      try { lines.push('\u2713 ' + c.fix.label + ': ' + await cpRunFix(c.fix)); }
+      catch (e) { lines.push('\u2717 ' + c.fix.label + ' failed: ' + e.message); }
+    }
+    cpFixMsg = lines.join('\n');
+    await cpStatus();
   }
 
   function cpUpdateAddButton() {
