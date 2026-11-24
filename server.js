@@ -7870,9 +7870,22 @@ app.post('/api/new-cluster/attach-boot', async (req, res) => {
     }
     // The ISO must be the boot device. A disk that already holds an earlier install would otherwise win and the node would
     // loop on Ignition (ocp3 retry). The ISO detach in makeIsoDetacher sets the disk back as the boot device.
+    // A 202 only means "accepted": IONOS applies the change in a background request, which can fail (or lose against an earlier
+    // pending change), and the node then boots its old disk and hangs in Ignition (ocp4 control-2). Wait for the request and
+    // read the server back; try again once, and stop before rebooting anything if a node still does not boot the ISO.
     for (const cp of cpDetails) {
-      await ionosPatch(`/datacenters/${dcId}/servers/${cp.id}`, ionosToken, { bootCdrom: { id: isoImageId } });
-      log(`  ${cp.name}: boot device set to the ISO\n`);
+      let ok = false;
+      for (let attempt = 1; attempt <= 3 && !ok; attempt++) {
+        try {
+          await ionosPatchChecked(`/datacenters/${dcId}/servers/${cp.id}`, ionosToken, { bootCdrom: { id: isoImageId } }, 300000);
+        } catch (e) { log(`  ${cp.name}: setting the boot device failed (attempt ${attempt}): ${String(e.message).slice(0, 200)}\n`); }
+        await ionosWaitAvailable(`/datacenters/${dcId}`, ionosToken, 300000).catch(() => {});
+        const srv = await ionosGet(`/datacenters/${dcId}/servers/${cp.id}?depth=1`, ionosToken).catch(() => null);
+        ok = srv?.properties?.bootCdrom?.id === isoImageId;
+        if (!ok) log(`  ${cp.name}: boot device is ${srv?.properties?.bootCdrom?.id ? 'another CD-ROM' : srv?.properties?.bootVolume?.id ? 'its disk' : 'unknown'}, not the ISO${attempt < 3 ? ' - trying again' : ''}\n`);
+      }
+      if (!ok) throw new Error(`${cp.name} does not boot from the ISO after 3 attempts. Set its boot device to the CD-ROM in DCD, then press Retry.`);
+      log(`  ${cp.name}: boot device set to the ISO (confirmed)\n`);
     }
     await ionosWaitAvailable(`/datacenters/${dcId}`, ionosToken, 300000).catch(() => {});
     step('Attach agent ISO to control plane VMs (CD-ROM)', 'done');
