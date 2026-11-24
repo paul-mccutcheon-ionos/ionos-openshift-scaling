@@ -7135,10 +7135,10 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
         nlbId = existNlb.id;
         logFound(`NLB ${nlbId}`);
         if ((existNlb.metadata?.state || '') !== 'AVAILABLE')
-          // 300s: IONOS NLB provisioning has occasionally taken longer than the
-          // previous 180s allowed, aborting the step before the resource actually
+          // 15 min: IONOS NLB provisioning has taken well over 5 min (first NLB in a new
+          // contract), more than the previous 180s/300s allowed, aborting the step before the resource actually
           // finished — leaving an AVAILABLE-but-ruleless NLB behind (see below).
-          await ionosWaitAvailable(`/datacenters/${dcId}/networkloadbalancers/${nlbId}`, ionosToken, 300000);
+          await ionosWaitAvailable(`/datacenters/${dcId}/networkloadbalancers/${nlbId}`, ionosToken, 900000);
       } else {
         const nlb = await ionosPost(`/datacenters/${dcId}/networkloadbalancers`, ionosToken, {
           properties: { name: `${clusterName}-nlb`, listenerLan: pubLanId,
@@ -7146,7 +7146,7 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
         });
         nlbId = nlb.id;
         log(`  NLB created: ${nlbId} — waiting for AVAILABLE...\n`);
-        await ionosWaitAvailable(`/datacenters/${dcId}/networkloadbalancers/${nlbId}`, ionosToken, 300000);
+        await ionosWaitAvailable(`/datacenters/${dcId}/networkloadbalancers/${nlbId}`, ionosToken, 900000);
       }
 
       // Ensure all 4 forwarding rules exist regardless of whether the NLB above
@@ -7169,7 +7169,7 @@ app.post('/api/new-cluster/create-infra', async (req, res) => {
             listenerIp: nlbPubIp, listenerPort: port,
             targets: cpDetails.map(d => ({ ip: d.ip, port, weight: 1 })) }
         });
-        await ionosWaitAvailable(`/datacenters/${dcId}/networkloadbalancers/${nlbId}`, ionosToken, 120000);
+        await ionosWaitAvailable(`/datacenters/${dcId}/networkloadbalancers/${nlbId}`, ionosToken, 600000);
         logCreated(`NLB rule ${ruleName}`);
       }
     } finally { clearInterval(nlbKaTimer); }
