@@ -6553,7 +6553,11 @@ function makeIsoDetacher(cpDetails, dcId, ionosToken, log) {
     buf += chunk;
     const lines = buf.split('\n'); buf = lines.pop();
     for (const line of lines) {
-      let m = line.match(/Host: (control-\d+)\.\S*, reached installation stage (?:Writing image to disk: 100%|Rebooting)/);
+      // Only at "Rebooting", NOT at "Writing image to disk: 100%": after writing, the agent still finishes the installation and must report
+      // "Rebooting" to the installer. A boot-device change makes IONOS restart the VM at once, which killed the agent before that report on
+      // ocp5/ocp6/ocp7 (fr/par, es/vit, gb/lhr): "Host is disconnected" -> "timeout while connecting to host during the installation phase"
+      // -> the installer put the host in error and stopped the whole installation.
+      let m = line.match(/Host: (control-\d+)\.\S*, reached installation stage Rebooting/);
       if (m) {
         written.add(m[1]);
         if (m[1] !== rendezvous) detach(m[1], false);
