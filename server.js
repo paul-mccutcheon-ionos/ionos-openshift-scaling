@@ -1728,7 +1728,7 @@ app.post('/api/control-plane/add-indexed', async (req, res) => {
     const usedIdx = new Set(g.masterMachines.map(m => (re.exec(m.name) || [])[1]).filter(x => x !== undefined).map(Number));
     const free = [0, 1, 2].filter(i => !usedIdx.has(i));
     const count = Math.max(1, Math.min(free.length, parseInt(b.count, 10) || 1));
-    if (!free.length) throw new Error(`All three indexed control-plane Machines (${infra}-master-0/1/2) already exist.`);
+    if (!free.length) throw new Error(`All three indexed control-plane Machines (${infra}-master-0/1/2) already exist. To move them to another machine type, use "4d Change the type of a managed control plane".`);
     if (g.masters.length + count > CP_MAX_MEMBERS) throw new Error(`Would exceed ${CP_MAX_MEMBERS} control-plane nodes (${g.masters.length} now + ${count}).`);
     step(`Cluster ready - infrastructure name ${infra}, free indexes ${free.join(', ')}`, 'ok');
 
@@ -1849,6 +1849,150 @@ app.post('/api/control-plane/add-indexed', async (req, res) => {
     }
     return done(`Added ${added.join(', ')} one at a time` + (retired.length ? ` and retired ${retired.join(', ')}` : '') + `. etcd now has ${lastEtcd?.podsReady} healthy members. When all three indexed machines exist and the old nodes are retired, activate the ControlPlaneMachineSet.`, { nodes: added, retired });
   } catch (e) { fail(e.message); } finally { clearInterval(keepAlive); }
+});
+
+// Change the machine type of a control plane that is ALREADY managed by a ControlPlaneMachineSet (e.g. small Cubes ->
+// Basic Cube L, or Dedicated Core -> Cube): patch the CPMS template, then replace the masters ONE AT A TIME (OnDelete:
+// delete one old Machine, the CPMS creates its replacement, the etcd quorum hook keeps the old node until the new member
+// has joined). Before each replacement it waits for a healthy control plane AND for room for one more node in the
+// contract's SSD+DAS limit, so runs on several clusters of the same contract queue up instead of being refused by IONOS.
+app.post('/api/control-plane/change-type', async (req, res) => {
+  const b = req.body;
+  if (!b.clusterApiUrl || !b.ocpToken) return res.status(400).json({ error: 'clusterApiUrl and ocpToken are required.' });
+  if (!['dcore', 'cube', 'vcpu'].includes(b.machineType)) return res.status(400).json({ error: "machineType must be 'dcore', 'cube' or 'vcpu'." });
+  if (b.backupConfirmed !== true) return res.status(400).json({ error: 'Confirm that a recent etcd snapshot exists (backupConfirmed).' });
+  if (b.replaceConfirm !== true) return res.status(400).json({ error: 'Replacing the control plane deletes the old master VMs: confirm it (replaceConfirm).' });
+  const { step, log, done, fail } = makeSseHelpers(res);
+  const ctx = postUpgradeCtx(b);
+  const A = ctx.apiUrl, T = ctx.token;
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  let closed = false; res.on('close', () => { closed = true; });
+  try {
+    step('Checking the cluster and its ControlPlaneMachineSet…', 'working');
+    const g = await cpRetry(() => cpGather(ctx));
+    let cpms;
+    try { cpms = await cpRetry(() => ocpGet(A, `${CP_CPMS}/cluster`, T)); }
+    catch (e) { if (e.status === 404) throw new Error('This cluster has no ControlPlaneMachineSet. Use "Add control-plane node" (with Swap) for hand-built control planes.'); throw e; }
+    if (cpms.spec?.state !== 'Active') throw new Error(`The ControlPlaneMachineSet is ${cpms.spec?.state || 'not Active'}; activate it first (card 5).`);
+    const strategy = cpms.spec?.strategy?.type || 'RollingUpdate';
+    if (strategy !== 'OnDelete') throw new Error(`The ControlPlaneMachineSet strategy is ${strategy}: it would replace the masters by itself as soon as the template changes. Set it to OnDelete first so the replacements run one at a time under this step's checks.`);
+    if (g.masters.length !== 3) throw new Error(`Expected 3 control-plane nodes, found ${g.masters.length}. Finish or undo the change in progress first.`);
+    if (g.upgrading) throw new Error('A cluster upgrade is in progress.');
+    const cur = cpms.spec.template.machines_v1beta1_machine_openshift_io.spec.providerSpec.value;
+
+    // Target type (same inputs as "Add control-plane node")
+    let spec;
+    if (b.machineType === 'cube') {
+      if (!b.cubeTemplateId) throw new Error('Select a Cube template.');
+      const tpl = await ionosGet(`/templates/${encodeURIComponent(b.cubeTemplateId)}`, ctx.ionos.token);
+      if (!isCubeTemplate(tpl)) throw new Error('The selected template is not a Cube template.');
+      spec = { serverType: 'CUBE', templateUuid: b.cubeTemplateId, templateName: tpl.properties.name, cores: tpl.properties.cores, ramMB: tpl.properties.ram, diskGB: tpl.properties.storageSize, diskType: 'DAS' };
+    } else if (b.machineType === 'vcpu') {
+      spec = { serverType: 'VCPU', cores: parseInt(b.cores, 10) || 8, ramMB: (parseInt(b.ramGiB, 10) || 16) * 1024, diskGB: parseInt(b.diskGB, 10) || 600, diskType: 'SSD_STANDARD' };
+    } else {
+      spec = { serverType: 'ENTERPRISE', cores: parseInt(b.cores, 10) || 8, ramMB: (parseInt(b.ramGiB, 10) || 16) * 1024, diskGB: parseInt(b.diskGB, 10) || 600, diskType: 'SSD_PREMIUM', cpuFamily: b.cpuFamily || 'INTEL_SIERRAFOREST' };
+    }
+    if (spec.cores < 4 || spec.ramMB < 16 * 1024) throw new Error('A control-plane node needs at least 4 vCPU and 16 GiB RAM.');
+    const instanceType = ionosInstanceType(spec.serverType, spec.cores, spec.ramMB, spec.templateName);
+    let imageId = cur.image;
+    if (b.imageId) {
+      const checks = await cpRetry(() => cpChecks(ctx, g));
+      const img = (checks.images.images || []).find(i => i.id === b.imageId && i.state === 'AVAILABLE');
+      if (!img) throw new Error('The selected master image is not AVAILABLE in this location.');
+      imageId = img.id;
+    }
+    // Merge patch on the CPMS template: null removes a field (Cubes take no CPU family and no zone placement).
+    let placement = null;
+    if (spec.serverType !== 'CUBE') {
+      const serverZone = b.serverZone || 'AUTO';
+      const diskZones = [0, 1, 2].map(i => (Array.isArray(b.diskZones) && b.diskZones[i]) || 'AUTO');
+      const p = {};
+      if (serverZone !== 'AUTO') p.serverZone = serverZone;
+      if (b.autoSpread === true) p.autoSpread = true;
+      if (diskZones.some(z => z !== 'AUTO')) p.diskZonesByIndex = diskZones;
+      placement = Object.keys(p).length ? p : null;
+    }
+    const value = {
+      serverType: spec.serverType, cores: spec.cores, ram: spec.ramMB, instanceType, image: imageId, availabilityZone: 'AUTO',
+      templateUuid: spec.templateUuid || null, cpuFamily: spec.serverType === 'ENTERPRISE' ? spec.cpuFamily : null, placement,
+      disk: { ...(cur.disk || {}), size: spec.diskGB, type: spec.diskType, availabilityZone: 'AUTO' },
+    };
+    const same = cur.serverType === value.serverType && cur.instanceType === instanceType && (cur.templateUuid || null) === value.templateUuid && cur.image === imageId;
+    step(`Cluster ready - ${g.masters.length} masters, CPMS Active (OnDelete)`, 'ok');
+    log(`Now:    ${cur.serverType} ${cur.instanceType} (${cur.cores} vCPU / ${Math.round((cur.ram || 0) / 1024)} GiB, ${cur.disk?.size} GB ${cur.disk?.type})\n`);
+    log(`Target: ${spec.serverType} ${instanceType} (${spec.cores} vCPU / ${Math.round(spec.ramMB / 1024)} GiB, ${spec.diskGB} GB ${spec.diskType})${spec.templateName ? ' - ' + spec.templateName : ''}\n`);
+    if (!same) {
+      step('Updating the ControlPlaneMachineSet template…', 'working');
+      await cpRetry(() => ocpPatch(A, `${CP_CPMS}/cluster`, T, { spec: { template: { machines_v1beta1_machine_openshift_io: { spec: { providerSpec: { value } } } } } }));
+      step('ControlPlaneMachineSet template updated (OnDelete: nothing changes until a master is deleted)', 'ok');
+    } else log('The ControlPlaneMachineSet already has this type.\n');
+
+    // Masters that are not of the target type yet
+    const isTarget = m => { const v = m.spec?.providerSpec?.value || {}; return v.serverType === spec.serverType && v.instanceType === instanceType && (v.templateUuid || null) === (spec.templateUuid || null); };
+    const listMasters = async () => ((await cpRetry(() => ocpGet(A, `${CP_MACHINES}?labelSelector=${encodeURIComponent('machine.openshift.io/cluster-api-machine-role=master')}`, T))).items || []);
+    const healthy = async () => {
+      const c = await cpRetry(() => cpGather(ctx));
+      return c.masters.length === 3 && c.masters.every(m => m.ready) && c.etcd.membersAvailable && c.etcd.pods === 3 && c.etcd.podsReady === 3 &&
+             !c.operatorIssues.some(o => ['etcd', 'kube-apiserver'].includes(o.name)) && c.watched.filter(w => ['etcd', 'kube-apiserver'].includes(w.name)).every(w => w.ok);
+    };
+    const settle = async (label, minutes) => {
+      let ok = 0; const until = Date.now() + minutes * 60000;
+      while (Date.now() < until && !closed) { ok = (await healthy().catch(() => false)) ? ok + 1 : 0; if (ok >= 4) return; await sleep(30000); }
+      throw new Error(`${label}: the control plane did not become healthy (3 Ready masters, 3 etcd members, etcd and kube-apiserver settled) within ${minutes} min. Nothing further was deleted.`);
+    };
+    const needGiB = Number(spec.diskGB) || 0;
+    const waitStorage = async label => {
+      const until = Date.now() + 120 * 60000; let said = false;
+      while (Date.now() < until && !closed) {
+        const h = await ionosStorageHeadroom(ctx.ionos.token).catch(() => null);
+        if (!h || !needGiB || h.freeGiB >= needGiB + 5) { if (h) log(`  contract storage: ${h.freeGiB} GiB free of ${h.limitGiB} GiB (one new node needs ${needGiB} GiB)\n`); return; }
+        if (!said) { log(`  ${label}: waiting for contract storage - ${h.freeGiB} GiB free, ${needGiB} GiB needed (another replacement in the same contract may be running)…\n`); said = true; }
+        await sleep(60000);
+      }
+      throw new Error(`${label}: no room for one more ${needGiB} GiB node in the contract storage limit after 2 h. Nothing was deleted.`);
+    };
+
+    const todo = (await listMasters()).filter(m => !isTarget(m) && !m.metadata.deletionTimestamp).map(m => m.metadata.name).sort();
+    const inFlight = (await listMasters()).filter(m => m.metadata.deletionTimestamp).map(m => m.metadata.name);
+    if (!todo.length && !inFlight.length) return done(`All control-plane machines are already ${instanceType}.`, { replaced: [] });
+    log(`To replace, one at a time: ${todo.join(', ') || '(none)'}${inFlight.length ? `; finishing first: ${inFlight.join(', ')}` : ''}\n`);
+
+    const replaced = [];
+    for (const name of [...inFlight, ...todo]) {
+      if (closed) break;
+      const label = `${name}`;
+      const already = inFlight.includes(name);
+      if (!already) {
+        step(`${label}: waiting for a healthy control plane…`, 'working');
+        await settle(label, 60);
+        await waitStorage(label);
+        step(`${label}: deleting the Machine (the ControlPlaneMachineSet creates its replacement)`, 'working');
+        await cpRetry(() => ocpDelete(A, `${CP_MACHINES}/${name}`, T).catch(e => { if (e.status === 404) return null; throw e; }));
+      }
+      step(`${label}: waiting for the replacement to join etcd and the old machine to go…`, 'working');
+      const startMs = Date.now(), until = startMs + 120 * 60000;
+      const seen = new Set(); const say = (k, t) => { if (!seen.has(k)) { seen.add(k); log(t + '\n'); } };
+      let gone = false, polls = 0;
+      while (Date.now() < until && !closed) {
+        await sleep(30000); polls++;
+        try { await ocpGet(A, `${CP_MACHINES}/${name}`, T); }
+        catch (e) { if (e.status === 404) { gone = true; break; } continue; }   // only an explicit 404 counts as gone (an API hiccup does not)
+        const ms = await listMasters().catch(() => []);
+        ms.filter(m => isTarget(m) && Date.parse(m.metadata.creationTimestamp) >= startMs - 120000).forEach(m => say(m.metadata.name + (m.status?.phase || ''), `  new machine ${m.metadata.name}: ${m.status?.phase || 'pending'}`));
+        if (polls % 6 === 0) {
+          const why = await ionosFailedServerCreate(ctx.ionos.token, ctx.ionos.dc, startMs).catch(() => null);
+          if (why) say('rej:' + why, `  IONOS rejected the new VM: ${why} The provider retries every few minutes; the old master stays until the new one has joined.`);
+        }
+      }
+      if (!gone) throw new Error(`${label}: the old machine was still there after 2 h (its replacement did not join etcd). Nothing else was deleted - check the new machine and the provider log.`);
+      step(`${label}: replaced`, 'ok');
+      await settle(`after ${label}`, 60);
+      replaced.push(name);
+      step(`${label}: control plane healthy again`, 'ok');
+    }
+    const fin = await cpRetry(() => cpGather(ctx));
+    done(`Replaced ${replaced.join(', ')} one at a time; the control plane is ${instanceType} with ${fin.etcd.podsReady} healthy etcd members.`, { replaced });
+  } catch (e) { fail(e.message); }
 });
 
 // State of the ControlPlaneMachineSet (if any) for the status view.
