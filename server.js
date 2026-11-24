@@ -6379,6 +6379,91 @@ class PersistentInstallState extends Map {
 }
 const clusterInstallState = new PersistentInstallState();
 
+// ── Resume support ───────────────────────────────────────────────────────────────────────────────────────────────
+// Every install phase request is tracked: a journal in the persistent state (phases.<key> = running/done/error, so the
+// wizard knows where to pick up after a page reload, a PC restart or an app restart) and, in memory, the live run with
+// its event history, so a reloaded page can re-attach to a phase that is still running on the server and see its log.
+const NCW_PHASE_BY_ENDPOINT = {
+  'create-infra': 'infra', 'setup-management': 'mgmt', 'generate-iso': 'geniso', 'upload-iso': 'upload', 'attach-boot': 'boot',
+  'monitor-bootstrap': 'bootstrap', 'monitor-install': 'finalinstall', 'configure-certs': 'certs', 'install-csi': 'csi',
+};
+const NCW_PHASE_ORDER = ['infra', 'mgmt', 'geniso', 'upload', 'boot', 'bootstrap', 'finalinstall', 'certs', 'csi'];
+const NCW_RUN_STALE_MS = 20 * 60000;   // a 'running' phase with no output for this long is treated as hung and may be started again
+const ncwRuns = new Map();             // `${clusterName}|${phase}` -> { status, startedAt, lastEventAt, events[], listeners:Set, message }
+
+function ncwJournal(clusterName, phase, entry, extra) {
+  const cur = clusterInstallState.get(clusterName) || {};
+  const phases = { ...(cur.phases || {}) };
+  phases[phase] = { ...(phases[phase] || {}), ...entry };
+  clusterInstallState.set(clusterName, { ...cur, ...(extra || {}), phases, updatedAt: Date.now() });
+}
+function ncwRunEvent(run, obj) {
+  run.lastEventAt = Date.now();
+  run.events.push(obj);
+  if (run.events.length > 4000) {   // keep every step event and the newest log lines
+    const i = run.events.findIndex(e => e.type === 'log');
+    if (i >= 0) run.events.splice(i, 1); else run.events.shift();
+  }
+  for (const l of run.listeners) { try { l.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (_) {} }
+}
+function ncwRunFinish(run, status, message) {
+  if (run.status !== 'running') return;
+  run.status = status; run.message = message || null; run.finishedAt = Date.now();
+  for (const l of run.listeners) { try { l.end(); } catch (_) {} }
+  run.listeners.clear();
+  ncwJournal(run.clusterName, run.phase, { status, finishedAt: run.finishedAt, message: status === 'error' ? String(message || '').slice(0, 600) : null });
+}
+
+app.use('/api/new-cluster', (req, res, next) => {
+  if (req.method !== 'POST') return next();
+  const phase = NCW_PHASE_BY_ENDPOINT[req.path.replace(/^[/]+|[/]+$/g, '')];
+  const clusterName = String((req.body && req.body.clusterName) || '').trim();
+  if (!phase || !clusterName) return next();
+  const key = `${clusterName}|${phase}`;
+  const cur = ncwRuns.get(key);
+  if (cur && cur.status === 'running' && Date.now() - cur.lastEventAt < NCW_RUN_STALE_MS && !req.body.ncwForce) {
+    return res.status(409).json({ running: true, phase, startedAt: cur.startedAt,
+      error: `Phase ${phase} for ${clusterName} is already running on the server (started ${new Date(cur.startedAt).toLocaleString()}).` });
+  }
+  if (cur && cur.status === 'running') ncwRunFinish(cur, 'error', 'Superseded by a new run of this phase.');
+  const run = { clusterName, phase, status: 'running', startedAt: Date.now(), lastEventAt: Date.now(), events: [], listeners: new Set(), message: null };
+  ncwRuns.set(key, run);
+  res.locals.ncwRun = run;
+  if (phase === 'infra') {
+    // A new infrastructure run starts a new journal: the later phases have to run again on top of it.
+    for (const k of [...ncwRuns.keys()]) if (k.startsWith(clusterName + '|') && k !== key) ncwRuns.delete(k);
+    const cur = clusterInstallState.get(clusterName) || {};
+    const { phases: _p, installComplete: _c, ...rest } = cur;
+    clusterInstallState.set(clusterName, { ...rest, ...req.body, ncwForce: undefined, phases: { infra: { status: 'running', startedAt: run.startedAt } }, updatedAt: Date.now() });
+  } else {
+    ncwJournal(clusterName, phase, { status: 'running', startedAt: run.startedAt, finishedAt: null, message: null });
+  }
+  next();
+});
+
+// Where each phase stands, for the resume card and for resume-state. Installs from before the journal existed are inferred from their saved fields.
+function ncwPhaseView(clusterName, saved) {
+  const phases = {};
+  const j = saved.phases;
+  if (j) for (const p of NCW_PHASE_ORDER) if (j[p]) phases[p] = { status: j[p].status, at: j[p].finishedAt || j[p].startedAt || null, message: j[p].message || null };
+  if (!j) {
+    const d = { status: 'done', inferred: true };
+    if (saved.infra) phases.infra = d;
+    if (saved.exactVer) phases.mgmt = d;
+    if (saved.isoName) phases.geniso = d;
+    if (saved.isoImageId) phases.upload = d;
+    if (saved.installComplete) for (const p of ['infra', 'mgmt', 'geniso', 'upload', 'boot', 'bootstrap', 'finalinstall']) phases[p] = d;
+  }
+  for (const p of NCW_PHASE_ORDER) {
+    const r = ncwRuns.get(`${clusterName}|${p}`);
+    if (r && r.status === 'running') phases[p] = { status: 'running', at: r.startedAt, live: true, lastEventAt: r.lastEventAt };
+    else if (phases[p] && phases[p].status === 'running') phases[p] = { ...phases[p], status: 'interrupted', message: 'The app restarted while this phase was running. Run it again: the steps already done are found and reused.' };
+  }
+  const running = NCW_PHASE_ORDER.find(p => phases[p] && phases[p].status === 'running') || null;
+  const next = NCW_PHASE_ORDER.find(p => !phases[p] || phases[p].status !== 'done') || null;
+  return { phases, running, next };
+}
+
 // While the installer streams its output, take the install ISO off each control VM as soon as that node
 // has written its image (and, as a safety net, when the installer reports a node booted the ISO again).
 // The guide's "ISO attached but not bootable" setup did NOT work on these servers: nodes rebooted into the
@@ -6536,11 +6621,17 @@ function makeSseHelpers(res) {
   const keepAlive = setInterval(() => { try { res.write(': keepalive\n\n'); } catch (_) {} }, 15000);
   res.on('close', () => clearInterval(keepAlive));
   res.on('finish', () => clearInterval(keepAlive));
-  const emit = obj             => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+  // The phase keeps running when the browser goes away (reload, PC restart); its events go to the live run, which a resumed page re-attaches to.
+  const run  = res.locals && res.locals.ncwRun;
+  const emit = obj             => {
+    if (run) ncwRunEvent(run, obj);
+    try { if (!res.writableEnded && !res.destroyed) res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (_) {}
+  };
+  const end  = ()              => { try { if (!res.writableEnded) res.end(); } catch (_) {} };
   const step = (label, status) => emit({ type: 'step', label, status });
   const log  = text            => emit({ type: 'log',  text });
-  const done = (msg, data)     => { emit({ type: 'done',  message: msg, ...(data ? { data } : {}) }); res.end(); };
-  const fail = msg             => { emit({ type: 'error', message: msg }); res.end(); };
+  const done = (msg, data)     => { emit({ type: 'done',  message: msg, ...(data ? { data } : {}) }); end(); if (run) ncwRunFinish(run, 'done'); };
+  const fail = msg             => { emit({ type: 'error', message: msg }); end(); if (run) ncwRunFinish(run, 'error', msg); };
   return { emit, step, log, done, fail };
 }
 
@@ -6665,16 +6756,39 @@ async function resolveCpuFamiliesForLocation(location, token) {
 app.post('/api/new-cluster/resume-state', async (req, res) => {
   const clusterName = String((req.body && req.body.clusterName) || '').trim();
   const privKey = (req.body && req.body.mgmtSshPrivKey) || '';
+  const token = (req.body && req.body.ionosToken) || '';
   const saved = clusterInstallState.get(clusterName);
-  if (!saved || !saved.infra) return res.status(404).json({ error: `No saved install found for cluster "${clusterName}".` });
+  if (!saved) return res.status(404).json({ error: `No saved install found for cluster "${clusterName}".` });
+  const view = ncwPhaseView(clusterName, saved);
+  const config = {};
+  for (const [k, v] of Object.entries(saved)) if (!INSTALL_STATE_SECRETS.includes(k) && !['infra', 'phases', 'ncwForce'].includes(k) && (typeof v !== 'object' || Array.isArray(v))) config[k] = v;
   const out = {
-    clusterName, installComplete: !!saved.installComplete,
+    clusterName, installComplete: !!saved.installComplete, config, ...view,
     apiUrl: saved.apiUrl || null, consoleUrl: saved.consoleUrl || null,
-    mgmtPubIp: saved.infra.mgmtPubIp || saved.mgmtPubIp || null, mgmtPrivIp: saved.mgmtPrivIp || null,
-    gatewayIp: saved.gatewayIp || null, natPubIp: saved.natPubIp || null, nlbPubIp: saved.nlbPubIp || null,
-    kubeadminPass: null
+    mgmtPubIp: (saved.infra && saved.infra.mgmtPubIp) || saved.mgmtPubIp || null, mgmtPrivIp: (saved.infra && saved.infra.mgmtPrivIp) || saved.mgmtPrivIp || null,
+    gatewayIp: (saved.infra && saved.infra.gatewayIp) || saved.gatewayIp || null, natPubIp: (saved.infra && saved.infra.natPubIp) || null, nlbPubIp: (saved.infra && saved.infra.nlbPubIp) || null,
+    vdc: saved.infra ? { id: saved.infra.dcId, name: saved.vdcName, location: saved.vdcLocation } : null,
+    infraCheck: null, kubeadminPass: null,
   };
-  if (privKey && out.mgmtPubIp) {
+  // Is the saved data center still there, in the contract of this token? (A VDC deleted or built under another contract
+  // means phase A has to run again.)
+  if (token && saved.infra && saved.infra.dcId) {
+    try {
+      const dc = await ionosGet(`/datacenters/${saved.infra.dcId}`, token);
+      out.infraCheck = { ok: true, name: dc.properties && dc.properties.name };
+    } catch (e) {
+      // 401/403 on the data center may only mean "not in this token's contract": tell that apart from a bad token.
+      let tokenOk = false;
+      if (e.status === 401 || e.status === 403) { try { await ionosGet('/datacenters?depth=0', token); tokenOk = true; } catch (_) {} }
+      if ((e.status === 401 || e.status === 403) && !tokenOk) out.infraCheck = { ok: false, tokenRejected: true, message: `IONOS rejected the API token (HTTP ${e.status}): it has expired or been revoked.` };
+      else if (e.status === 404 || tokenOk) out.infraCheck = { ok: false, message: `The saved data center ${saved.infra.dcId} (${saved.vdcName || ''}) does not exist in the contract of this token (deleted, or built under another contract). Phase A runs again.` };
+      else out.infraCheck = { ok: null, message: `Could not check the data center: ${e.message}` };
+    }
+    if (out.infraCheck.ok === false && !out.infraCheck.tokenRejected) {
+      out.phases = {}; out.running = null; out.next = 'infra'; out.installComplete = false;
+    }
+  }
+  if (out.installComplete && privKey && out.mgmtPubIp) {
     try {
       const conn = await sshConnect(out.mgmtPubIp, 'root', privKey);
       const r = await sshRunScript(conn, 'cat /opt/ocp-install/auth/kubeadmin-password 2>/dev/null; echo; test -f /opt/ocp-install/auth/kubeconfig && echo HAVE_KUBECONFIG');
@@ -6682,10 +6796,35 @@ app.post('/api/new-cluster/resume-state', async (req, res) => {
       const txt = (r.stdout || '').trim().split('\n');
       out.kubeadminPass = txt[0] && txt[0] !== 'HAVE_KUBECONFIG' ? txt[0].trim() : null;
       out.kubeconfigOnMgmt = /HAVE_KUBECONFIG/.test(r.stdout || '');
-      if (!out.kubeconfigOnMgmt) return res.status(409).json({ error: 'The management VM has no cluster kubeconfig (/opt/ocp-install/auth/kubeconfig).' });
-    } catch (e) { return res.status(502).json({ error: `Could not reach the management VM ${out.mgmtPubIp} with this SSH key: ${e.message}` }); }
+    } catch (e) { out.sshError = `Could not reach the management VM ${out.mgmtPubIp} with this SSH key: ${e.message}`; }
   }
   res.json(out);
+});
+
+// The saved installs and where each stands (no secrets), for the wizard's resume card.
+app.get('/api/new-cluster/installs', (req, res) => {
+  const list = [];
+  for (const [clusterName, saved] of clusterInstallState.entries()) {
+    const v = ncwPhaseView(clusterName, saved);
+    list.push({ clusterName, vdcName: saved.vdcName || null, vdcLocation: saved.vdcLocation || null, baseDomain: saved.baseDomain || null,
+      installComplete: !!saved.installComplete, updatedAt: saved.updatedAt || null, ...v });
+  }
+  list.sort((x, y) => (y.updatedAt || 0) - (x.updatedAt || 0));
+  res.json({ installs: list });
+});
+
+// Re-attach to a phase run: replays what it has written so far, then streams the rest live (or ends if it has finished).
+app.get('/api/new-cluster/attach', (req, res) => {
+  const run = ncwRuns.get(`${String(req.query.clusterName || '').trim()}|${String(req.query.phase || '')}`);
+  if (!run) return res.status(404).json({ error: 'No run of this phase since the app last started.' });
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.flushHeaders();
+  res.write(`data: ${JSON.stringify({ type: 'log', text: `[re-attached to the run started ${new Date(run.startedAt).toLocaleString()}]\n` })}\n\n`);
+  for (const e of run.events) res.write(`data: ${JSON.stringify(e)}\n\n`);
+  if (run.status !== 'running') return res.end();
+  run.listeners.add(res);
+  res.on('close', () => run.listeners.delete(res));
 });
 
 // Creates (idempotently) the service account the app uses to talk to the new cluster and returns its long-lived token, for OCP_BEARER_TOKEN in

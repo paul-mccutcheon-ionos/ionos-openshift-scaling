@@ -295,6 +295,8 @@
       font-size: 0.88rem;
       margin-top: 1rem;
     }
+    /* The install wizard shows/hides its error boxes with the .hidden class only */
+    .error-box[id^="ncw-"]:not(.hidden) { display: block; white-space: pre-wrap; word-break: break-word; }
     .info-box {
       background: #0c1a2e;
       border: 1px solid #1e3a5f;
@@ -523,7 +525,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.23.38</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.24.0</span>
   </div>
 
   <div class="banner-actions">
@@ -2249,6 +2251,16 @@
     <!-- ── Config wizard ─────────────────────────────────────────────── -->
     <div id="ncw-config">
 
+      <!-- Resume: shown when the server has an unfinished install (or the install of the cluster in the loaded .env) -->
+      <div id="ncw-resume-card" class="hidden" style="margin-bottom:1.25rem;padding:0.9rem 1rem;background:#0a2318;border:1px solid #166534;border-radius:8px">
+        <div style="display:flex;align-items:baseline;gap:0.5rem;flex-wrap:wrap;margin-bottom:0.6rem">
+          <span style="font-weight:700;color:#86efac;font-size:0.9rem">&#8635; Resume an installation</span>
+          <span style="font-size:0.76rem;color:#64748b">Picks up where it stopped: finished phases are kept, a phase still running on the server shows its live log. Load the cluster's .env first (the secrets are never stored on the server).</span>
+        </div>
+        <div id="ncw-resume-list" style="display:grid;gap:0.5rem"></div>
+        <div id="ncw-resume-msg" class="hidden" style="margin-top:0.6rem;font-size:0.8rem"></div>
+      </div>
+
       <!-- Stepper -->
       <div id="ncw-stepper" style="display:flex;gap:0;margin-bottom:1.5rem;border-radius:8px;overflow:hidden;border:1px solid #1e293b">
         <div class="ncw-step ncw-step-active" data-step="0" style="flex:1;padding:0.55rem 0.4rem;text-align:center;font-size:0.75rem;font-weight:600;cursor:pointer;background:#1e3a5f;color:#93c5fd;border-right:1px solid #1e293b">1. Credentials</div>
@@ -2678,8 +2690,8 @@
         </div>
         <div class="error-box hidden" id="ncw-review-error" style="margin-top:0.75rem"></div>
         <div style="margin-top:0.9rem;padding:0.7rem 0.9rem;border:1px dashed #334155;border-radius:6px;font-size:0.8rem;color:#94a3b8">
-          Cluster already installed (for example the page was reloaded or the PC restarted)?
-          <button type="button" onclick="ncwResumeAtTls()" style="margin-left:0.5rem;padding:0.3rem 0.8rem;border-radius:5px;border:1px solid #1d4ed8;background:transparent;color:#93c5fd;cursor:pointer;font-size:0.78rem;font-weight:600">Resume at TLS / storage</button>
+          Installation already started (page reloaded, PC restarted, app updated)?
+          <button type="button" onclick="ncwResumeAtTls()" style="margin-left:0.5rem;padding:0.3rem 0.8rem;border-radius:5px;border:1px solid #1d4ed8;background:transparent;color:#93c5fd;cursor:pointer;font-size:0.78rem;font-weight:600">Resume installation</button>
           <div class="error-box hidden" id="ncw-resume-error" style="margin-top:0.5rem"></div>
         </div>
       </div>
@@ -4013,6 +4025,7 @@ Type the node name (${short}) to continue:`);
       ncwApplyEnvPending();
       ncwShowWorkerNote();
       document.getElementById('env-file-banner').style.display = '';
+      if (window.ncwCheckResumable) window.ncwCheckResumable();
       this.value = '';
     };
     reader.readAsText(file);
@@ -6465,34 +6478,156 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     el.addEventListener('click', () => { ncwCollectStep(); ncwGotoStep(parseInt(el.dataset.step, 10)); })
   );
 
-  // Pick up a finished install after a page reload: the server keeps the infrastructure and install state, the browser supplies the keys.
-  async function ncwResumeAtTls() {
-    const errEl = document.getElementById('ncw-resume-error');
-    const fail = m => { errEl.textContent = m; errEl.classList.remove('hidden'); };
-    errEl.classList.add('hidden');
-    ncwCollectStep();
-    const c = ncwConfig;
+  // ── Resume ─────────────────────────────────────────────────────────────────────────────────────────────────────
+  // The server journals every phase (running / done / error) and keeps a running phase's output, so an install can be picked
+  // up after a page reload, a PC restart or an app update with one click: no stepping through the wizard again.
+  const NCW_SECRET_KEYS = ['ionosToken', 'ionosFtpPass', 'pullSecret', 'mgmtSshPrivKey', 'dnsApiKeySecret'];
+  // Values only later phases use, which you may have corrected in the .env since: the loaded .env wins over the saved value.
+  const NCW_FORM_WINS = ['ionosFtpUser', 'acmeEmail', 'acmeStaging', 'tlsAuto', 'certWebhookImage', 'dnsApiKeyPrefix', 'ocpSshPubKey', 'mgmtSshPubKey'];
+  function ncwPhaseLabel(k) {
+    const ph = document.getElementById('ncw-phase-' + k);
+    const letter = ph?.querySelector('.ncw-phase-badge')?.textContent?.trim() || '';
+    const title = ph?.querySelector('.ncw-phase-hdr > span:nth-of-type(2)')?.textContent?.trim() || k;
+    return { letter, title, text: (letter ? letter + ' ' : '') + title };
+  }
+  function ncwAgo(t) {
+    if (!t) return '';
+    const m = Math.round((Date.now() - t) / 60000);
+    return m < 1 ? 'just now' : m < 60 ? m + ' min ago' : m < 2880 ? Math.round(m / 60) + ' h ago' : Math.round(m / 1440) + ' days ago';
+  }
+  function ncwCollectAll() {
+    const keep = ncwStep;
+    for (const s of [0, 1, 2, 3]) { ncwStep = s; try { ncwCollectStep(); } catch (_) {} }
+    ncwStep = keep;
+    return { ...ncwConfig };
+  }
+
+  async function ncwCheckResumable() {
+    const card = document.getElementById('ncw-resume-card'), listEl = document.getElementById('ncw-resume-list');
+    if (!card || !listEl) return;
+    let list = [];
+    try { list = (await (await fetch('/api/new-cluster/installs')).json()).installs || []; } catch (_) { return; }
+    const want = (document.getElementById('ncw-cluster-name')?.value || '').trim().toLowerCase();
+    const show = list.filter(i => i.clusterName === want ||
+      (!i.installComplete && Object.keys(i.phases || {}).length && !(i.phases.finalinstall && i.phases.finalinstall.status === 'done')));
+    show.sort((x, y) => (y.clusterName === want) - (x.clusterName === want));
+    if (!show.length) { card.classList.add('hidden'); return; }
+    const COL = { done: ['#14532d', '#86efac'], running: ['#1d4ed8', '#dbeafe'], error: ['#7f1d1d', '#fca5a5'], interrupted: ['#78350f', '#fcd34d'] };
+    listEl.innerHTML = show.slice(0, 6).map(i => {
+      const chips = NCW_PHASE_ORDER.map(k => {
+        const st = (i.phases[k] || {}).status, c = COL[st] || ['#1e293b', '#64748b'], l = ncwPhaseLabel(k);
+        return '<span title="' + escHtml(l.title + ': ' + (st || 'not run')) + '" style="width:1.35rem;height:1.35rem;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:0.66rem;font-weight:700;background:' + c[0] + ';color:' + c[1] + '">' + escHtml(l.letter || '?') + '</span>';
+      }).join('');
+      let status;
+      if (i.running) status = '&#9654; ' + escHtml(ncwPhaseLabel(i.running).text) + ' is running on the server now. Resume shows its live log.';
+      else if (!i.next) status = 'All phases done.';
+      else {
+        const st = i.phases[i.next] || {};
+        status = st.status === 'error' ? 'Stopped at ' + escHtml(ncwPhaseLabel(i.next).text) + ': <span style="color:#fca5a5">' + escHtml(String(st.message || 'error').slice(0, 160)) + '</span>'
+          : st.status === 'interrupted' ? escHtml(ncwPhaseLabel(i.next).text) + ' was interrupted by an app restart; Resume lets you run it again.'
+          : 'Next: ' + escHtml(ncwPhaseLabel(i.next).text) + '.';
+      }
+      const where = [i.vdcName, i.vdcLocation ? '(' + i.vdcLocation + ')' : ''].filter(Boolean).join(' ');
+      return '<div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap;padding:0.55rem 0.7rem;background:#0f172a;border:1px solid ' + (i.clusterName === want ? '#166534' : '#1e293b') + ';border-radius:6px">' +
+        '<div style="flex:1;min-width:220px"><div style="font-weight:600;color:#e2e8f0;font-size:0.86rem">' + escHtml(i.clusterName) +
+        (i.baseDomain ? '<span style="color:#64748b;font-weight:400">.' + escHtml(i.baseDomain) + '</span>' : '') +
+        (where ? ' <span style="color:#64748b;font-weight:400;font-size:0.78rem">&middot; ' + escHtml(where) + '</span>' : '') + '</div>' +
+        '<div style="font-size:0.78rem;color:#94a3b8;margin-top:2px">' + status + (i.updatedAt ? ' <span style="color:#475569">&middot; ' + ncwAgo(i.updatedAt) + '</span>' : '') + '</div></div>' +
+        '<div style="display:flex;gap:3px">' + chips + '</div>' +
+        '<button type="button" onclick="ncwResume(\'' + escHtml(i.clusterName) + '\')" style="padding:0.4rem 1rem;border-radius:6px;border:none;background:#15803d;color:#fff;cursor:pointer;font-size:0.82rem;font-weight:600">Resume &#9654;</button></div>';
+    }).join('');
+    card.classList.remove('hidden');
+  }
+  window.ncwCheckResumable = ncwCheckResumable;
+
+  function ncwDisablePhaseBtn(key) {
+    const btn = document.getElementById('ncw-run-' + key);
+    if (!btn) return;
+    btn.disabled = true; btn.textContent = 'Run';
+    btn.style.background = '#374151'; btn.style.color = '#9ca3af'; btn.style.cursor = 'not-allowed';
+  }
+
+  async function ncwResume(name, msgId) {
+    const msgEl = document.getElementById(msgId || 'ncw-resume-msg');
+    const say = (t, bad) => { if (!msgEl) return; msgEl.innerHTML = t; msgEl.style.color = bad ? '#fca5a5' : '#93c5fd'; msgEl.classList.remove('hidden'); };
+    const f = ncwCollectAll();
+    if (f.clusterName && f.clusterName !== name)
+      return say('The loaded .env is for <b>' + escHtml(f.clusterName) + '</b>, not <b>' + escHtml(name) + '</b>. Load the .env file for ' + escHtml(name) + ' first.', true);
     const need = [];
-    if (!c.clusterName) need.push('Cluster Name');
-    if (!c.baseDomain) need.push('Base Domain');
-    if (!c.ionosToken) need.push('IONOS Token');
-    if (!c.mgmtSshPrivKey) need.push('Mgmt SSH Private Key');
-    if (need.length) return fail('Fill in (or load from the .env file) first: ' + need.join(', ') + '. Step through the wizard with Next so every step is read.');
-    let data;
+    if (!f.ionosToken) need.push('IONOS API token');
+    if (!f.mgmtSshPrivKey) need.push('management SSH private key');
+    if (need.length) return say('Load the .env file for <b>' + escHtml(name) + '</b> first (missing: ' + need.join(', ') + '). Secrets are never stored on the server.', true);
+    say('Checking the saved install and its data center...');
+    let d;
     try {
       const r = await fetch('/api/new-cluster/resume-state', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ clusterName: c.clusterName, mgmtSshPrivKey: c.mgmtSshPrivKey }) });
-      data = await r.json();
-      if (!r.ok) return fail(data.error || ('HTTP ' + r.status));
-    } catch (e) { return fail(e.message); }
-    if (!data.installComplete) return fail('The saved state for ' + c.clusterName + ' does not show a completed installation. Use the normal phases instead.');
+        body: JSON.stringify({ clusterName: name, ionosToken: f.ionosToken, mgmtSshPrivKey: f.mgmtSshPrivKey }) });
+      d = await r.json();
+      if (!r.ok) return say(escHtml(d.error || ('HTTP ' + r.status)), true);
+    } catch (e) { return say(escHtml(e.message), true); }
+    if (d.infraCheck && d.infraCheck.tokenRejected) return say(escHtml(d.infraCheck.message) + ' Put a valid token in the .env (or step 1) and press Resume again.', true);
+    // Saved settings (what the infrastructure was built with) + the loaded .env's secrets and later-phase values.
+    const merged = { ...(d.config || {}) };
+    for (const k of NCW_FORM_WINS) if (f[k] !== undefined && f[k] !== '') merged[k] = f[k];
+    for (const [k, v] of Object.entries(f)) if (merged[k] === undefined || merged[k] === '' || merged[k] === null) merged[k] = v;
+    for (const k of NCW_SECRET_KEYS) merged[k] = f[k];
+    merged.clusterName = name;
+    ncwConfig = merged;
+    if (msgEl) msgEl.classList.add('hidden');
     document.getElementById('ncw-config').style.display = 'none';
     document.getElementById('ncw-install').style.display = '';
-    for (const k of ['infra', 'mgmt', 'geniso', 'upload', 'boot', 'bootstrap', 'finalinstall']) ncwSetPhaseStatus(k, 'done', 'Done ✓ (saved)');
-    ncwShowCredentials(data);
-    ncwEnablePhaseBtn('certs');
-    ncwEnablePhaseBtn('csi');
+    ncwApplyPhaseView(d);
   }
+  window.ncwResume = ncwResume;
+
+  function ncwApplyPhaseView(d) {
+    let note = document.getElementById('ncw-resume-banner');
+    if (!note) {
+      note = document.createElement('div');
+      note.id = 'ncw-resume-banner';
+      note.style.cssText = 'margin-bottom:1rem;padding:0.7rem 0.9rem;background:#0a2318;border:1px solid #166534;border-radius:8px;font-size:0.82rem;color:#bbf7d0';
+      const inst = document.getElementById('ncw-install');
+      inst.insertBefore(note, inst.firstChild);
+    }
+    for (const k of NCW_PHASE_ORDER) {
+      const st = (d.phases || {})[k];
+      const errEl = document.getElementById('ncw-err-' + k), btn = document.getElementById('ncw-run-' + k);
+      if (errEl) errEl.classList.add('hidden');
+      if (!st) { ncwSetPhaseStatus(k, 'pending', 'Pending'); ncwDisablePhaseBtn(k); continue; }
+      if (st.status === 'running') { ncwRunPhase(k, { attach: true }); continue; }
+      if (st.status === 'done') {
+        ncwSetPhaseStatus(k, 'done', st.inferred || !st.at ? 'Done ✓ (saved)' : 'Done ✓ ' + new Date(st.at).toLocaleString());
+      } else {
+        ncwSetPhaseStatus(k, 'error', st.status === 'interrupted' ? 'Interrupted' : 'Error ✗');
+        if (errEl) { errEl.textContent = st.message || 'This phase did not finish.'; errEl.classList.remove('hidden'); document.getElementById('ncw-body-' + k)?.classList.remove('hidden'); }
+      }
+      if (btn) { ncwEnablePhaseBtn(k); btn.textContent = 'Retry'; }
+    }
+    const vdc = d.vdc ? ' &middot; ' + escHtml((d.vdc.name || '') + ' (' + (d.vdc.location || '') + ')') : '';
+    let msg = '&#8635; Resumed <b>' + escHtml(d.clusterName) + '</b>' + vdc + '. ';
+    if (d.infraCheck && d.infraCheck.ok === false) msg += '<span style="color:#fcd34d">' + escHtml(d.infraCheck.message) + '</span> ';
+    if (d.running) msg += escHtml(ncwPhaseLabel(d.running).text) + ' is still running on the server; its log continues below.';
+    else if (d.next) {
+      const ns = (d.phases || {})[d.next];
+      msg += (ns && ns.status !== 'done' ? 'Press <b>Retry</b> on ' : 'Press <b>Run</b> on ') + escHtml(ncwPhaseLabel(d.next).text) + ' to continue.';
+      ncwEnablePhaseBtn(d.next);
+      if (!ns) document.getElementById('ncw-run-' + d.next).textContent = 'Run';
+      document.getElementById('ncw-phase-' + d.next)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    } else msg += 'All phases are done.';
+    if (d.sshError) msg += ' <span style="color:#fca5a5">' + escHtml(d.sshError) + '</span>';
+    note.innerHTML = msg;
+    if (d.installComplete && d.apiUrl) ncwShowCredentials(d);
+  }
+
+  // The button on the Review step: resume the cluster named in the form.
+  async function ncwResumeAtTls() {
+    ncwCollectAll();
+    const n = (ncwConfig.clusterName || '').trim();
+    if (!n) { const e = document.getElementById('ncw-resume-error'); e.textContent = 'Enter the cluster name (or load its .env file) first.'; e.classList.remove('hidden'); return; }
+    return ncwResume(n, 'ncw-resume-error');
+  }
+
+  ncwCheckResumable();
 
   function ncwShowConfig() {
     document.getElementById('ncw-config').style.display = '';
@@ -6539,7 +6674,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     btn.style.cursor     = 'pointer';
   }
 
-  async function ncwRunPhase(key) {
+  async function ncwRunPhase(key, opts = {}) {
     const endpoint   = NCW_PHASES[key];
     const stepsEl    = document.getElementById(`ncw-steps-${key}`);
     const logEl      = document.getElementById(`ncw-log-${key}`);
@@ -6572,11 +6707,18 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     }
 
     try {
-      const resp = await fetch(`/api/new-cluster/${endpoint}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...ncwConfig })
-      });
+      const resp = opts.attach
+        ? await fetch(`/api/new-cluster/attach?clusterName=${encodeURIComponent(ncwConfig.clusterName || '')}&phase=${encodeURIComponent(key)}`)
+        : await fetch(`/api/new-cluster/${endpoint}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...ncwConfig })
+          });
+      if (resp.status === 409 && !opts.attach) {
+        // Already running on the server (e.g. started before a page reload): follow that run instead of starting a second one.
+        const d = await resp.clone().json().catch(() => ({}));
+        if (d.running) return ncwRunPhase(key, { attach: true });
+      }
       if (!resp.ok) {
         const d = await resp.json().catch(() => ({}));
         throw new Error(d.error || `HTTP ${resp.status}`);
@@ -6585,7 +6727,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
       const reader = resp.body.getReader();
       const dec    = new TextDecoder();
       let buf = '';
-      let doneData = null;
+      let doneData = null, gotDone = false;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -6607,12 +6749,14 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
             logEl.scrollTop = logEl.scrollHeight;
           } else if (ev.type === 'done') {
             doneData = ev.data || null;
+            gotDone = true;
           } else if (ev.type === 'error') {
             throw new Error(ev.message);
           }
         }
       }
 
+      if (opts.attach && !gotDone) throw new Error('Lost the connection to the server before the phase finished. Reload the page and press Resume to see whether it is still running.');
       ncwSetPhaseStatus(key, 'done', 'Done ✓');
       if (runBtn) { runBtn.textContent = 'Retry'; runBtn.disabled = false; }
 
