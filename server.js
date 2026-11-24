@@ -6148,6 +6148,44 @@ echo "BLS_PATCH_OK"
     step('BLS boot entry patched', 'ok');
     } // end worker-only steps 3-5
 
+    // ── Step 6a: Is this image already at IONOS? ─────────────────────────────
+    // IONOS refuses to overwrite a file in hdd-images/ (550 Operation not permitted) once it is registered or while
+    // it is being processed. So: an image of the same name in this location is reused; a file still on the FTP
+    // server (not yet in the catalog) is waited for instead of being uploaded again.
+    let imageId = null, skipPut = false;
+    const sameImage = img => {
+      const n = (img.properties?.name || '').toLowerCase();
+      return (img.properties?.location || '').toLowerCase() === location && (n === `${finalName}.raw`.toLowerCase() || n === finalName.toLowerCase());
+    };
+    try {
+      const existing = ((await ionosGet('/images?depth=1', ionosToken)).items || []).find(sameImage);
+      if (existing) {
+        const st = existing.metadata?.state;
+        log(`An image "${existing.properties.name}" already exists in ${location}: ${existing.id}, state ${st}, uploaded ${String(existing.metadata?.createdDate || '').slice(0, 16).replace('T', ' ')} UTC.\n` +
+            `  Reusing it (IONOS does not allow overwriting it). To rebuild it, delete the image in DCD (Images) first and run this again.\n`);
+        if (st === 'AVAILABLE') imageId = existing.id;
+        skipPut = true;
+      }
+    } catch (e) { log(`  (could not read the image catalog: ${e.message} - uploading)\n`); }
+    if (!skipPut) {
+      const ls = await sshRunScript(conn, `f=$(mktemp); chmod 600 $f; cat > $f << 'LFTP_LS_EOF'
+set ftp:ssl-allow true
+set ftp:ssl-allow/${ftpHost} true
+set ssl:verify-certificate no
+set cmd:fail-exit false
+open ${ftpHost}
+user "${ftpUser}" "${ftpPass}"
+cls -1 hdd-images/
+bye
+LFTP_LS_EOF
+command -v lftp >/dev/null && lftp -f $f 2>&1; rm -f $f`).catch(() => ({ stdout: '' }));
+      if ((ls.stdout || '').split('\n').some(l => l.trim().replace(/^.*\//, '') === `${finalName}.raw`)) {
+        log(`${finalName}.raw is already on ${ftpHost} and IONOS is still processing it: waiting for it instead of uploading again.\n`);
+        skipPut = true;
+      }
+    }
+
+    if (!skipPut) {
     // ── Step 6: FTP upload via lftp ───────────────────────────────────────────
     step(`Uploading to IONOS (${ftpHost}) via lftp…`, 'working');
     log(`Uploading ${finalName}.raw to ${ftpHost}/hdd-images/ (~16 GB — typically 20–40 minutes)\n`);
@@ -6184,18 +6222,22 @@ rm -f ${lftpScript}
 
     await sshRunScript(conn, `rm -f ${lftpScript}`).catch(() => {});
     step(`FTP upload complete`, 'ok');
+    } else {
+      step(imageId ? 'Image already registered at IONOS — upload skipped' : 'Image already on the FTP server — upload skipped', 'ok');
+    }
 
     // ── Step 7: Wait for IONOS to process the image ───────────────────────────
-    step('Waiting for IONOS to process image…', 'working');
-    log(`Image submitted. IONOS processing typically takes 5–30 minutes.\n`);
+    if (!imageId) {
+      step('Waiting for IONOS to process image…', 'working');
+      log(`Image submitted. IONOS processing typically takes 5–30 minutes.\n`);
+    }
 
     const uploadedAt = Date.now();
     // IONOS can take well over an hour to list a newly uploaded image (seen: ~53-58 min for the first upload in a
     // location). Wait up to 90 min and never fail early or re-upload.
     const maxWaitMs  = 90 * 60 * 1000;
-    let imageId      = null;
 
-    while (Date.now() - uploadedAt < maxWaitMs) {
+    while (!imageId && Date.now() - uploadedAt < maxWaitMs) {
       await new Promise(r => setTimeout(r, 30000));
       const elapsed = Math.floor((Date.now() - uploadedAt) / 1000);
       log(`Polling IONOS image list… (${elapsed}s elapsed)\n`);
