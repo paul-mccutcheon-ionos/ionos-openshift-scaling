@@ -72,6 +72,34 @@ app.use((req, res, next) => {
   };
   next();
 });
+
+// Plain JSON requests that can take more than a minute (control-plane readiness against a slow cluster API) were cut off by the front
+// proxy in front of nginx (HAProxy, ~60 s idle timeout): the browser got its "<html><body>504" page and reported "Unexpected token '<'".
+// After 25 s without an answer, send the headers and a space every 20 s (leading whitespace is valid JSON); the JSON follows when ready.
+// A late error keeps HTTP 200 (the status is already sent) and is marked with _lateStatus so the page still treats it as an error.
+app.use('/api/control-plane', (req, res, next) => {
+  if (req.method !== 'POST') return next();
+  let ka = null;
+  const start = setTimeout(() => {
+    if (res.headersSent || res.writableEnded) return;
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no' });
+    res.write(' ');
+    ka = setInterval(() => { try { if (!res.writableEnded && !res.destroyed) res.write(' '); } catch (_) {} }, 20000);
+  }, 25000);
+  const stop = () => { clearTimeout(start); if (ka) clearInterval(ka); };
+  res.on('close', stop); res.on('finish', stop);
+  const origJson = res.json.bind(res), origStatus = res.status.bind(res);
+  let wantStatus = 200;
+  res.status = code => { wantStatus = code; if (!res.headersSent) origStatus(code); return res; };
+  res.json = body => {
+    if (!res.headersSent) { stop(); return origJson(body); }
+    stop();
+    const out = wantStatus >= 400 && body && typeof body === 'object' ? { ...body, _lateStatus: wantStatus } : body;
+    res.end(JSON.stringify(out));
+    return res;
+  };
+  next();
+});
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ── OpenShift API helpers ──────────────────────────────────────────────────

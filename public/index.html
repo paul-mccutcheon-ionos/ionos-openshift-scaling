@@ -525,7 +525,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.24.8</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.24.9</span>
   </div>
 
   <div class="banner-actions">
@@ -4096,9 +4096,17 @@ Type the node name (${short}) to continue:`);
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify(body)
     });
-    const data = await res.json();
-    if (!res.ok) {
-      let msg = data.error || `Error ${res.status}`;
+    const raw = await res.text();
+    let data;
+    try { data = JSON.parse(raw); }
+    catch (_) {
+      // Not JSON: a proxy in front of the app answered instead (e.g. HAProxy's "<html><body><h1>504 Gateway Time-out" page).
+      const t = (raw.match(/<h1>([^<]*)<\/h1>/i) || raw.match(/<title>([^<]*)<\/title>/i) || [])[1] || `HTTP ${res.status}`;
+      throw Object.assign(new Error(`No answer from the app in time (${t.trim()}): a proxy between the browser and the app gave up. ` +
+        'This usually means the cluster API is answering slowly. Try again in a minute.'), { status: res.status });
+    }
+    if (!res.ok || data?._lateStatus) {
+      let msg = data.error || `Error ${data?._lateStatus || res.status}`;
       if (res.status === 401 || (msg && msg.includes('Unauthorized'))) {
         msg += '\n\nIf you have a fresh token, check that it was copied without trailing whitespace and that the Cluster API URL is correct. If the token is genuinely expired, run: oc whoami -t';
       }
