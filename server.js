@@ -7471,6 +7471,39 @@ app.post('/api/new-cluster/upload-iso', async (req, res) => {
     conn = await sshConnect(mgmtPubIp, 'root', privKey);
 
     step(`Upload ISO via lftp to ${ftpHost}`, 'running');
+
+    // Is the file already on the FTP server? Once it is uploaded IONOS processes it and refuses any change to it
+    // ("550 Operation not permitted") until the image is registered, which can take an hour or more. So a Retry
+    // must look at the FTP server first and keep waiting, never upload the same file again.
+    const ftpCheck = async () => {
+      const lsPath = '/tmp/.lftp-iso-ls';
+      const lsB64 = Buffer.from(`set ftp:ssl-allow true\nset ftp:ssl-allow/${ftpHost} true\nopen ${ftpHost}\nuser "${ftpUser}" "${ftpPass}"\nls -l iso-images/\nbye\n`).toString('base64');
+      const r = await sshRunScript(conn, `echo '${lsB64}' | base64 -d > ${lsPath}; chmod 600 ${lsPath}; lftp -f ${lsPath} 2>/dev/null; rm -f ${lsPath}`);
+      const line = (r.stdout || '').split('\n').map(l => l.trim()).find(l => l.endsWith(isoName));
+      if (!line) return null;
+      const size = parseInt(line.split(/\s+/)[4], 10) || 0;
+      const loc  = await sshRunScript(conn, 'stat -c %s /opt/ocp-install/agent.x86_64.iso 2>/dev/null || echo 0');
+      return { size, localSize: parseInt((loc.stdout || '').trim(), 10) || 0 };
+    };
+    const mb = n => (n / 1048576).toFixed(0) + ' MB';
+    const alreadyThere = f => {
+      log(`${isoName} is already on the FTP server (${mb(f.size)}; local file ${mb(f.localSize)}). IONOS is processing it, which can take an hour or more, ` +
+          `and refuses changes meanwhile. Not uploading again — waiting for it to appear in the image catalog.\n`);
+      if (f.localSize && f.size && f.size < f.localSize) log(`  WARNING: the FTP copy is smaller than the local ISO; if it never registers, the upload was cut short.\n`);
+    };
+    let onFtp = null;
+    try { onFtp = await ftpCheck(); } catch (e) { log(`  (could not list the FTP folder: ${e.message}; will try the upload)\n`); }
+
+    const markUploaded = () => clusterInstallState.set(clusterName, { ...(clusterInstallState.get(clusterName) || saved), isoUploadedAt: Date.now() });
+    // IONOS may move the file out of the FTP folder once processing finishes, so also trust our own record of a finished upload
+    const recentUpload = !onFtp && saved.isoUploadedAt && (Date.now() - saved.isoUploadedAt) < 3 * 3600000;
+    if (onFtp) {
+      alreadyThere(onFtp);
+      markUploaded();
+    } else if (recentUpload) {
+      log(`${isoName} was uploaded ${Math.round((Date.now() - saved.isoUploadedAt) / 60000)} min ago and is no longer listed in the FTP folder (IONOS has taken it for processing). Not uploading again — waiting for it to appear in the image catalog.
+`);
+    } else {
     log(`Uploading ${isoName} (~1 GB) — this may take several minutes...\n`);
 
     const lftpScriptPath = `/tmp/.lftp-iso-upload`;
@@ -7488,34 +7521,53 @@ ${lftpB64}
 B64EOF
 chmod 600 ${lftpScriptPath}`);
 
-    await sshRunScriptStreaming(conn, `#!/bin/bash
+    try {
+      await sshRunScriptStreaming(conn, `#!/bin/bash
 set -e
 lftp -f ${lftpScriptPath}
 rm -f ${lftpScriptPath}
 echo "FTP_UPLOAD_DONE"
 `, chunk => log(chunk));
+    } catch (e) {
+      // A refused put (550) usually means the file is already there and being processed: check before failing.
+      await sshRunScript(conn, `rm -f ${lftpScriptPath}`).catch(() => {});
+      const f = await ftpCheck().catch(() => null);
+      if (!f) throw e;
+      log(`The FTP server refused the upload (${String(e.message).split('\n').pop().slice(0, 160)}), but the file is there.\n`);
+      alreadyThere(f);
+    }
+      markUploaded();
+    }   // end: upload (skipped when the file was already on the FTP server)
     step(`Upload ISO via lftp to ${ftpHost}`, 'done');
     conn.end();
 
     // Poll IONOS catalog until ISO image appears
     step('Wait for ISO to register in IONOS image catalog (normally ~1 hour)', 'running');
-    log('Polling IONOS API for image registration...\n');
+    log('Polling IONOS API for image registration. Safe to press Retry meanwhile: it detects the file on the FTP server and keeps waiting (it never uploads twice).\n');
     // Measured on ocp2 (2026-11-16): the image record is created at upload time but only appears in the
     // catalog listing ~53-58 min later. Wait up to 90 min (1.5x) — never fail early, never re-upload.
-    const deadline = Date.now() + 5400000;
+    // Berlin (de/txl) was still unregistered after an hour, so allow 3 hours.
+    const waitStart = Date.now();
+    const deadline = waitStart + 3 * 3600000;
     while (Date.now() < deadline) {
       await new Promise(r => setTimeout(r, 30000));
-      const imgs  = await ionosGet('/images?depth=1', ionosToken);
+      let imgs;
+      try { imgs = await ionosGet('/images?depth=1', ionosToken); }
+      catch (e) {
+        if (e.status === 401 || e.status === 403) throw new Error(`IONOS rejected the API token (HTTP ${e.status}) while waiting for the image: it has expired or been revoked. Create a new token, put it in the wizard and press Retry (the file is already uploaded).`);
+        log(`  (IONOS API error, will retry: ${String(e.message).slice(0, 120)})\n`);
+        continue;
+      }
       const found = (imgs.items || []).find(img =>
         img.properties?.name === isoName &&
         img.properties?.location === vdcLoc &&
         img.properties?.imageType === 'CDROM'
       );
       if (found) { isoImageId = found.id; log(`  Registered: ${found.id}\n`); break; }
-      log('  Not yet visible, retrying...\n');
+      log(`  Not yet visible (${Math.round((Date.now() - waitStart) / 60000)} min), retrying...\n`);
     }
     if (!isoImageId) {
-      fail(`ISO "${isoName}" did not appear in the IONOS image catalog within 90 minutes (normally ~1 hour). ` +
+      fail(`ISO "${isoName}" did not appear in the IONOS image catalog within 3 hours (normally ~1 hour). ` +
            `Verify the FTP upload succeeded (check iso-images/ on ${ftpHost}).`);
       return;
     }
