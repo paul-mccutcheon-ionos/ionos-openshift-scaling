@@ -3854,6 +3854,21 @@ echo "ALT_WRITE_OK"
     log(`MachineAutoscaler "${targetMsName}" — min=${minReplicas}, max=${maxReplicas}\n`);
     step('MachineAutoscaler applied', 'ok');
 
+    // The cluster autoscaler does NOT raise a MachineSet to its minimum on its own (only when pods are unschedulable),
+    // so a MachineSet created with 1 replica and min=2 stayed at 1 worker (ocp5/6/7). Bring it into the bounds now.
+    try {
+      const msPathMa = `/apis/machine.openshift.io/v1beta1/namespaces/openshift-machine-api/machinesets/${encodeURIComponent(targetMsName)}`;
+      const ms  = await ocpGet(clusterApiUrl, msPathMa, ocpToken);
+      const cur = ms?.spec?.replicas ?? 0;
+      const lo  = maSpec.spec.minReplicas, hi = maSpec.spec.maxReplicas;
+      const want = Math.min(Math.max(cur, lo), hi);
+      if (want !== cur) {
+        await ocpPatch(clusterApiUrl, msPathMa, ocpToken, { spec: { replicas: want } });
+        log(`MachineSet "${targetMsName}" scaled from ${cur} to ${want} replicas to match the autoscaler bounds (${lo}–${hi})\n`);
+      }
+      step(`MachineSet replicas within bounds (${want})`, 'ok');
+    } catch (e) { log(`  WARNING: could not bring the MachineSet replicas into the autoscaler bounds: ${e.message}. Scale it by hand.\n`); }
+
     done(
       `Autoscaling configured on MachineSet "${targetMsName}" — ` +
       `replicas ${minReplicas}–${maxReplicas}, cluster max ${maxNodes} nodes. ` +
