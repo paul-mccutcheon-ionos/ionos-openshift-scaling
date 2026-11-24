@@ -77,7 +77,9 @@ app.use((req, res, next) => {
 // proxy in front of nginx (HAProxy, ~60 s idle timeout): the browser got its "<html><body>504" page and reported "Unexpected token '<'".
 // After 25 s without an answer, send the headers and a space every 20 s (leading whitespace is valid JSON); the JSON follows when ready.
 // A late error keeps HTTP 200 (the status is already sent) and is marked with _lateStatus so the page still treats it as an error.
-app.use('/api/control-plane', (req, res, next) => {
+// Applies to every JSON POST under /api (Get Token runs `oc login` on the management host, which can also exceed 60 s); SSE
+// endpoints send their headers at once, so the timer never fires for them.
+app.use('/api', (req, res, next) => {
   if (req.method !== 'POST') return next();
   let ka = null;
   const start = setTimeout(() => {
@@ -96,6 +98,13 @@ app.use('/api/control-plane', (req, res, next) => {
     stop();
     const out = wantStatus >= 400 && body && typeof body === 'object' ? { ...body, _lateStatus: wantStatus } : body;
     res.end(JSON.stringify(out));
+    return res;
+  };
+  const origSend = res.send.bind(res);
+  res.send = body => {
+    if (!res.headersSent) { stop(); return origSend(body); }
+    if (body && typeof body === 'object' && !Buffer.isBuffer(body)) return res.json(body);
+    stop(); res.end(typeof body === 'string' && !/^\s*[[{"]/.test(body) ? JSON.stringify({ error: body, _lateStatus: wantStatus >= 400 ? wantStatus : undefined }) : body);
     return res;
   };
   next();
