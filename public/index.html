@@ -525,7 +525,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.24.5</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.24.6</span>
   </div>
 
   <div class="banner-actions">
@@ -2877,7 +2877,9 @@
         <div style="display:grid;gap:0.6rem;font-size:0.84rem">
           <div><span style="color:#64748b">API URL:</span> <code id="ncw-cred-api" style="color:#34d399"></code></div>
           <div><span style="color:#64748b">Console:</span> <code id="ncw-cred-console" style="color:#34d399"></code></div>
-          <div><span style="color:#64748b">kubeadmin password:</span> <code id="ncw-cred-pw" style="color:#fbbf24;background:#1c1200;padding:0.1rem 0.4rem;border-radius:4px"></code></div>
+          <div><span style="color:#64748b">kubeadmin password:</span> <code id="ncw-cred-pw" style="color:#fbbf24;background:#1c1200;padding:0.1rem 0.4rem;border-radius:4px"></code>
+            <button type="button" id="ncw-cred-pw-copy" title="Copy the password to the clipboard" style="margin-left:0.4rem;padding:0.1rem 0.5rem;font-size:0.75rem;border:1px solid #475569;border-radius:4px;background:#1e293b;color:#e2e8f0;cursor:pointer"
+              onclick="ncwCopyText(document.getElementById('ncw-cred-pw').textContent, this)">&#128203; Copy</button></div>
         </div>
         <div style="margin-top:0.85rem;display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap">
           <button id="ncw-env-download" type="button" style="padding:0.45rem 0.9rem;border-radius:6px;border:1px solid #166534;background:#14532d;color:#bbf7d0;cursor:pointer;font-size:0.82rem">&#11015; Download cluster env file</button>
@@ -7839,6 +7841,29 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     }).catch(() => {});
   });
 
+</script>
+<script>
+// Copy text to the clipboard. The app is served over plain http, where navigator.clipboard is not available,
+// so fall back to a hidden textarea + execCommand('copy').
+window.ncwCopyText = async function (text, btn) {
+  text = String(text || '').trim();
+  if (!text) return;
+  let ok = false;
+  try { if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); ok = true; } } catch (_) {}
+  if (!ok) {
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.setAttribute('readonly', ''); ta.style.position = 'fixed'; ta.style.top = '-1000px';
+    document.body.appendChild(ta); ta.select();
+    try { ok = document.execCommand('copy'); } catch (_) { ok = false; }
+    document.body.removeChild(ta);
+  }
+  if (btn) {
+    const orig = btn.dataset.label || btn.innerHTML;
+    btn.dataset.label = orig;
+    btn.innerHTML = ok ? '&#10003; Copied' : 'Copy failed';
+    setTimeout(() => { btn.innerHTML = orig; }, 1800);
+  }
+};
 </script>
 </body>
 </html>
