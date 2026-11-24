@@ -7522,6 +7522,100 @@ hosts:
 ${hostLines}
 `;
 
+    // ── Pre-flight: the ISOs this cluster already has (image catalog of the site, the site's FTP server, the management VM) ──
+    // An agent ISO carries the node MACs/IPs and the cluster's certificates, so an older one can never boot this install.
+    // Same configuration and the matching install state still on the management VM -> reuse it (no new ~1 h upload/registration).
+    // Otherwise the older ISOs of this cluster are removed, so they cannot be attached by mistake and do not pile up.
+    const PF = 'Pre-flight: existing ISOs for this cluster (image catalog, FTP, management VM)';
+    step(PF, 'running');
+    const vdcLoc     = saved.vdcLocation || req.body.vdcLocation;
+    const ionosToken = req.body.ionosToken || saved.ionosToken;
+    const ftpUser    = req.body.ionosFtpUser || saved.ionosFtpUser;
+    const ftpPass    = req.body.ionosFtpPass || saved.ionosFtpPass;
+    const ftpHost    = ftpHostForLoc(vdcLoc);
+    const fingerprint = require('crypto').createHash('sha256').update(installCfg + '\n---\n' + agentCfg).digest('hex');
+    const isoRe = new RegExp('^' + String(clusterName).replace(/[^a-z0-9-]/g, '') + '-agent(-\\d{12})?\\.iso$');
+    const mbs = n => (n / 1048576).toFixed(0) + ' MB';
+    const lftpRun = async cmds => {
+      const pth = '/tmp/.lftp-iso-pf';
+      const b64 = Buffer.from(`set ftp:ssl-allow true\nset ftp:ssl-allow/${ftpHost} true\nset cmd:fail-exit false\nopen ${ftpHost}\nuser "${ftpUser}" "${ftpPass}"\n${cmds}\nbye\n`).toString('base64');
+      return sshRunScript(conn, `echo '${b64}' | base64 -d > ${pth}; chmod 600 ${pth}; lftp -f ${pth} 2>&1; rm -f ${pth}`);
+    };
+
+    let catalog = [], ftpFiles = [], ftpOk = false;
+    const attached = new Set();
+    try {
+      catalog = ((await ionosGet('/images?depth=1', ionosToken)).items || []).filter(i =>
+        i.properties?.imageType === 'CDROM' && i.properties?.location === vdcLoc && isoRe.test(i.properties?.name || ''));
+    } catch (e) {
+      if (e.status === 401 || e.status === 403) throw new Error(`IONOS rejected the API token (HTTP ${e.status}): it has expired or been revoked.`);
+      log(`  (could not read the image catalog: ${e.message})\n`);
+    }
+    if (saved.infra?.dcId && catalog.length) {
+      try {
+        const srv = await ionosGet(`/datacenters/${saved.infra.dcId}/servers?depth=3`, ionosToken);
+        for (const sv of srv.items || []) for (const c of sv.entities?.cdroms?.items || []) attached.add(c.id);
+      } catch (_) { /* treat as not attached; IONOS refuses to delete an image in use anyway */ }
+    }
+    if (ftpUser && ftpPass) {
+      try {
+        const r = await lftpRun('ls -l iso-images/');
+        ftpOk = true;
+        for (const line of (r.stdout || '').split('\n')) {
+          const parts = line.trim().split(/\s+/);
+          if (parts.length < 9) continue;
+          const name = parts.slice(8).join(' ').replace(/^.*\//, '');
+          if (isoRe.test(name)) ftpFiles.push({ name, size: parseInt(parts[4], 10) || 0, when: parts.slice(5, 8).join(' ') });
+        }
+      } catch (e) { log(`  (could not list the FTP folder on ${ftpHost}: ${e.message})\n`); }
+    } else log('  (no IONOS FTP credentials in the request: the FTP server is not checked)\n');
+    const lr = await sshRunScript(conn, 'echo ISO=$(stat -c %s /opt/ocp-install/agent.x86_64.iso 2>/dev/null || echo 0); test -f /opt/ocp-install/auth/kubeconfig && echo KC=1; test -f /opt/ocp-install/boot-artifacts/agent.x86_64-rootfs.img && echo ROOTFS=1; cat /opt/ocp-install/.ncw-fingerprint 2>/dev/null | sed "s/^/FP=/"');
+    const lo = lr.stdout || '';
+    const local = { iso: parseInt((lo.match(/ISO=(\d+)/) || [])[1], 10) || 0, kc: /KC=1/.test(lo), rootfs: /ROOTFS=1/.test(lo), fp: ((lo.match(/FP=([0-9a-f]{64})/) || [])[1]) || '' };
+
+    log(`Image catalog (${vdcLoc}): ${catalog.length ? '' : 'no ISO of ' + clusterName}\n`);
+    for (const i of catalog) log(`  ${i.properties.name}  ${i.id}  ${i.metadata?.state || ''}  created ${String(i.metadata?.createdDate || '').slice(0, 16).replace('T', ' ')}${attached.has(i.id) ? '  ATTACHED to a server' : ''}\n`);
+    if (ftpOk) {
+      log(`FTP ${ftpHost} iso-images/: ${ftpFiles.length ? '' : 'no ISO of ' + clusterName}\n`);
+      for (const f of ftpFiles) log(`  ${f.name}  ${mbs(f.size)}  ${f.when}  (still being processed by IONOS)\n`);
+    }
+    log(`Management VM: ${local.iso ? 'agent ISO ' + mbs(local.iso) + (local.kc ? ' with its install state (auth/kubeconfig)' : ' WITHOUT its install state') : 'no agent ISO'}\n`);
+
+    const sameCfg = !!saved.isoName && !!saved.isoFingerprint && saved.isoFingerprint === fingerprint && local.fp === fingerprint;
+    const reuse = sameCfg && local.iso > 0 && local.kc && local.rootfs && !req.body.ncwRegenerateIso;
+    const keepName = reuse ? saved.isoName : null;
+    if (reuse) log(`=> Reusing ${saved.isoName}: the configuration is unchanged and the management VM still has the ISO and its install state.\n`);
+    else log(`=> A new ISO is needed: ${!saved.isoName ? 'none was generated for this install yet' : !saved.isoFingerprint || !local.fp ? 'the earlier ISO has no configuration record' : saved.isoFingerprint !== fingerprint ? 'the configuration changed (nodes, IPs, version, keys or pull secret)' : 'the management VM no longer has the matching ISO and install state'}.\n`);
+
+    // Remove this cluster's ISOs that will not be used
+    const staleCat = catalog.filter(i => i.properties.name !== keepName);
+    const staleFtp = ftpFiles.filter(f => f.name !== keepName);
+    for (const i of staleCat) {
+      if (attached.has(i.id)) { log(`  kept ${i.properties.name}: it is attached to a server (detach it first)\n`); continue; }
+      try { await ionosDetach(`/images/${i.id}`, ionosToken); log(`  deleted catalog image ${i.properties.name} (${i.id})\n`); }
+      catch (e) { log(`  could not delete catalog image ${i.properties.name}: ${String(e.message).slice(0, 200)}\n`); }
+    }
+    for (const f of staleFtp) {
+      const r = await lftpRun(`rm iso-images/${f.name}`).catch(e => ({ stdout: String(e.message) }));
+      const refused = /550|denied|not permitted|failed/i.test(r.stdout || '');
+      log(refused ? `  FTP ${f.name}: IONOS is still processing it and refuses changes; once it is registered the next pre-flight deletes it from the catalog
+`
+                  : `  removed ${f.name} from the FTP folder
+`);
+    }
+    step(PF, 'done');
+
+    if (reuse) {
+      if (!(await sshRunScript(conn, 'test -f /var/www/html/agent.x86_64-rootfs.img && echo Y').then(r => /Y/.test(r.stdout || '')))) {
+        await sshRunScript(conn, 'cp /opt/ocp-install/boot-artifacts/agent.x86_64-rootfs.img /var/www/html/ && chmod 644 /var/www/html/agent.x86_64-rootfs.img');
+        log('Copied the rootfs artifact to Apache again.\n');
+      }
+      conn.end();
+      step('Generate agent installer ISO (openshift-install)', 'done');
+      done(`Reusing the agent ISO ${saved.isoName} (configuration unchanged)`);
+      return;
+    }
+
     step('Write install-config.yaml + agent-config.yaml', 'running');
     const icB64 = Buffer.from(installCfg).toString('base64').match(/.{1,76}/g).join('\n');
     const acB64 = Buffer.from(agentCfg).toString('base64').match(/.{1,76}/g).join('\n');
@@ -7558,12 +7652,13 @@ ls -lh /var/www/html/agent.x86_64-rootfs.img
 echo "ROOTFS_DEPLOYED"
 `, chunk => log(chunk));
     step('Copy rootfs artifact to Apache (/var/www/html/)', 'done');
+    await sshRunScript(conn, `echo ${fingerprint} > /opt/ocp-install/.ncw-fingerprint`);
 
     conn.end();
     // Each generated ISO gets its own catalog name: IONOS keeps (and slowly registers) every upload, and a
     // regenerated ISO (new config/token) must never be mistaken for an older image of the same name.
     const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
-    clusterInstallState.set(clusterName, { ...(clusterInstallState.get(clusterName) || saved), isoName: `${clusterName}-agent-${stamp}.iso` });
+    clusterInstallState.set(clusterName, { ...(clusterInstallState.get(clusterName) || saved), isoName: `${clusterName}-agent-${stamp}.iso`, isoFingerprint: fingerprint, isoUploadedAt: null, isoUploadedName: null });
     done('Agent ISO generated and rootfs deployed to Apache');
   } catch (e) {
     fail(`ISO generation failed: ${e.message}`);
