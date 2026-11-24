@@ -525,7 +525,7 @@
   </div>
 
   <div class="banner-title">
-    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.24.6</span>
+    OpenShift Scaling Tool <span style="font-size:0.72em;font-weight:600;color:#fbbf24;background:#2d1f00;border-radius:999px;padding:0.15rem 0.65rem;vertical-align:middle">v1.24.7</span>
   </div>
 
   <div class="banner-actions">
@@ -1116,14 +1116,14 @@
                   <div class="field-note">Leave blank to use <code style="color:#38bdf8">rhcos-{version}-qemu-worker</code> (the word &ldquo;worker&rdquo; keeps worker images easy to tell from the master image and to filter on)</div>
                 </div>
                 <div class="form-group">
-                  <label for="rhcos-ftp-user">IONOS Login</label>
+                  <label for="rhcos-ftp-user">IONOS FTP Server Login</label>
                   <input type="text" id="rhcos-ftp-user" placeholder="username@cloud.ionos.com" autocomplete="username" style="width:100%" />
-                  <div class="field-note">Same as DCD login — used for the IONOS FTPS image upload server</div>
+                  <div class="field-note">For the IONOS FTPS image upload server (ftp-&lt;site&gt;.ionos.com). Same username as your DCD login.</div>
                 </div>
                 <div class="form-group">
-                  <label for="rhcos-ftp-pass">IONOS Password</label>
+                  <label for="rhcos-ftp-pass">IONOS FTP Server Password</label>
                   <input type="password" id="rhcos-ftp-pass" placeholder="account password" autocomplete="current-password" style="width:100%" />
-                  <div class="field-note">Your IONOS account password — transmitted over SSH only, never stored</div>
+                  <div class="field-note">Same password as your DCD login. Sent to the management host over SSH only, never stored.</div>
                 </div>
                 <div class="form-group">
                   <label for="rhcos-gateway">Worker Gateway IP</label>
@@ -2326,11 +2326,11 @@
             <span id="ncw-token-note" style="display:none;font-size:0.78rem;line-height:1.45"></span>
           </label>
           <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
-            IONOS FTP Username (account email)
+            IONOS FTP Server Login (same as DCD login)
             <input id="ncw-ftp-user" type="text" placeholder="your@email.com" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
           </label>
           <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
-            IONOS FTP Password
+            IONOS FTP Server Password (same as DCD password)
             <input id="ncw-ftp-pass" type="password" placeholder="IONOS account password (used for FTP image upload)" style="background:#0b1e45;border:1px solid #1e3a5f;color:#e2e8f0;border-radius:6px;padding:0.5rem 0.75rem;font-size:0.85rem">
           </label>
           <label style="display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:#94a3b8">
@@ -5571,7 +5571,7 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     const sshUser    = document.getElementById('ssh-user').value.trim() || 'root';
 
     if (!ocpVersion) { showError('rhcos-error', 'Enter the OCP version (e.g. 4.18).'); return; }
-    if (!ftpUser || !ftpPass) { showError('rhcos-error', 'Enter your IONOS FTP username and password.'); return; }
+    if (!ftpUser || !ftpPass) { showError('rhcos-error', 'Enter your IONOS FTP Server Login and Password (the same as your DCD login).'); return; }
     if (!mgmtHost) { showError('rhcos-error', 'Connect to the cluster first (management host is required).'); return; }
     if (!sshKey) { showError('rhcos-error', 'Management host SSH key is required.'); return; }
     if (!ionosToken) { showError('rhcos-error', 'IONOS API token is required (needed to confirm image availability).'); return; }
@@ -6378,8 +6378,8 @@ document.getElementById('frankfurt-diversity-panel').style.display = isIonos ? '
     document.getElementById('ncw-review-content').textContent = lines.join('\n');
     const missing = [];
     if (!c.ionosToken)    missing.push('IONOS Token');
-    if (!c.ionosFtpUser)  missing.push('FTP Username');
-    if (!c.ionosFtpPass)  missing.push('FTP Password');
+    if (!c.ionosFtpUser)  missing.push('IONOS FTP Server Login');
+    if (!c.ionosFtpPass)  missing.push('IONOS FTP Server Password');
     if (!c.pullSecret)    missing.push('Pull Secret');
     if (!c.clusterName)   missing.push('Cluster Name');
     if (!c.baseDomain)    missing.push('Base Domain');
