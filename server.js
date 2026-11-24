@@ -7494,9 +7494,9 @@ app.post('/api/new-cluster/upload-iso', async (req, res) => {
     let onFtp = null;
     try { onFtp = await ftpCheck(); } catch (e) { log(`  (could not list the FTP folder: ${e.message}; will try the upload)\n`); }
 
-    const markUploaded = () => clusterInstallState.set(clusterName, { ...(clusterInstallState.get(clusterName) || saved), isoUploadedAt: Date.now() });
+    const markUploaded = () => clusterInstallState.set(clusterName, { ...(clusterInstallState.get(clusterName) || saved), isoUploadedAt: Date.now(), isoUploadedName: isoName });
     // IONOS may move the file out of the FTP folder once processing finishes, so also trust our own record of a finished upload
-    const recentUpload = !onFtp && saved.isoUploadedAt && (Date.now() - saved.isoUploadedAt) < 3 * 3600000;
+    const recentUpload = !onFtp && saved.isoUploadedAt && saved.isoUploadedName === isoName && (Date.now() - saved.isoUploadedAt) < 3 * 3600000;   // same ISO only: a regenerated ISO has a new name and must be uploaded
     if (onFtp) {
       alreadyThere(onFtp);
       markUploaded();
