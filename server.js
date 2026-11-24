@@ -6426,6 +6426,11 @@ app.use('/api/new-cluster', (req, res, next) => {
       error: `Phase ${phase} for ${clusterName} is already running on the server (started ${new Date(cur.startedAt).toLocaleString()}).` });
   }
   if (cur && cur.status === 'running') ncwRunFinish(cur, 'error', 'Superseded by a new run of this phase.');
+  // Running an earlier phase again (e.g. E to re-boot the nodes) makes any later phase still being monitored obsolete.
+  for (const p of NCW_PHASE_ORDER.slice(NCW_PHASE_ORDER.indexOf(phase) + 1)) {
+    const later = ncwRuns.get(`${clusterName}|${p}`);
+    if (later && later.status === 'running') ncwRunFinish(later, 'error', `Superseded: phase ${phase} was run again.`);
+  }
   const run = { clusterName, phase, status: 'running', startedAt: Date.now(), lastEventAt: Date.now(), events: [], listeners: new Set(), message: null };
   ncwRuns.set(key, run);
   res.locals.ncwRun = run;
@@ -6510,8 +6515,11 @@ function makeIsoDetacher(cpDetails, dcId, ionosToken, log) {
       if (m) {
         written.add(m[1]);
         if (m[1] !== rendezvous) detach(m[1], false);
-        else log(`  [wizard] ${m[1]} (rendezvous host) has written its image - keeping its ISO until the other nodes are done\n`);
-        if ((cpDetails || []).length && (cpDetails || []).every(c => written.has(c.name))) detach(rendezvous, false);
+        else if (!detached.has(m[1])) log(`  [wizard] ${m[1]} (rendezvous host) has written its image - it keeps its ISO until the bootstrap is complete\n`);
+        // NOT when every node has written its image: the rendezvous host runs the bootstrap control plane (and the Machine Config Server
+        // the other nodes' first boot needs) until bootstrap-complete, and a boot-device change makes IONOS restart a running VM.
+        // ocp4 (de/txl): detaching it then rebooted it mid-bootstrap and all three nodes hung in Ignition on api-int:22623.
+        // Its ISO comes off after bootstrap-complete (sweep at the end of phase F), or below if the installer reports it booted the ISO again.
         continue;
       }
       m = line.match(/Host (control-\d+)\.\S* Expected the host to boot from disk, but it booted the installation image/);
