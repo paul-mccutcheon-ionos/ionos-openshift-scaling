@@ -2247,15 +2247,18 @@ async function cpRetireNode(ctx, target, g, emit) {
   await cpDrainNode(ctx, n, { log });
   step(`Retire ${short}: drained`, 'ok');
 
-  step(`Retire ${short}: powering the VM off`, 'working');
-  if (srv.properties?.vmState !== 'SHUTOFF') await ionosAction(`/datacenters/${encodeURIComponent(ctx.ionos.dc)}/servers/${srv.id}/stop`, ctx.ionos.token);
+  // A Cube cannot be stopped (IONOS VDC-5-1824 "The server of type Cube cannot be stopped"): it is suspended instead.
+  const isCube = srv.properties?.type === 'CUBE';
+  const offStates = ['SHUTOFF', 'SUSPENDED'];
+  step(`Retire ${short}: powering the VM off${isCube ? ' (Cube: suspend)' : ''}`, 'working');
+  if (!offStates.includes(srv.properties?.vmState)) await ionosAction(`/datacenters/${encodeURIComponent(ctx.ionos.dc)}/servers/${srv.id}/${isCube ? 'suspend' : 'stop'}`, ctx.ionos.token);
   for (let i = 0; i < 60; i++) {
     const s = await ionosGet(`/datacenters/${encodeURIComponent(ctx.ionos.dc)}/servers/${srv.id}`, ctx.ionos.token);
-    if (s.properties?.vmState === 'SHUTOFF') break;
+    if (offStates.includes(s.properties?.vmState)) break;
     if (i === 59) throw new Error(`The VM did not power off. State: ${n} is cordoned and drained, its VM is still running; its etcd member is untouched.`);
     await sleepMs(5000);
   }
-  step(`Retire ${short}: VM off`, 'ok');
+  step(`Retire ${short}: VM ${isCube ? 'suspended' : 'off'}`, 'ok');
 
   step(`Retire ${short}: removing its etcd member`, 'working');
   const out = await withMgmtSsh(ctx, async conn => {
@@ -2278,7 +2281,7 @@ async function cpRetireNode(ctx, target, g, emit) {
     }
     return { err: 'the member could not be removed after several attempts' };
   });
-  if (out.err) throw new Error(`Could not remove the etcd member (${out.err}). ${n} is drained and its VM is OFF; start the VM again at IONOS to undo.`);
+  if (out.err) throw new Error(`Could not remove the etcd member (${out.err}). ${n} is drained and its VM is ${isCube ? 'SUSPENDED; resume' : 'OFF; start'} the VM again at IONOS to undo.`);
   log(`  etcd: ${out.text}
 `);
   step(`Retire ${short}: etcd member removed`, 'ok');
