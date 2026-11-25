@@ -2200,8 +2200,8 @@ const sleepMs = ms => new Promise(r => setTimeout(r, ms));
 // Cordon, then evict every pod that is not a DaemonSet / static (mirror) pod, honouring PodDisruptionBudgets (429 = retry).
 async function cpDrainNode(ctx, nodeName, { log, timeoutMs = 20 * 60000 }) {
   const A = ctx.apiUrl, T = ctx.token;
-  await ocpPatch(A, `/api/v1/nodes/${encodeURIComponent(nodeName)}`, T, { spec: { unschedulable: true } });
-  const nd = await ocpGet(A, `/api/v1/nodes/${encodeURIComponent(nodeName)}`, T);
+  await cpRetry(() => ocpPatch(A, `/api/v1/nodes/${encodeURIComponent(nodeName)}`, T, { spec: { unschedulable: true } }));
+  const nd = await cpRetry(() => ocpGet(A, `/api/v1/nodes/${encodeURIComponent(nodeName)}`, T));
   if (!isNodeReady(nd)) { log(`  ${nodeName} is not Ready (already down): its pods cannot terminate and are removed when the Node is deleted\n`); return; }
   const deadline = Date.now() + timeoutMs;
   let last = -1;
@@ -2219,7 +2219,12 @@ async function cpDrainNode(ctx, nodeName, { log, timeoutMs = 20 * 60000 }) {
       try {
         await ocpPostJson(A, `/api/v1/namespaces/${encodeURIComponent(p.metadata.namespace)}/pods/${encodeURIComponent(p.metadata.name)}/eviction`, T,
           { apiVersion: 'policy/v1', kind: 'Eviction', metadata: { name: p.metadata.name, namespace: p.metadata.namespace } });
-      } catch (e) { if (e.status !== 429 && e.status !== 404) throw e; }   // 429: a PodDisruptionBudget refuses for now
+      } catch (e) {
+        // 429: a PodDisruptionBudget refuses for now. 5xx / network errors: the API server is briefly busy (a 4-member control
+        // plane settling) - try again on the next round instead of abandoning the drain with the node cordoned.
+        const transient = [429, 404, 500, 502, 503, 504].includes(e.status) || (!e.status && /ECONN|ETIMEDOUT|EAI_AGAIN|EPIPE|socket|TLS|timed? ?out/i.test(e.message || ''));
+        if (!transient) throw e;
+      }
     }
     await sleepMs(10000);
   }
@@ -2233,7 +2238,7 @@ async function cpRetireNode(ctx, target, g, emit) {
   if (!ctx.ionos) throw new Error('IONOS token / datacenter are required to delete the VM.');
   // 0. Everything that can fail cleanly must fail BEFORE the node is touched.
   step(`Retire ${short}: locating its VM`, 'working');
-  const servers = await ionosGet(`/datacenters/${encodeURIComponent(ctx.ionos.dc)}/servers?depth=3`, ctx.ionos.token);
+  const servers = await cpRetry(() => ionosGet(`/datacenters/${encodeURIComponent(ctx.ionos.dc)}/servers?depth=3`, ctx.ionos.token), { tries: 6, delayMs: 10000 });
   const srv = (servers.items || []).find(x => (x.entities?.nics?.items || []).some(nic => (nic.properties?.ips || []).includes(target.ip)));
   if (!srv) throw new Error(`No IONOS server with the IP ${target.ip} in datacenter ${ctx.ionos.dc}; ${n} was not touched.`);
   // A Cube's storage (DAS) goes with the server; only real block volumes are deleted separately.
@@ -2244,21 +2249,41 @@ async function cpRetireNode(ctx, target, g, emit) {
   step(`Retire ${short}: VM located`, 'ok');
 
   step(`Retire ${short}: cordon and drain`, 'working');
-  await cpDrainNode(ctx, n, { log });
+  try { await cpDrainNode(ctx, n, { log }); }
+  catch (e) {
+    // Nothing irreversible has happened yet: make the node schedulable again, so a cordon left behind does not keep API pods
+    // Pending and the master pool "updating" (which would block the next attempt's "cluster stable" check).
+    try { await cpRetry(() => ocpPatch(A, `/api/v1/nodes/${encodeURIComponent(n)}`, T, { spec: { unschedulable: false } }), { tries: 6, delayMs: 10000 }); log(`  ${short} uncordoned again after the failed drain\n`); } catch {}
+    throw new Error(`Drain of ${n} failed (${e.message}). The node was uncordoned again; nothing else was changed.`);
+  }
   step(`Retire ${short}: drained`, 'ok');
 
-  // A Cube cannot be stopped (IONOS VDC-5-1824 "The server of type Cube cannot be stopped"): it is suspended instead.
+  // A Cube cannot be stopped (IONOS VDC-5-1824 "The server of type Cube cannot be stopped"): try suspend. If IONOS refuses that
+  // too, the Cube is deleted instead (its DAS storage goes with it) - deleting the VM is its power-off. Either way the old etcd
+  // member is down BEFORE it is removed, as with a stopped VM.
   const isCube = srv.properties?.type === 'CUBE';
   const offStates = ['SHUTOFF', 'SUSPENDED'];
+  const srvPath = `/datacenters/${encodeURIComponent(ctx.ionos.dc)}/servers/${srv.id}`;
+  let vmDeleted = false;
   step(`Retire ${short}: powering the VM off${isCube ? ' (Cube: suspend)' : ''}`, 'working');
-  if (!offStates.includes(srv.properties?.vmState)) await ionosAction(`/datacenters/${encodeURIComponent(ctx.ionos.dc)}/servers/${srv.id}/${isCube ? 'suspend' : 'stop'}`, ctx.ionos.token);
-  for (let i = 0; i < 60; i++) {
-    const s = await ionosGet(`/datacenters/${encodeURIComponent(ctx.ionos.dc)}/servers/${srv.id}`, ctx.ionos.token);
-    if (offStates.includes(s.properties?.vmState)) break;
-    if (i === 59) throw new Error(`The VM did not power off. State: ${n} is cordoned and drained, its VM is still running; its etcd member is untouched.`);
+  if (!offStates.includes(srv.properties?.vmState)) {
+    try { await cpRetry(() => ionosAction(`${srvPath}/${isCube ? 'suspend' : 'stop'}`, ctx.ionos.token), { tries: 6, delayMs: 10000 }); }
+    catch (e) {
+      if (!isCube || !(e.status >= 400 && e.status < 500)) throw new Error(`The VM could not be powered off (${e.message}). State: ${n} is cordoned and drained, its VM is still running; its etcd member is untouched.`);
+      log(`  IONOS refused to suspend the Cube (${String(e.message).slice(0, 160)}): deleting it instead - a Cube's storage goes with it\n`);
+      await cpRetry(() => ionosDetach(srvPath, ctx.ionos.token), { tries: 6, delayMs: 10000 });
+      vmDeleted = true;
+    }
+  }
+  for (let i = 0; i < 72; i++) {
+    let s;
+    try { s = await cpRetry(() => ionosGet(srvPath, ctx.ionos.token), { tries: 4, delayMs: 5000 }); }
+    catch (e) { if (e.status === 404) break; throw e; }                     // deleted: gone is off
+    if (!vmDeleted && offStates.includes(s.properties?.vmState)) break;
+    if (i === 71) throw new Error(vmDeleted ? `The Cube ${srv.properties?.name} was not gone after 6 minutes; its etcd member is untouched.` : `The VM did not power off. State: ${n} is cordoned and drained, its VM is still running; its etcd member is untouched.`);
     await sleepMs(5000);
   }
-  step(`Retire ${short}: VM ${isCube ? 'suspended' : 'off'}`, 'ok');
+  step(`Retire ${short}: VM ${vmDeleted ? 'deleted (Cube)' : isCube ? 'suspended' : 'off'}`, 'ok');
 
   step(`Retire ${short}: removing its etcd member`, 'working');
   const out = await withMgmtSsh(ctx, async conn => {
@@ -2281,7 +2306,7 @@ async function cpRetireNode(ctx, target, g, emit) {
     }
     return { err: 'the member could not be removed after several attempts' };
   });
-  if (out.err) throw new Error(`Could not remove the etcd member (${out.err}). ${n} is drained and its VM is ${isCube ? 'SUSPENDED; resume' : 'OFF; start'} the VM again at IONOS to undo.`);
+  if (out.err) throw new Error(`Could not remove the etcd member (${out.err}). ` + (vmDeleted ? `${n} is drained and its Cube is deleted: remove its etcd member by hand (etcdctl member remove).` : `${n} is drained and its VM is ${isCube ? 'SUSPENDED; resume' : 'OFF; start'} the VM again at IONOS to undo.`));
   log(`  etcd: ${out.text}
 `);
   step(`Retire ${short}: etcd member removed`, 'ok');
@@ -2290,7 +2315,7 @@ async function cpRetireNode(ctx, target, g, emit) {
   for (const s of ['etcd-peer-', 'etcd-serving-', 'etcd-serving-metrics-']) {
     try { await ocpDelete(A, `/api/v1/namespaces/openshift-etcd/secrets/${s}${n}`, T); } catch (e) { if (e.status !== 404) throw e; }
   }
-  try { await ocpDelete(A, `/api/v1/nodes/${encodeURIComponent(n)}`, T); } catch (e) { if (e.status !== 404) throw e; }
+  try { await cpRetry(() => ocpDelete(A, `/api/v1/nodes/${encodeURIComponent(n)}`, T)); } catch (e) { if (e.status !== 404) throw e; }
   step(`Retire ${short}: Node deleted`, 'ok');
 
   step(`Retire ${short}: waiting for etcd and the operators to settle`, 'working');
@@ -2306,7 +2331,7 @@ async function cpRetireNode(ctx, target, g, emit) {
   step(`Retire ${short}: cluster settled (${cur.etcd.podsReady} etcd members)`, 'ok');
 
   step(`Retire ${short}: deleting the VM and its volumes at IONOS`, 'working');
-  try { await ionosDetach(`/datacenters/${encodeURIComponent(ctx.ionos.dc)}/servers/${srv.id}`, ctx.ionos.token); } catch (e) { if (e.status !== 404) throw e; }
+  if (!vmDeleted) { try { await cpRetry(() => ionosDetach(srvPath, ctx.ionos.token), { tries: 6, delayMs: 10000 }); } catch (e) { if (e.status !== 404) throw e; } }
   await ionosWaitAvailable(`/datacenters/${encodeURIComponent(ctx.ionos.dc)}`, ctx.ionos.token, 600000).catch(() => {});
   for (const v of volumes) {
     try { await ionosDetach(`/datacenters/${encodeURIComponent(ctx.ionos.dc)}/volumes/${v.id}`, ctx.ionos.token); log(`  deleted volume ${v.name} (${v.size || ''}GB)\n`); } catch (e) { if (e.status !== 404) throw e; }
