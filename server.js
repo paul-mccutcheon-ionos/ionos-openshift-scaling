@@ -1136,11 +1136,11 @@ const podReady     = p => p.status?.phase === 'Running' && (p.status?.containerS
 
 // The API server answers 429 "storage is (re)initializing", 5xx or times out for a while whenever etcd restarts or rolls a new
 // revision, which happens after every control-plane membership change. A long-running add/retire must ride that out, not abort.
-async function cpRetry(fn, { tries = 14, delayMs = 15000 } = {}) {
+async function cpRetry(fn, { tries = 14, delayMs = 15000, alsoRetry = null } = {}) {
   for (let i = 0; ; i++) {
     try { return await fn(); }
     catch (e) {
-      const transient = [429, 500, 502, 503, 504].includes(e.status) ||
+      const transient = [429, 500, 502, 503, 504].includes(e.status) || (alsoRetry && alsoRetry.test(e.message || '')) ||
         /HTTP 429|HTTP 50[0234]|storage is \(re\)initializing|ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|ECONNABORTED|EPIPE|socket hang up|socket disconnected|TLS connection|timed? ?out|TLS handshake|unexpected EOF|Unable to connect to the server|connection refused|leader/i.test(e.message || '');
       if (!transient || i >= tries - 1) throw e;
       await new Promise(r => setTimeout(r, delayMs));
@@ -2231,6 +2231,9 @@ async function cpDrainNode(ctx, nodeName, { log, timeoutMs = 20 * 60000 }) {
   throw new Error(`drain of ${nodeName} did not finish in ${Math.round(timeoutMs / 60000)} minutes (a PodDisruptionBudget or a stuck pod is holding it)`);
 }
 
+// A 401 right after a master went down is the API server failing to reach the oauth-apiserver to validate the token, not a bad token.
+const AUTH_FLAP = /returned 401|Unauthorized|must be logged in/i;
+
 // The whole retire. `emit.step/log` stream progress. Stops at the first problem and says exactly what state the node is in.
 async function cpRetireNode(ctx, target, g, emit) {
   const { step, log } = emit;
@@ -2287,7 +2290,9 @@ async function cpRetireNode(ctx, target, g, emit) {
 
   step(`Retire ${short}: removing its etcd member`, 'working');
   const out = await withMgmtSsh(ctx, async conn => {
-    const exec = c => cpRetry(() => sshRunScript(conn, `oc --token='${T}' --server='${A}' --insecure-skip-tls-verify=true -n openshift-etcd exec ${other.etcdPod.name} -c etcdctl -- ${c} 2>&1`), { tries: 12, delayMs: 15000 });
+    const exec = c => cpRetry(() => sshRunScript(conn, `oc --token='${T}' --server='${A}' --insecure-skip-tls-verify=true -n openshift-etcd exec ${other.etcdPod.name} -c etcdctl -- ${c} 2>&1`), { tries: 12, delayMs: 15000, alsoRetry: AUTH_FLAP });
+    // Unauthorized here is not a bad token (it was just used for the drain): with one master just powered off, the API server can
+    // briefly fail to validate the token against the oauth-apiserver replica that ran there, and answers 401. Try again.
     // Each call rides out a briefly unavailable API server (a down member makes it flap). If a removal went through but the reply was
     // lost, the next listing no longer contains the member, which counts as done.
     for (let attempt = 0; attempt < 4; attempt++) {
@@ -2313,9 +2318,9 @@ async function cpRetireNode(ctx, target, g, emit) {
 
   step(`Retire ${short}: deleting its etcd secrets and the Node`, 'working');
   for (const s of ['etcd-peer-', 'etcd-serving-', 'etcd-serving-metrics-']) {
-    try { await ocpDelete(A, `/api/v1/namespaces/openshift-etcd/secrets/${s}${n}`, T); } catch (e) { if (e.status !== 404) throw e; }
+    try { await cpRetry(() => ocpDelete(A, `/api/v1/namespaces/openshift-etcd/secrets/${s}${n}`, T), { alsoRetry: AUTH_FLAP }); } catch (e) { if (e.status !== 404) throw e; }
   }
-  try { await cpRetry(() => ocpDelete(A, `/api/v1/nodes/${encodeURIComponent(n)}`, T)); } catch (e) { if (e.status !== 404) throw e; }
+  try { await cpRetry(() => ocpDelete(A, `/api/v1/nodes/${encodeURIComponent(n)}`, T), { alsoRetry: AUTH_FLAP }); } catch (e) { if (e.status !== 404) throw e; }
   step(`Retire ${short}: Node deleted`, 'ok');
 
   step(`Retire ${short}: waiting for etcd and the operators to settle`, 'working');
@@ -2323,7 +2328,7 @@ async function cpRetireNode(ctx, target, g, emit) {
   let cur = null;
   while (Date.now() < deadline) {
     await sleepMs(15000);
-    cur = await cpRetry(() => cpGather(ctx));
+    cur = await cpRetry(() => cpGather(ctx), { alsoRetry: AUTH_FLAP });
     if (!cur.masters.some(m => m.name === n) && cur.etcd.membersAvailable && cur.etcd.podsReady === cur.etcd.pods && cur.etcd.pods === cur.masters.length && cur.operatorIssues.length === 0) break;
     cur = null;
   }
