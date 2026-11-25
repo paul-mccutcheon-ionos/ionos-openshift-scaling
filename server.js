@@ -1141,7 +1141,7 @@ async function cpRetry(fn, { tries = 14, delayMs = 15000 } = {}) {
     try { return await fn(); }
     catch (e) {
       const transient = [429, 500, 502, 503, 504].includes(e.status) ||
-        /HTTP 429|HTTP 50[0234]|storage is \(re\)initializing|ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|socket hang up|timed? ?out|TLS handshake|unexpected EOF|Unable to connect to the server|connection refused|leader/i.test(e.message || '');
+        /HTTP 429|HTTP 50[0234]|storage is \(re\)initializing|ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|ECONNABORTED|EPIPE|socket hang up|socket disconnected|TLS connection|timed? ?out|TLS handshake|unexpected EOF|Unable to connect to the server|connection refused|leader/i.test(e.message || '');
       if (!transient || i >= tries - 1) throw e;
       await new Promise(r => setTimeout(r, delayMs));
     }
@@ -1718,19 +1718,30 @@ app.post('/api/control-plane/add-indexed', async (req, res) => {
   res.on('close', () => clearInterval(keepAlive));
   try {
     step('Checking the cluster is ready…', 'working');
-    const g = await cpGather(ctx);
-    const checks = await cpChecks(ctx, g);
-    const blockers = checks.items.filter(i => i.status === 'block');
-    if (blockers.length) throw new Error('Not ready: ' + blockers.map(i => `${i.title} — ${i.detail}`).join(' | '));
-    const infra = await clusterInfraId(A, T);
+    const g = await cpRetry(() => cpGather(ctx));
+    const checks = await cpRetry(() => cpChecks(ctx, g));
+    const infra = await cpRetry(() => clusterInfraId(A, T));
     if (!infra) throw new Error('Could not read the cluster infrastructure name (infrastructure/cluster status.infrastructureName).');
     const re = cpIndexRe(infra);
     const usedIdx = new Set(g.masterMachines.map(m => (re.exec(m.name) || [])[1]).filter(x => x !== undefined).map(Number));
     const free = [0, 1, 2].filter(i => !usedIdx.has(i));
-    const count = Math.max(1, Math.min(free.length, parseInt(b.count, 10) || 1));
-    if (!free.length) throw new Error(`All three indexed control-plane Machines (${infra}-master-0/1/2) already exist. To move them to another machine type, use "4d Change the type of a managed control plane".`);
-    if (g.masters.length + count > CP_MAX_MEMBERS) throw new Error(`Would exceed ${CP_MAX_MEMBERS} control-plane nodes (${g.masters.length} now + ${count}).`);
-    step(`Cluster ready - infrastructure name ${infra}, free indexes ${free.join(', ')}`, 'ok');
+    // Swap resume: an indexed Machine that exists while the hand-built node with the same index is still there means an
+    // earlier run stopped part-way (e.g. a dropped connection). Pick it up first: no new create, wait for it, then retire.
+    const nodeIdx = m => { const x = /-(\d+)$/.exec(String(m.name).split('.')[0]); return x ? Number(x[1]) : null; };
+    const resume = swap ? [...usedIdx].filter(i => {
+      const mm = g.masterMachines.find(m => m.name === `${infra}-master-${i}`);
+      return mm && !['Failed', 'Deleting'].includes(mm.phase) && g.masters.some(n => !n.managed && nodeIdx(n) === i);
+    }).sort() : [];
+    const work = [...resume, ...free];
+    // While a resumed node is still joining, the cluster is legitimately unsettled; the wait loop below checks health itself.
+    const relax = resume.length ? ['cluster-stable', 'etcd-healthy'] : [];
+    const blockers = checks.items.filter(i => i.status === 'block' && !relax.includes(i.id));
+    if (blockers.length) throw new Error('Not ready: ' + blockers.map(i => `${i.title} — ${i.detail}`).join(' | '));
+    const count = Math.max(1, Math.min(work.length, parseInt(b.count, 10) || 1));
+    if (!work.length) throw new Error(`All three indexed control-plane Machines (${infra}-master-0/1/2) already exist. To move them to another machine type, use "4d Change the type of a managed control plane".`);
+    const extra = swap ? (resume.length ? 0 : 1) : count;
+    if (g.masters.length + extra > CP_MAX_MEMBERS) throw new Error(`Would exceed ${CP_MAX_MEMBERS} control-plane nodes (${g.masters.length} now + ${extra}).`);
+    step(`Cluster ready - infrastructure name ${infra}, ` + (resume.length ? `resuming index ${resume.join(', ')}, ` : '') + `free indexes ${free.join(', ') || 'none'}`, 'ok');
 
     // placement policy: identical on every machine, resolved per index by the provider
     const serverZone = b.serverZone || 'AUTO';
@@ -1790,16 +1801,21 @@ app.post('/api/control-plane/add-indexed', async (req, res) => {
     const say = (key, text) => { if (!seen.has(key)) { seen.add(key); log(text + '\n'); } };
     let lastEtcd = null;
     for (let n = 0; n < count; n++) {
-      const index = free[n];
+      const index = work[n];
       const name = `${infra}-master-${index}`;
       const label = `Node ${n + 1} of ${count} (${name})`;
-      step(`${label}: creating…`, 'working');
-      let exists = false;
-      try { await ocpGet(A, `${CP_MACHINES}/${name}`, T); exists = true; } catch (e) { if (e.status !== 404) throw e; }
-      if (exists) throw new Error(`Machine ${name} already exists.`);
       const startMs = Date.now();
-      await ocpApplyObj(A, T, CP_MACHINES, name, cpBuildIndexedMachine(infra, index, providerSpec, spec.regionLabel));
-      step(`${label}: Machine created`, 'ok');
+      if (resume.includes(index)) {
+        before.delete(name);   // its node may already be registered: count it as the new node of this step
+        step(`${label}: resuming - the Machine already exists, waiting for it to join`, 'ok');
+      } else {
+        step(`${label}: creating…`, 'working');
+        let exists = false;
+        try { await cpRetry(() => ocpGet(A, `${CP_MACHINES}/${name}`, T)); exists = true; } catch (e) { if (e.status !== 404) throw e; }
+        if (exists) throw new Error(`Machine ${name} already exists.`);
+        await ocpApplyObj(A, T, CP_MACHINES, name, cpBuildIndexedMachine(infra, index, providerSpec, spec.regionLabel));
+        step(`${label}: Machine created`, 'ok');
+      }
       step(`${label}: waiting for the VM, node and etcd member…`, 'working');
       const deadline = Date.now() + 40 * 60000;
       let stage = 'machine', polls = 0, joined = null;
